@@ -25,6 +25,7 @@ class Config {
     bool randomChanceOrder = false;
     bool itemsOnFinalTurn = false;
     float luckySpaceRatio = 0.0;
+    int[Space.Type] minSpaceCount;
     MiniGame[] blockedMiniGames;
     bool doubleCoinMiniGames = false;
     bool mpiqPermadeath = false;
@@ -69,7 +70,7 @@ class State {
         new PlayerState()
     ];
     ShuffleQueue!MiniGame[MiniGameType] miniGameQueue;
-    CustomSpace[] customSpaces;
+    CustomSpace[] spaces;
     ubyte[] usedBattleSpaces;
     string[] boardNames;
 }
@@ -150,7 +151,7 @@ union Player {
 }
 
 union Space {
-    static enum Type : ubyte {
+    static enum Type : byte {
         START     = 0x00,
         BLUE      = 0x01,
         RED       = 0x02,
@@ -171,6 +172,27 @@ union Space {
 
     ubyte[0x24] _data;
     mixin Field!(0x01, Type, "type");
+}
+
+enum CustomSpace : byte {
+    DEFAULT   =   -1,
+    START     = 0x00,
+    BLUE      = 0x01,
+    RED       = 0x02,
+    INVISIBLE = 0x03,
+    HAPPENING = 0x04,
+    CHANCE    = 0x05,
+    ITEM      = 0x06,
+    BANK      = 0x07,
+    INVIS_2   = 0x08,
+    BATTLE    = 0x09,
+    UNKNOWN_1 = 0x0A,
+    UNKNOWN_2 = 0x0B,
+    BOWSER    = 0x0C,
+    ARROW     = 0x0D,
+    STAR      = 0x0E,
+    GAME_GUY  = 0x0F,
+    LUCKY     = 0x10
 }
 
 union PlayerPanel {
@@ -591,7 +613,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             });
         }
 
-        if (config.luckySpaceRatio > 0) {
+        if (config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 || config.minSpaceCount.values.any!(v => v > 0)) {
             Ptr!Address luckySpaceTexturePtr = 0;
             Ptr!Address goldSpaceTexturePtr = 0;
             ubyte[] bSpaces, lSpaces, hSpaces;
@@ -606,7 +628,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
                 if (lumasPlaygroundHiddenIndex(index)) return true;
                 if (index >= data.spaceCount) return false;
                 if (data.spaces[index].type != Space.Type.BLUE) return false;
-                if (index < state.customSpaces.length && state.customSpaces[index] == CustomSpace.LUCKY) return false;
+                if (index < state.spaces.length && state.spaces[index] != CustomSpace.DEFAULT) return false;
                 static if (exclude != "item") {
                     if (index == data.itemHiddenBlock) return false;
                 }
@@ -671,42 +693,76 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             });
             data.currentScene.onWrite((ref Scene scene) { // Reset lucky spaces at start of game
                 if (scene == Scene.START_BOARD) {
-                    state.customSpaces.length = 0;
+                    state.spaces.length = 0;
                     state.players.each!(p => p.luckySpaceCount = 0);
                     saveState();
                 }
             });
+            0x800EA6F4.onExec({ // Space render function
+                if (!isBoardScene()) return;
+
+                if (data.spaceCount > state.spaces.length) {
+                    state.spaces.length = data.spaceCount;
+                    auto blueSpaces = iota(data.spaceCount).filter!(e => data.spaces[e].type == Space.Type.BLUE).array;
+
+                    foreach (type, count; config.minSpaceCount) {
+                        count -= iota(data.spaceCount).count!(e => data.spaces[e].type == type)
+                               + blueSpaces.count!(i => state.spaces[i] == cast(CustomSpace)type);
+                        if (count <= 0) continue;
+
+                        blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
+                                  .array.randomShuffle(random)[0..min(count, $)]
+                                  .each!((i) { data.spaces[i].type = type; state.spaces[i] = cast(CustomSpace)type; });
+                    }
+
+                    long luckyCount = roundTo!long(blueSpaces.length * min(config.luckySpaceRatio, 1.0))
+                                    - blueSpaces.count!(i => state.spaces[i] == CustomSpace.LUCKY);
+                    if (luckyCount > 0) {
+                        blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
+                                  .array.randomShuffle(random)[0..min(luckyCount, $)]
+                                  .each!(i => state.spaces[i] = CustomSpace.LUCKY);
+                    }
+
+                    saveState();
+                }
+            });
+
+            0x800EAEF4.onExec({
+                if (!isBoardScene()) return;
+                if (gpr.s2 >= state.spaces.length) return;
+                if (state.spaces[gpr.s2] == CustomSpace.DEFAULT) return;
+                if (state.spaces[gpr.s2] > Space.Type.max) return;
+                if (gpr.v0 == Space.Type.STAR) return;
+
+                gpr.v0 = state.spaces[gpr.s2];
+            });
+
             0x800EAC74.onExec({ // Display lucky spaces on board
                 if (!isBoardScene()) return;
-                if (gpr.s3 == Space.Type.BLUE && gpr.s2 == 0) { // Cache blue and lucky space lists
-                    auto blueSpaces = iota(data.spaceCount).filter!(e => data.spaces[e].type == Space.Type.BLUE).array;
-                    state.customSpaces.length = data.spaceCount;
-                    long newLuckyCount = roundTo!long(blueSpaces.length * min(config.luckySpaceRatio, 1.0))
-                                       - state.customSpaces.count!(e => e == CustomSpace.LUCKY);
-                    auto newBlues = blueSpaces.filter!(e => state.customSpaces[e] == CustomSpace.NORMAL).array.randomShuffle(random);
-                    if (!newBlues.empty) {
-                        newBlues.each!((i, e) => state.customSpaces[e] = (i < newLuckyCount ? CustomSpace.LUCKY : CustomSpace.BLUE));
-                        saveState();
-                    }
-                    bSpaces.length = 0;
-                    lSpaces.length = 0;
-                    hSpaces.length = 0;
-                    foreach (i; blueSpaces) {
-                        if (data.currentTurn + config.revealHiddenBlocksOnRemainingTurns > data.totalTurns &&
-                           (i == data.itemHiddenBlock || i == data.coinHiddenBlock || i == data.starHiddenBlock)) {
-                            hSpaces ~= cast(ubyte)i;
-                        } else if (state.customSpaces[i] == CustomSpace.LUCKY) {
-                            lSpaces ~= cast(ubyte)i;
-                        } else {
-                            bSpaces ~= cast(ubyte)i;
-                        }
-                    }
+
+                if (gpr.s3 == Space.Type.BLUE && gpr.s2 == 0) {
                     if (config.revealHiddenBlocksOnRemainingTurns > 0) {
                         if (!validHiddenIndex!"item"(data.itemHiddenBlock)) data.itemHiddenBlock = randomHiddenIndex();
                         if (!validHiddenIndex!"coin"(data.coinHiddenBlock)) data.coinHiddenBlock = randomHiddenIndex();
                         if (!validHiddenIndex!"star"(data.starHiddenBlock)) data.starHiddenBlock = randomHiddenIndex();
                     }
+
+                    bSpaces.length = 0;
+                    lSpaces.length = 0;
+                    hSpaces.length = 0;
+                    auto blueSpaces = iota(data.spaceCount).filter!(e => data.spaces[e].type == Space.Type.BLUE).array;
+                    foreach (i; blueSpaces) {
+                        if (data.currentTurn + config.revealHiddenBlocksOnRemainingTurns > data.totalTurns &&
+                           (i == data.itemHiddenBlock || i == data.coinHiddenBlock || i == data.starHiddenBlock)) {
+                            hSpaces ~= cast(ubyte)i;
+                        } else if (state.spaces[i] == CustomSpace.LUCKY) {
+                            lSpaces ~= cast(ubyte)i;
+                        } else {
+                            bSpaces ~= cast(ubyte)i;
+                        }
+                    }
                 }
+
                 if (gpr.s3 == Space.Type.BLUE) {
                     gpr.a0 = (gpr.s2 < bSpaces.length ? bSpaces[gpr.s2] : 0xFF);
                 } else if (gpr.s3 == Space.Type.UNKNOWN_1) {
@@ -717,7 +773,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             });
             0x800FD774.onExec({ // Increment lucky space count
                 if (!isBoardScene()) return;
-                if (state.customSpaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
+                if (state.spaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
                 if (data.spaces[data.currentSpaceIndex].type != Space.Type.BLUE) return;
 
                 gpr.v0--;
@@ -727,7 +783,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             });
             0x800FE258.onExec({ // Land on lucky space
                 if (!isBoardScene()) return;
-                if (state.customSpaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
+                if (state.spaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
                 if (data.spaces[data.currentSpaceIndex].type != Space.Type.BLUE) return;
 
                 if (uniform!"[]"(1, 3, random) == 1) {
@@ -736,7 +792,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             });
             data.blueOrRedSpaceCoins.addr.onExec({ // Give extra coins on lucky space
                 if (!isBoardScene()) return;
-                if (state.customSpaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
+                if (state.spaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
                 if (data.spaces[data.currentSpaceIndex].type != Space.Type.BLUE) return;
 
                 switch (gpr.s0) {
@@ -747,7 +803,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             });
             0x800FE478.onExec({ // Force Toad or Baby Bowser on lucky space
                 if (!isBoardScene()) return;
-                if (state.customSpaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
+                if (state.spaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
                 if (data.spaces[data.currentSpaceIndex].type != Space.Type.BLUE) return;
                 
                 gpr.v0 = uniform!"[]"(0, 1, random);
@@ -994,12 +1050,6 @@ extern (C) {
 
         return 0;
     }
-}
-
-enum CustomSpace : byte {
-    NORMAL = 0,
-    BLUE   = 1,
-    LUCKY  = 2
 }
 
 enum Item : byte {
@@ -1288,12 +1338,12 @@ bool isValid(Item item) {
     return Item.MUSHROOM <= item && item <= Item.WACKY_WATCH;
 }
 
-bool isCommon(Item item) {
-    return Item.MUSHROOM <= item && item <= Item.MAGIC_LAMP;
-}
-
 bool isRare(Item item) {
     return Item.KOOPA_KARD <= item && item <= Item.WACKY_WATCH;
+}
+
+bool isCommon(Item item) {
+    return isValid(item) && !isRare(item);
 }
 
 immutable ubyte[] LUCKY_SPACE_TEXTURE = [

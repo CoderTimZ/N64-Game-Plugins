@@ -63,7 +63,7 @@ class State {
     ShuffleQueue!MiniGame[MiniGameType] miniGameQueue;
     ShuffleQueue!Board itemGameQueue;
     ShuffleQueue!Board duelGameQueue;
-    Space.Type[] spaces;
+    CustomSpace[] spaces;
 }
 
 union Chain {
@@ -73,7 +73,6 @@ union Chain {
 
 union Space {
     static enum Type : byte {
-        UNDEFINED   = -1,
         START       =  0,
         BLUE        =  1,
         RED         =  2,
@@ -91,15 +90,36 @@ union Space {
         STAR        = 14,
         BLACK_STAR  = 15,
         TOAD        = 16,
-        BABY_BOWSER = 17,
-        // New Spaces
-        LUCKY       = 18,
-      //HIDDEN      = 19
+        BABY_BOWSER = 17
     }
 
     ubyte[36] _data;
     mixin Field!(0x01, Type, "type");
     mixin Field!(0x20, Ptr!Event, "eventPtr");
+}
+
+enum CustomSpace : byte {
+    DEFAULT     = -1,
+    START       =  0,
+    BLUE        =  1,
+    RED         =  2,
+    INVIS_1     =  3,
+    HAPPENING   =  4,
+    CHANCE      =  5,
+    ITEM        =  6,
+    BANK        =  7,
+    INVIS_2     =  8,
+    BATTLE      =  9,
+    UNKNOWN_1   = 10,
+    UNKNOWN_2   = 11,
+    BOWSER      = 12,
+    ARROW       = 13,
+    STAR        = 14,
+    BLACK_STAR  = 15,
+    TOAD        = 16,
+    BABY_BOWSER = 17,
+    LUCKY       = 18,
+//  HIDDEN      = 19
 }
 
 union Event {
@@ -329,9 +349,9 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
             auto selectSpaceTexture = {
                 if (!isBoardScene()) return;
                 switch (gpr.s4) {
-                    case Space.Type.LUCKY:  gpr.v0 = luckySpaceTexturePtr; break;
-                    //case Space.Type.HIDDEN: gpr.v0 = goldSpaceTexturePtr;  break;
-                    default:                                               break;
+                    case CustomSpace.LUCKY:  gpr.v0 = luckySpaceTexturePtr; break;
+//                  case CustomSpace.HIDDEN: gpr.v0 = goldSpaceTexturePtr;  break;
+                    default:                                                break;
                 }
             };
             0x800540B0.onExec({ // Force high res space textures on full map view
@@ -344,13 +364,13 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
                 if (!isBoardScene()) return;
                 if (gpr.v0 != Space.Type.BLUE) return;
                 if (gpr.s2 >= state.spaces.length) return;
-                if (state.spaces[gpr.s2] == Space.Type.LUCKY) {
-                    gpr.v0 = Space.Type.LUCKY;
+                if (state.spaces[gpr.s2] == CustomSpace.LUCKY) {
+                    gpr.v0 = CustomSpace.LUCKY;
                 }
             });
             0x80054810.onExec({
                 if (!isBoardScene()) return;
-                gpr.v0 = (gpr.s4 <= Space.Type.max);
+                gpr.v0 = (gpr.s4 <= CustomSpace.max);
             });
             
             0x800557C8.onExecDone({ // Trigger Space
@@ -359,7 +379,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
                 if (gpr.s3 != 3) return;
                 if (gpr.s1) return; // Space already has an event defined
                 if (gpr.s0 >= state.spaces.length) return;
-                if (state.spaces[gpr.s0] != Space.Type.LUCKY) return;
+                if (state.spaces[gpr.s0] != CustomSpace.LUCKY) return;
                 if (itemsFull(currentPlayer) || uniform!"[]"(0, 1, random)) return;
 
                 0x800662F0.onExecOnce({ gpr.v0 = 1; }); // Skip giving coins
@@ -417,7 +437,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
                 auto i = getSpaceIndex(currentPlayer);
                 if (data.spaces[i].type != Space.Type.BLUE) return;
                 if (i >= state.spaces.length) return;
-                if (state.spaces[i] != Space.Type.LUCKY) return;
+                if (state.spaces[i] != CustomSpace.LUCKY) return;
 
                 if (data.currentTurn <= data.totalTurns - 5) {
                     gpr.s0 = [7, 10, 12, 15, 20].choice(random);
@@ -765,7 +785,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
                 }
             });
 
-            0x800542FC.onExec({
+            0x800542FC.onExec({ // Space render function
                 if (!isBoardScene()) return;
 
                 if (data.spaceCount > state.spaces.length) {
@@ -773,27 +793,27 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
                     auto blueSpaces = iota(data.spaceCount).filter!(i => data.spaces[i].type == Space.Type.BLUE).array;
 
                     long chanceCount = config.extraChanceSpaces
-                                     - blueSpaces.count!(i => state.spaces[i] == Space.Type.CHANCE);
+                                     - blueSpaces.count!(i => state.spaces[i] == CustomSpace.CHANCE);
                     if (chanceCount > 0) {
-                        blueSpaces.filter!(i => state.spaces[i] == Space.Type.UNDEFINED)
+                        blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
                                   .array.randomShuffle(random)[0..min(chanceCount, $)]
-                                  .each!(i => data.spaces[i].type = state.spaces[i] = Space.Type.CHANCE);
+                                  .each!((i) { data.spaces[i].type = Space.Type.CHANCE; state.spaces[i] = CustomSpace.CHANCE; });
                     }
 
                     long itemCount = roundTo!long(blueSpaces.length * min(config.itemSpaceRatio, 1.0))
-                                   - blueSpaces.count!(i => state.spaces[i] == Space.Type.ITEM);
+                                   - blueSpaces.count!(i => state.spaces[i] == CustomSpace.ITEM);
                     if (itemCount > 0) {
-                        blueSpaces.filter!(i => state.spaces[i] == Space.Type.UNDEFINED)
+                        blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
                                   .array.randomShuffle(random)[0..min(itemCount, $)]
-                                  .each!(i => data.spaces[i].type = state.spaces[i] = Space.Type.ITEM);
+                                  .each!((i) { data.spaces[i].type = Space.Type.ITEM; state.spaces[i] = CustomSpace.ITEM; });
                     }
 
                     long luckyCount = roundTo!long(blueSpaces.length * min(config.luckySpaceRatio, 1.0))
-                                    - blueSpaces.count!(i => state.spaces[i] == Space.Type.LUCKY);
+                                    - blueSpaces.count!(i => state.spaces[i] == CustomSpace.LUCKY);
                     if (luckyCount > 0) {
-                        blueSpaces.filter!(i => state.spaces[i] == Space.Type.UNDEFINED)
+                        blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
                                   .array.randomShuffle(random)[0..min(luckyCount, $)]
-                                  .each!(i => state.spaces[i] = Space.Type.LUCKY);
+                                  .each!(i => state.spaces[i] = CustomSpace.LUCKY);
                     }
 
                     saveState();
@@ -803,9 +823,9 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
             0x80054940.onExec({
                 if (!isBoardScene()) return;
                 if (gpr.s2 >= state.spaces.length) return;
-                if (state.spaces[gpr.s2] == Space.Type.UNDEFINED) return;
+                if (state.spaces[gpr.s2] == CustomSpace.DEFAULT) return;
+                if (state.spaces[gpr.s2] > Space.Type.max) return;
                 if (gpr.v0 == Space.Type.STAR || gpr.v0 == Space.Type.BLACK_STAR) return;
-                if (state.spaces[gpr.s2] > Space.Type.BABY_BOWSER) return;
 
                 gpr.v0 = state.spaces[gpr.s2];
             });
@@ -815,7 +835,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
                 auto i = getSpaceIndex(currentPlayer);
                 if (data.spaces[i].type != Space.Type.BLUE) return;
                 if (i >= state.spaces.length) return;
-                if (state.spaces[i] != Space.Type.LUCKY) return;
+                if (state.spaces[i] != CustomSpace.LUCKY) return;
 
                 gpr.v0--;
                 currentPlayer.state.luckySpaceCount++;
