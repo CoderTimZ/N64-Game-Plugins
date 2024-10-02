@@ -460,7 +460,6 @@ union InputData {
 
 interface Plugin {
     void loadConfig();
-    void saveConfig();
     void onStart();
     void onInput(int, InputData*);
     void onFrame(ulong);
@@ -469,11 +468,43 @@ interface Plugin {
 
 final class NoState { }
 
+static T loadJson(T)(string filename) {
+    try {
+        T json = readText(filename).parseJSON().fromJSON!T();
+        if (!json) json = new T;
+        json.saveJson(filename);
+        return json;
+    } catch (JSONException e) {
+        auto msg = filename ~ ": " ~ e.message;
+        error("[" ~ e.classinfo.name ~ "] " ~ msg);
+        MessageBoxA(window, msg.toStringz, e.classinfo.name.toStringz, MB_ICONEXCLAMATION);
+        return null;
+    } catch (Exception e) {
+        warning("[" ~ e.classinfo.name ~ "] " ~ e.message);
+        T json = new T;
+        json.saveJson(filename);
+        return json;
+    }
+}
+
+static void saveJson(T)(T json, string filename) {
+    static if (!is(T == NoState)) {
+        try {
+            std.file.write(filename, json.toJSON().toPrettyString().lossyFloats());
+        } catch (Exception e) {
+            auto msg = filename ~ ": " ~ e.message;
+            error("[" ~ e.classinfo.name ~ "] " ~ msg);
+            MessageBoxA(window, msg.toStringz, e.classinfo.name.toStringz, MB_ICONEXCLAMATION);
+        }
+    }
+}
+
 abstract class Game(ConfigType, StateType = NoState) : Plugin {
     string romName;
     string romHash;
     ConfigType config;
     StateType state;
+    bool stateError;
 
     this(string romName, string romHash) {
         this.romName = romName;
@@ -481,44 +512,39 @@ abstract class Game(ConfigType, StateType = NoState) : Plugin {
     }
 
     void loadConfig() {
-        try {
-            config = readText(romName ~ ".json").parseJSON().fromJSON!ConfigType();
-        } catch (FileException e) {
-            config = new ConfigType;
-        }
-    }
-
-    void saveConfig() {
-        std.file.write(romName ~ ".json", config.toJSON().toPrettyString().lossyFloats());
+        config = loadJson!ConfigType(romName ~ ".json");
+        if (!config) config = new ConfigType;
     }
 
     void loadState() {
         static if (!is(StateType == NoState)) {
-            try {
-                state = readText(romName ~ "-State.json").parseJSON().fromJSON!StateType();
-            } catch (FileException e) {
+            state = loadJson!StateType(romName ~ "-State.json");
+            if (state) {
+                stateError = false;
+            } else {
                 state = new StateType;
+                stateError = true;
             }
         }
     }
 
     void saveState() {
         static if (!is(StateType == NoState)) {
-            std.file.write(romName ~ "-State.json", state.toJSON().toPrettyString().lossyFloats());
+            state.saveJson(romName ~ "-State.json");
+            stateError = false;
         }
     }
 
     void onStart() {
         loadConfig();
-        saveConfig();
-        
         loadState();
-        saveState();
     }
     void onInput(int, InputData*) { }
     void onFrame(ulong) { }
     void onFinish() {
-        saveState();
+        if (!stateError) {
+            saveState();
+        }
     }
 }
 
@@ -651,6 +677,13 @@ void info(T...)(T args) {
     msg(MSG_LEVEL.INFO, args);
     version (Windows) { } else {
         stdout.writeln(args);
+    }
+}
+
+void warning(T...)(T args) {
+    msg(MSG_LEVEL.WARNING, args);
+    version (Windows) { } else {
+        stderr.writeln(args);
     }
 }
 
