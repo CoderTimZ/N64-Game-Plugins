@@ -93,7 +93,7 @@ union Space {
         BABY_BOWSER = 17
     }
 
-    ubyte[36] _data;
+    ubyte[0x24] _data;
     mixin Field!(0x01, Type, "type");
     mixin Field!(0x20, Ptr!Event, "eventPtr");
 }
@@ -282,170 +282,6 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
 
     override void onStart() {
         super.onStart();
-
-        if (config.luckySpaceRatio > 0) {
-            immutable ITEM_WEIGHTS_EARLY = [
-                Item.MUSHROOM:        22,
-                Item.SKELETON_KEY:     9,
-                Item.PLUNDER_CHEST:    7,
-                Item.BOWSER_BOMB:      4,
-                Item.DUELING_GLOVE:    7,
-                Item.WARP_BLOCK:      15,
-                Item.GOLDEN_MUSHROOM: 12,
-                Item.BOO_BELL:         8,
-                Item.BOWSER_SUIT:     10,
-                Item.MAGIC_LAMP:       6
-            ];
-
-            immutable ITEM_WEIGHTS_MID = [
-                Item.MUSHROOM:        18,
-                Item.SKELETON_KEY:    10,
-                Item.PLUNDER_CHEST:    9,
-                Item.BOWSER_BOMB:      4,
-                Item.DUELING_GLOVE:    9,
-                Item.WARP_BLOCK:      10,
-                Item.GOLDEN_MUSHROOM: 15,
-                Item.BOO_BELL:         9,
-                Item.BOWSER_SUIT:      9,
-                Item.MAGIC_LAMP:       7
-            ];
-
-            immutable ITEM_WEIGHTS_END = [
-                Item.MUSHROOM:        13,
-                Item.SKELETON_KEY:     8,
-                Item.PLUNDER_CHEST:    7,
-                Item.BOWSER_BOMB:      4,
-                Item.DUELING_GLOVE:   12,
-                Item.WARP_BLOCK:       7,
-                Item.GOLDEN_MUSHROOM: 18,
-                Item.BOO_BELL:        13,
-                Item.BOWSER_SUIT:      7,
-                Item.MAGIC_LAMP:      11
-            ];
-
-            Ptr!Address luckySpaceTexturePtr = 0;
-            //Ptr!Address goldSpaceTexturePtr = 0;
-
-            0x80077AA8.onExecDone({ // Finish making temp heap
-                luckySpaceTexturePtr = 0;
-                //goldSpaceTexturePtr = 0;
-                if (!isBoardScene()) return;
-
-                mallocTemp(LUCKY_SPACE_TEXTURE.length + 0x10, (ptr) {
-                    LUCKY_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
-                    luckySpaceTexturePtr = ptr;
-
-                    /*
-                    if (config.revealHiddenBlocksOnFinalTurn) {
-                        mallocTemp(GOLD_SPACE_TEXTURE.length + 0x10, (ptr) {
-                            GOLD_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
-                            goldSpaceTexturePtr = ptr;
-                        });
-                    }
-                    */
-                });
-            });
-
-            auto selectSpaceTexture = {
-                if (!isBoardScene()) return;
-                switch (gpr.s4) {
-                    case CustomSpace.LUCKY:  gpr.v0 = luckySpaceTexturePtr; break;
-//                  case CustomSpace.HIDDEN: gpr.v0 = goldSpaceTexturePtr;  break;
-                    default:                                                break;
-                }
-            };
-            0x800540B0.onExec({ // Force high res space textures on full map view
-                if (!isBoardScene()) return;
-                gpr.a0 = false;
-            });
-            0x80054460.onExecDone(selectSpaceTexture);
-            0x8005448C.onExecDone(selectSpaceTexture);
-            0x800546B4.onExecDone({
-                if (!isBoardScene()) return;
-                if (gpr.v0 != Space.Type.BLUE) return;
-                if (gpr.s2 >= state.spaces.length) return;
-                if (state.spaces[gpr.s2] == CustomSpace.LUCKY) {
-                    gpr.v0 = CustomSpace.LUCKY;
-                }
-            });
-            0x80054810.onExec({
-                if (!isBoardScene()) return;
-                gpr.v0 = (gpr.s4 <= CustomSpace.max);
-            });
-            
-            0x800557C8.onExecDone({ // Trigger Space
-                if (!isBoardScene()) return;
-                if (data.spaces[gpr.s0].type != Space.Type.BLUE) return;
-                if (gpr.s3 != 3) return;
-                if (gpr.s1) return; // Space already has an event defined
-                if (gpr.s0 >= state.spaces.length) return;
-                if (state.spaces[gpr.s0] != CustomSpace.LUCKY) return;
-                if (itemsFull(currentPlayer) || uniform!"[]"(0, 1, random)) return;
-
-                0x800662F0.onExecOnce({ gpr.v0 = 1; }); // Skip giving coins
-                gpr.ra.onExecOnce({ clearExecOnce(0x800662F0); });
-
-                if (data.currentScene !in itemShopRoutines) {
-                    auto result = searchMemory([
-                        0x27BDFF90, 0xAFBF0068, 0xAFB50064, 0xAFB40060,
-                        0xAFB3005C, 0xAFB20058, 0xAFB10054, 0xAFB00050,
-                        0x3C148010, 0x269493A8, 0x0C01770F, 0x2404FFFF,
-                        0x0040A821, 0x3C038010, 0x846393C6, 0x24020004,
-                        0x10620169, 0x2404FFFF, 0x2405FFFF, 0x0C01775A
-                    ]);
-                    itemShopRoutines[data.currentScene] = (result.empty ? 0 : result.front);
-                }
-                Address routine = itemShopRoutines[data.currentScene];
-                if (!routine) return;
-
-                auto result = iota(data.spaceCount).map!(i => data.spaces[i].eventPtr).find!(e => e && (*e).routine == routine);
-                if (result.empty) return;
-                gpr.s1 = result.front;
-
-                0x800557F0.onExecOnce({ gpr.v0 = 3; });
-
-                routine.onExecOnce({
-                    (routine + 0x048).onExecOnce({ jump(routine + 0x06C); }); // Skip look at shop animation
-                    (routine + 0x10C).onExecOnce({ jump(routine + 0x404); }); // Skip message box
-                    (routine + 0x414).onExecOnce({ jump(routine + 0x418); });
-                    (routine + 0x414).onExecOnce({
-                        Item item;
-                        if (data.currentTurn <= data.totalTurns / 3) {
-                            item = weighted(ITEM_WEIGHTS_EARLY, random);
-                        } else if (data.currentTurn <= data.totalTurns * 2 / 3) {
-                            item = weighted(ITEM_WEIGHTS_MID, random);
-                        } else {
-                            item = weighted(ITEM_WEIGHTS_END, random);
-                        }
-                        gpr.v0 = item; // Give random item
-                        if (config.carryThreeItems) {
-                            currentPlayer.state.items ~= item;
-                        } else {
-                            currentPlayer.data.item = item;
-                        }
-                    });
-                    gpr.ra.onExecOnce({
-                        clearExecOnce(routine + 0x048);
-                        clearExecOnce(routine + 0x10C);
-                        clearExecOnce(routine + 0x414);
-                    });
-                });
-            });
-
-            0x80066318.onExec({
-                if (!isBoardScene()) return;
-                auto i = getSpaceIndex(currentPlayer);
-                if (data.spaces[i].type != Space.Type.BLUE) return;
-                if (i >= state.spaces.length) return;
-                if (state.spaces[i] != CustomSpace.LUCKY) return;
-
-                if (data.currentTurn <= data.totalTurns - 5) {
-                    gpr.s0 = [7, 10, 12, 15, 20].choice(random);
-                } else {
-                    gpr.s0 =        [12, 15, 20].choice(random);
-                }
-            });
-        }
 
         if (config.preventRepeatMiniGames || config.blockedMiniGames.length > 0) {
             data.currentScene.onWrite((ref Scene scene) {
@@ -777,14 +613,101 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
         }
 
         if (config.itemSpaceRatio > 0 || config.luckySpaceRatio > 0 || config.extraChanceSpaces > 0) {
-            data.currentScene.onWrite((ref Scene scene) {
-                if (scene == Scene.START_BOARD) {
-                    state.spaces = [];
-                    state.players.each!(p => p.luckySpaceCount = 0);
-                    saveState();
-                }
+            immutable ITEM_WEIGHTS_EARLY = [
+                Item.MUSHROOM:        22,
+                Item.SKELETON_KEY:     9,
+                Item.PLUNDER_CHEST:    7,
+                Item.BOWSER_BOMB:      4,
+                Item.DUELING_GLOVE:    7,
+                Item.WARP_BLOCK:      15,
+                Item.GOLDEN_MUSHROOM: 12,
+                Item.BOO_BELL:         8,
+                Item.BOWSER_SUIT:     10,
+                Item.MAGIC_LAMP:       6
+            ];
+
+            immutable ITEM_WEIGHTS_MID = [
+                Item.MUSHROOM:        18,
+                Item.SKELETON_KEY:    10,
+                Item.PLUNDER_CHEST:    9,
+                Item.BOWSER_BOMB:      4,
+                Item.DUELING_GLOVE:    9,
+                Item.WARP_BLOCK:      10,
+                Item.GOLDEN_MUSHROOM: 15,
+                Item.BOO_BELL:         9,
+                Item.BOWSER_SUIT:      9,
+                Item.MAGIC_LAMP:       7
+            ];
+
+            immutable ITEM_WEIGHTS_END = [
+                Item.MUSHROOM:        13,
+                Item.SKELETON_KEY:     8,
+                Item.PLUNDER_CHEST:    7,
+                Item.BOWSER_BOMB:      4,
+                Item.DUELING_GLOVE:   12,
+                Item.WARP_BLOCK:       7,
+                Item.GOLDEN_MUSHROOM: 18,
+                Item.BOO_BELL:        13,
+                Item.BOWSER_SUIT:      7,
+                Item.MAGIC_LAMP:      11
+            ];
+
+            Ptr!Address luckySpaceTexturePtr = 0;
+//          Ptr!Address goldSpaceTexturePtr  = 0;
+
+            0x80077AA8.onExecDone({ // Finish making temp heap
+                luckySpaceTexturePtr = 0;
+                //goldSpaceTexturePtr = 0;
+                if (!isBoardScene()) return;
+
+                mallocTemp(LUCKY_SPACE_TEXTURE.length + 0x10, (ptr) {
+                    LUCKY_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
+                    luckySpaceTexturePtr = ptr;
+
+                    /*
+                    if (config.revealHiddenBlocksOnFinalTurn) {
+                        mallocTemp(GOLD_SPACE_TEXTURE.length + 0x10, (ptr) {
+                            GOLD_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
+                            goldSpaceTexturePtr = ptr;
+                        });
+                    }
+                    */
+                });
             });
 
+            0x800540B0.onExec({ // Force high res space textures on full map view
+                if (!isBoardScene()) return;
+                gpr.a0 = false;
+            });
+            auto selectSpaceTexture = {
+                if (!isBoardScene()) return;
+                switch (gpr.s4) {
+                    case CustomSpace.LUCKY:  gpr.v0 = luckySpaceTexturePtr; break;
+//                  case CustomSpace.HIDDEN: gpr.v0 = goldSpaceTexturePtr;  break;
+                    default:                                                break;
+                }
+            };
+            0x80054460.onExecDone(selectSpaceTexture);
+            0x8005448C.onExecDone(selectSpaceTexture);
+            0x800546B4.onExecDone({
+                if (!isBoardScene()) return;
+                if (gpr.v0 != Space.Type.BLUE) return;
+                if (gpr.s2 >= state.spaces.length) return;
+                if (state.spaces[gpr.s2] == CustomSpace.LUCKY) {
+                    gpr.v0 = CustomSpace.LUCKY;
+                }
+            });
+            0x80054810.onExec({
+                if (!isBoardScene()) return;
+                gpr.v0 = (gpr.s4 <= CustomSpace.max);
+            });
+            data.currentScene.onWrite((ref Scene scene) { // Reset lucky spaces at start of game
+                if (scene != Scene.START_BOARD) return;
+                
+                state.spaces.length = 0;
+                state.players.each!(p => p.luckySpaceCount = 0);
+                saveState();
+            });
             0x800542FC.onExec({ // Space render function
                 if (!isBoardScene()) return;
 
@@ -819,7 +742,6 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
                     saveState();
                 }
             });
-
             0x80054940.onExec({
                 if (!isBoardScene()) return;
                 if (gpr.s2 >= state.spaces.length) return;
@@ -829,7 +751,6 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
 
                 gpr.v0 = state.spaces[gpr.s2];
             });
-
             0x80065AA4.onExec({ // Increment lucky space count
                 if (!isBoardScene()) return;
                 auto i = getSpaceIndex(currentPlayer);
@@ -842,7 +763,77 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
 
                 saveState();
             });
+            0x800557C8.onExecDone({ // Trigger lucky space
+                if (!isBoardScene()) return;
+                if (data.spaces[gpr.s0].type != Space.Type.BLUE) return;
+                if (gpr.s3 != 3) return;
+                if (gpr.s1) return; // Space already has an event defined
+                if (gpr.s0 >= state.spaces.length) return;
+                if (state.spaces[gpr.s0] != CustomSpace.LUCKY) return;
+                if (itemsFull(currentPlayer) || uniform!"[]"(0, 1, random)) return;
 
+                0x800662F0.onExecOnce({ gpr.v0 = 1; }); // Skip giving coins
+                gpr.ra.onExecOnce({ clearExecOnce(0x800662F0); });
+
+                if (data.currentScene !in itemShopRoutines) {
+                    auto result = searchMemory([
+                        0x27BDFF90, 0xAFBF0068, 0xAFB50064, 0xAFB40060,
+                        0xAFB3005C, 0xAFB20058, 0xAFB10054, 0xAFB00050,
+                        0x3C148010, 0x269493A8, 0x0C01770F, 0x2404FFFF,
+                        0x0040A821, 0x3C038010, 0x846393C6, 0x24020004,
+                        0x10620169, 0x2404FFFF, 0x2405FFFF, 0x0C01775A
+                    ]);
+                    itemShopRoutines[data.currentScene] = (result.empty ? 0 : result.front);
+                }
+                Address routine = itemShopRoutines[data.currentScene];
+                if (!routine) return;
+
+                auto result = iota(data.spaceCount).map!(i => data.spaces[i].eventPtr).find!(e => e && (*e).routine == routine);
+                if (result.empty) return;
+                gpr.s1 = result.front;
+
+                0x800557F0.onExecOnce({ gpr.v0 = 3; });
+
+                routine.onExecOnce({
+                    (routine + 0x048).onExecOnce({ jump(routine + 0x06C); }); // Skip look at shop animation
+                    (routine + 0x10C).onExecOnce({ jump(routine + 0x404); }); // Skip message box
+                    (routine + 0x414).onExecOnce({ jump(routine + 0x418); });
+                    (routine + 0x414).onExecOnce({
+                        Item item;
+                        if (data.currentTurn <= data.totalTurns / 3) {
+                            item = weighted(ITEM_WEIGHTS_EARLY, random);
+                        } else if (data.currentTurn <= data.totalTurns * 2 / 3) {
+                            item = weighted(ITEM_WEIGHTS_MID, random);
+                        } else {
+                            item = weighted(ITEM_WEIGHTS_END, random);
+                        }
+                        gpr.v0 = item; // Give random item
+                        if (config.carryThreeItems) {
+                            currentPlayer.state.items ~= item;
+                        } else {
+                            currentPlayer.data.item = item;
+                        }
+                    });
+                    gpr.ra.onExecOnce({
+                        clearExecOnce(routine + 0x048);
+                        clearExecOnce(routine + 0x10C);
+                        clearExecOnce(routine + 0x414);
+                    });
+                });
+            });
+            0x80066318.onExec({ // Give extra coins on lucky space
+                if (!isBoardScene()) return;
+                auto i = getSpaceIndex(currentPlayer);
+                if (data.spaces[i].type != Space.Type.BLUE) return;
+                if (i >= state.spaces.length) return;
+                if (state.spaces[i] != CustomSpace.LUCKY) return;
+
+                if (data.currentTurn <= data.totalTurns - 5) {
+                    gpr.s0 = [7, 10, 12, 15, 20].choice(random);
+                } else {
+                    gpr.s0 =        [12, 15, 20].choice(random);
+                }
+            });
             data.currentScene.onWrite((ref Scene scene) {
                 if (scene != Scene.FINAL_RESULTS) return;
                 0x801071EC.onExecOnce({

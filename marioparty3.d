@@ -192,7 +192,8 @@ enum CustomSpace : byte {
     ARROW     = 0x0D,
     STAR      = 0x0E,
     GAME_GUY  = 0x0F,
-    LUCKY     = 0x10
+    LUCKY     = 0x10,
+    HIDDEN    = 0x11
 }
 
 union PlayerPanel {
@@ -615,8 +616,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
 
         if (config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 || config.minSpaceCount.values.any!(v => v > 0)) {
             Ptr!Address luckySpaceTexturePtr = 0;
-            Ptr!Address goldSpaceTexturePtr = 0;
-            ubyte[] bSpaces, lSpaces, hSpaces;
+            Ptr!Address goldSpaceTexturePtr  = 0;
 
             bool lumasPlaygroundHiddenIndex(ushort index) {
                 if (getCurrentBoardName() != "Luma's Playground") return false;
@@ -665,38 +665,62 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
                     }
                 });
             });
-            data.spaceTypeTexturePointers[Space.Type.UNKNOWN_1].onRead((ref Address ptr, Address pc) {
-                if (!isBoardScene()) return;
-                if (pc.val!Instruction != 0x8C420000) {
-                    ptr = 0;
-                }
-            });
-            data.spaceTypeTexturePointers[Space.Type.UNKNOWN_1].onWrite((ref Address ptr) {
-                if (!isBoardScene()) return;
-                ptr = luckySpaceTexturePtr;
-            });
-            if (config.revealHiddenBlocksOnRemainingTurns > 0) {
-                data.spaceTypeTexturePointers[Space.Type.UNKNOWN_2].onRead((ref Address ptr, Address pc) {
-                    if (!isBoardScene()) return;
-                    if (pc.val!Instruction != 0x8C420000) {
-                        ptr = 0;
-                    }
-                });
-                data.spaceTypeTexturePointers[Space.Type.UNKNOWN_2].onWrite((ref Address ptr) {
-                    if (!isBoardScene()) return;
-                    ptr = goldSpaceTexturePtr;
-                });
-            }
             0x800EA4F0.onExec({ // Force high res space textures on full map view
                 if (!isBoardScene()) return;
                 gpr.a0 = false;
             });
-            data.currentScene.onWrite((ref Scene scene) { // Reset lucky spaces at start of game
-                if (scene == Scene.START_BOARD) {
-                    state.spaces.length = 0;
-                    state.players.each!(p => p.luckySpaceCount = 0);
-                    saveState();
+            auto selectSpaceTexture = {
+                if (!isBoardScene()) return;
+                switch (gpr.s3) {
+                    case CustomSpace.LUCKY:  gpr.v0 = luckySpaceTexturePtr; break;
+                    case CustomSpace.HIDDEN: gpr.v0 = goldSpaceTexturePtr;  break;
+                    default:                                                break;
                 }
+            };
+            0x800EA838.onExecDone(selectSpaceTexture);
+            0x800EA8AC.onExecDone(selectSpaceTexture);
+            0x800EA970.onExecDone(selectSpaceTexture);
+            0x800EAA3C.onExecDone(selectSpaceTexture);
+            0x800EAC70.onExecDone({
+                if (!isBoardScene()) return;
+
+                static ubyte[] lSpaces, hSpaces;
+                switch (gpr.s3) {
+                    case CustomSpace.BLUE:
+                        if (gpr.s2 != 0) break;
+
+                        if (config.revealHiddenBlocksOnRemainingTurns > 0) {
+                            if (!validHiddenIndex!"item"(data.itemHiddenBlock)) data.itemHiddenBlock = randomHiddenIndex();
+                            if (!validHiddenIndex!"coin"(data.coinHiddenBlock)) data.coinHiddenBlock = randomHiddenIndex();
+                            if (!validHiddenIndex!"star"(data.starHiddenBlock)) data.starHiddenBlock = randomHiddenIndex();
+                        }
+
+                        lSpaces.length = 0;
+                        hSpaces.length = 0;
+                        foreach (i; iota(data.spaceCount).filter!(e => data.spaces[e].type == Space.Type.BLUE)) {
+                            if (data.currentTurn + config.revealHiddenBlocksOnRemainingTurns > data.totalTurns &&
+                            (i == data.itemHiddenBlock || i == data.coinHiddenBlock || i == data.starHiddenBlock)) {
+                                hSpaces ~= cast(ubyte)i;
+                            } else if (state.spaces[i] == CustomSpace.LUCKY) {
+                                lSpaces ~= cast(ubyte)i;
+                            }
+                        }
+                        break;
+                    case CustomSpace.LUCKY:  gpr.a0 = (gpr.s2 >= lSpaces.length ? 0xFF : lSpaces[gpr.s2]); break;
+                    case CustomSpace.HIDDEN: gpr.a0 = (gpr.s2 >= hSpaces.length ? 0xFF : hSpaces[gpr.s2]); break;
+                    default:                                                                               break;
+                }
+            });
+            0x800EADB8.onExec({
+                if (!isBoardScene()) return;
+                gpr.v0 = (gpr.s3 <= CustomSpace.max);
+            });
+            data.currentScene.onWrite((ref Scene scene) { // Reset lucky spaces at start of game
+                if (scene != Scene.START_BOARD) return;
+                
+                state.spaces.length = 0;
+                state.players.each!(p => p.luckySpaceCount = 0);
+                saveState();
             });
             0x800EA6F4.onExec({ // Space render function
                 if (!isBoardScene()) return;
@@ -726,7 +750,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
                     saveState();
                 }
             });
-
             0x800EAEF4.onExec({
                 if (!isBoardScene()) return;
                 if (gpr.s2 >= state.spaces.length) return;
@@ -735,41 +758,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
                 if (gpr.v0 == Space.Type.STAR) return;
 
                 gpr.v0 = state.spaces[gpr.s2];
-            });
-
-            0x800EAC74.onExec({ // Display lucky spaces on board
-                if (!isBoardScene()) return;
-
-                if (gpr.s3 == Space.Type.BLUE && gpr.s2 == 0) {
-                    if (config.revealHiddenBlocksOnRemainingTurns > 0) {
-                        if (!validHiddenIndex!"item"(data.itemHiddenBlock)) data.itemHiddenBlock = randomHiddenIndex();
-                        if (!validHiddenIndex!"coin"(data.coinHiddenBlock)) data.coinHiddenBlock = randomHiddenIndex();
-                        if (!validHiddenIndex!"star"(data.starHiddenBlock)) data.starHiddenBlock = randomHiddenIndex();
-                    }
-
-                    bSpaces.length = 0;
-                    lSpaces.length = 0;
-                    hSpaces.length = 0;
-                    auto blueSpaces = iota(data.spaceCount).filter!(e => data.spaces[e].type == Space.Type.BLUE).array;
-                    foreach (i; blueSpaces) {
-                        if (data.currentTurn + config.revealHiddenBlocksOnRemainingTurns > data.totalTurns &&
-                           (i == data.itemHiddenBlock || i == data.coinHiddenBlock || i == data.starHiddenBlock)) {
-                            hSpaces ~= cast(ubyte)i;
-                        } else if (state.spaces[i] == CustomSpace.LUCKY) {
-                            lSpaces ~= cast(ubyte)i;
-                        } else {
-                            bSpaces ~= cast(ubyte)i;
-                        }
-                    }
-                }
-
-                if (gpr.s3 == Space.Type.BLUE) {
-                    gpr.a0 = (gpr.s2 < bSpaces.length ? bSpaces[gpr.s2] : 0xFF);
-                } else if (gpr.s3 == Space.Type.UNKNOWN_1) {
-                    gpr.a0 = (gpr.s2 < lSpaces.length ? lSpaces[gpr.s2] : 0xFF);
-                } else if (gpr.s3 == Space.Type.UNKNOWN_2 && config.revealHiddenBlocksOnRemainingTurns > 0) {
-                    gpr.a0 = (gpr.s2 < hSpaces.length ? hSpaces[gpr.s2] : 0xFF);
-                }
             });
             0x800FD774.onExec({ // Increment lucky space count
                 if (!isBoardScene()) return;
@@ -781,7 +769,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
 
                 saveState();
             });
-            0x800FE258.onExec({ // Land on lucky space
+            0x800FE258.onExec({ // Trigger lucky space
                 if (!isBoardScene()) return;
                 if (state.spaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
                 if (data.spaces[data.currentSpaceIndex].type != Space.Type.BLUE) return;
