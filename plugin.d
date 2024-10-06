@@ -733,7 +733,8 @@ __gshared {
     ulong frame;
     InputData[4] input;
     SHA256 sha256;
-    bool sha256Started;
+    int reseedCooldown;
+    bool reseedPending;
     Plugin function(string, string) pluginFactory;
     void delegate(Address)[][Address] executeHandlers;
     void delegate(Address)[][Address] executeOnceHandlers;
@@ -792,10 +793,19 @@ extern (C) {
         }
     }
 
+    void reseed(int cooldown) {
+        auto hash = sha256.finish();
+        sha256.start();
+        iota(4).each!(i => random.state[i] = (cast(ulong*)hash)[i]);
+        reseedPending = false;
+        reseedCooldown = cooldown;
+    }
+
     export void InitiateExecution(ExecutionInfo ei) {
         try {
             info("Initializing...");
-            random.seed([0xe3b0c44298fc1c14, 0x9afbf4c8996fb924, 0x27ae41e4649b934c, 0xa495991b7852b855]);
+            sha256.start();
+            reseed(0);
             window = ei.window;
             addrMask = ei.addrMask;
             pc = ei.pc;
@@ -839,15 +849,11 @@ extern (C) {
         }
 
         if (*data != input[port] && (data.buttons || data.analogX >= 0x10 || data.analogX < -0x10
-                                                  || data.analogY >= 0x10 || data.analogY < -0x10)) {
-            if (!sha256Started) {
-                sha256.start();
-                sha256Started = true;
-            }
-            
+                                                  || data.analogY >= 0x10 || data.analogY < -0x10)) {            
             sha256.put((cast(ubyte*)&frame)[0..frame.sizeof]);
-            sha256.put((cast(ubyte*)&port)[0..port.sizeof]);
-            sha256.put((cast(ubyte*)data)[0..data.sizeof]);
+            sha256.put((cast(ubyte*) &port)[0..port.sizeof]);
+            sha256.put((cast(ubyte*)  data)[0..data.sizeof]);
+            reseedPending = true;
         }
 
         input[port] = *data;
@@ -858,17 +864,17 @@ extern (C) {
             try { plugin.onFrame(frame); }
             catch (Exception e) { error(e); }
         }
-        
-        frame++;
+
+        if (reseedCooldown > 0) {
+            reseedCooldown--;
+        } else if (reseedCooldown == 0 && reseedPending) {
+            sha256.put((cast(ubyte*)&random.state)[0..random.state.sizeof]);
+            reseed(300);
+        }
 
         random.popFront();
 
-        if (sha256Started && frame % 300 == 0) {
-            sha256.put((cast(ubyte*)&random.state)[0..random.state.sizeof]);
-            auto hash = sha256.finish();
-            iota(4).each!(i => random.state[i] = (cast(ulong*)hash)[i]);
-            sha256Started = false;
-        }
+        frame++;
     }
 
     export void Execute(Address pc) {
