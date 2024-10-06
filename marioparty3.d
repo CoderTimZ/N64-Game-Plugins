@@ -83,6 +83,7 @@ union Memory {
     mixin Field!(0x800365A8, Instruction, "textChar");
     mixin Field!(0x8004ACE0, Instruction, "playSFX");
     mixin Field!(0x80097650, uint, "randomState");
+    mixin Field!(0x800CC378, Arr!(short, 4), "finalPlayerRankOrder");
     mixin Field!(0x800CC4E4, ushort, "itemHiddenBlock");
     mixin Field!(0x800CD059, ubyte, "currentBoard");
     mixin Field!(0x800CD05A, ubyte, "totalTurns");
@@ -90,9 +91,10 @@ union Memory {
     mixin Field!(0x800CD067, ubyte, "currentPlayerIndex");
     mixin Field!(0x800CD069, ubyte, "currentSpaceIndex");
     mixin Field!(0x800CDA7C, Arr!(ushort, 4), "buttons");
+    mixin Field!(0x800CDBD2, Arr!(PlayerExtra, 4), "playerExtras");
     mixin Field!(0x800CE1C4, ushort, "coinHiddenBlock");
     mixin Field!(0x800CE200, Scene, "currentScene");
-    mixin Field!(0x800D1108, Arr!(Player, 4), "players");
+    mixin Field!(0x800D1108, Arr!(PlayerData, 4), "players");
     mixin Field!(0x800D124E, ushort, "starHiddenBlock");
     mixin Field!(0x800DFE88, Instruction, "chooseGameRoutine");
     mixin Field!(0x800EB094, Instruction, "spacesLoaded");
@@ -124,7 +126,7 @@ union Memory {
     mixin Field!(0x8010FE64, Arr!(ubyte, 3), "chanceOrder");
 }
 
-union Player {
+union PlayerData {
     ubyte[0x38] _data;
     mixin Field!(0x01, ubyte, "cpuDifficulty");
     mixin Field!(0x02, ubyte, "controller");
@@ -148,6 +150,14 @@ union Player {
     mixin Field!(0x32, ubyte, "itemSpaces");
     mixin Field!(0x33, ubyte, "bankSpaces");
     mixin Field!(0x34, ubyte, "gameGuySpaces");
+}
+
+union PlayerExtra {
+    ubyte[0x4C] _data;
+    mixin Field!(0x00, ubyte, "diceRoll");
+    mixin Field!(0x01, ubyte, "diceRoll2");
+    mixin Field!(0x02, ubyte, "diceRoll3");
+    mixin Field!(0x03, ubyte, "diceTotal");
 }
 
 union Space {
@@ -276,13 +286,38 @@ void showGlobalMessage(string message, byte character = -1) {
     });
 }
 
-class MarioParty3 : MarioParty!(Config, State, Memory) {
+class Player {
+    const uint index;
+    PlayerData* data;
+    PlayerState state;
+
+    this(uint index, ref PlayerData data) {
+        this.index = index;
+        this.data = &data;
+    }
+
+    @property bool isCPU() const {
+        return data.flags & 0b00000001;
+    }
+
+    bool isAheadOf(const Player o) const {
+        if (data.stars == o.data.stars) {
+            return data.coins > o.data.coins;
+        } else {
+            return data.stars > o.data.stars;
+        }
+    }
+}
+
+class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     string gameText;
     BonusType[] bonus;
     int lastFiveTurnsBonus = 20;
 
     this(string name, string hash) {
         super(name, hash);
+
+        players = iota(4).map!(i => new Player(i, data.players[i])).array;
     }
 
     override bool lockTeams() const {
@@ -799,9 +834,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             data.currentScene.onWrite((ref Scene scene) {
                 if (scene != Scene.FINAL_RESULTS) return;
                 info("Lucky Spaces:");
-                players.dup.sort!((p, q) => p.data.coins > q.data.coins, SwapStrategy.stable)
-                           .sort!((p, q) => p.data.stars > q.data.stars, SwapStrategy.stable)
-                           .each!((p) {
+                iota(4).map!(i => players[data.finalPlayerRankOrder[i]]).each!((p) {
                     info(format("    %-8s %2d", p.data.character.to!string ~ ":", p.state.luckySpaceCount));
                 });
             });

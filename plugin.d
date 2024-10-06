@@ -500,11 +500,11 @@ static void saveJson(T)(T json, string filename) {
     }
 }
 
-abstract class Game(ConfigType, StateType = NoState) : Plugin {
+abstract class Game(Config, State = NoState) : Plugin {
     string romName;
     string romHash;
-    ConfigType config;
-    StateType state;
+    Config config;
+    State state;
     bool stateError;
 
     this(string romName, string romHash) {
@@ -513,24 +513,24 @@ abstract class Game(ConfigType, StateType = NoState) : Plugin {
     }
 
     void loadConfig() {
-        config = loadJson!ConfigType(romName ~ ".json");
-        if (!config) config = new ConfigType;
+        config = loadJson!Config(romName ~ ".json");
+        if (!config) config = new Config;
     }
 
     void loadState() {
-        static if (!is(StateType == NoState)) {
-            state = loadJson!StateType(romName ~ "-State.json");
+        static if (!is(State == NoState)) {
+            state = loadJson!State(romName ~ "-State.json");
             if (state) {
                 stateError = false;
             } else {
-                state = new StateType;
+                state = new State;
                 stateError = true;
             }
         }
     }
 
     void saveState() {
-        static if (!is(StateType == NoState)) {
+        static if (!is(State == NoState)) {
             state.saveJson(romName ~ "-State.json");
             stateError = false;
         }

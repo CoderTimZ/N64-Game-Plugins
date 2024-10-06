@@ -129,8 +129,8 @@ union Event {
     mixin Field!(0x4, Ptr!Instruction, "routine");
 }
 
-union Player {
-    ubyte[52] _data;
+union PlayerData {
+    ubyte[0x34] _data;
     mixin Field!(0x03, ubyte, "controller");
     mixin Field!(0x04, Character, "character");
     mixin Field!(0x07, ubyte, "flags");
@@ -172,12 +172,13 @@ union Memory {
     mixin Field!(0x800E18D8, Ptr!Chain, "chains");
     mixin Field!(0x800E18E0, Arr!(Address, 18), "spaceTypeTexturePointers");
     mixin Field!(0x800F851A, byte, "itemMenuOpen");
+    mixin Field!(0x800F8CE4, Arr!(short, 4), "finalPlayerRankOrder");
     mixin Field!(0x800F93AA, Board, "currentBoard");
     mixin Field!(0x800F93AE, ushort, "totalTurns");
     mixin Field!(0x800F93B0, ushort, "currentTurn");
     mixin Field!(0x800F93C6, ushort, "currentPlayerIndex");
     mixin Field!(0x800FA63C, Scene, "currentScene");
-    mixin Field!(0x800FD2C0, Arr!(Player, 4), "players");
+    mixin Field!(0x800FD2C0, Arr!(PlayerData, 4), "players");
 }
 
 void mallocPerm(size_t size, void delegate(uint ptr) callback) {
@@ -196,13 +197,38 @@ void freeTemp(uint ptr, void delegate() callback) {
     0x80040E98.jal(ptr, callback);
 }
 
-class MarioParty2 : MarioParty!(Config, State, Memory) {
+class Player {
+    const uint index;
+    PlayerData* data;
+    PlayerState state;
+
+    this(uint index, ref PlayerData data) {
+        this.index = index;
+        this.data = &data;
+    }
+
+    @property bool isCPU() const {
+        return data.flags & 0b00000001;
+    }
+
+    bool isAheadOf(const Player o) const {
+        if (data.stars == o.data.stars) {
+            return data.coins > o.data.coins;
+        } else {
+            return data.stars > o.data.stars;
+        }
+    }
+}
+
+class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
     BonusType[] bonus;
     Address[Scene] itemShopRoutines;
     Address[Scene] itemShopEvents;
 
     this(string name, string hash) {
         super(name, hash);
+
+        players = iota(4).map!(i => new Player(i, data.players[i])).array;
     }
 
     override bool lockTeams() const {
@@ -837,13 +863,9 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
             });
             data.currentScene.onWrite((ref Scene scene) {
                 if (scene != Scene.FINAL_RESULTS) return;
-                0x801071EC.onExecOnce({
-                    info("Lucky Spaces:");
-                    players.dup.sort!((p, q) => p.data.coins > q.data.coins, SwapStrategy.stable)
-                               .sort!((p, q) => p.data.stars > q.data.stars, SwapStrategy.stable)
-                               .each!((p) {
-                        info(format("    %-8s %2d", p.data.character.to!string ~ ":", p.state.luckySpaceCount));
-                    });
+                info("Lucky Spaces:");
+                iota(4).map!(i => players[data.finalPlayerRankOrder[i]]).each!((p) {
+                    info(format("    %-8s %2d", p.data.character.to!string ~ ":", p.state.luckySpaceCount));
                 });
             });
         }

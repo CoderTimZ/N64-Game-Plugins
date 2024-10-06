@@ -67,43 +67,17 @@ string unformatText(string text) pure {
                .replace("\xC3", "?");
 }
 
-class MarioParty(ConfigType, StateType, MemoryType) : Game!(ConfigType, StateType) {
-    alias typeof(MemoryType.currentScene) Scene;
-    alias typeof(MemoryType.players.front) PlayerData;
-    alias typeof(StateType.players.front) PlayerState;
+class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
+    alias typeof(Memory.currentScene) Scene;
 
-    class Player {
-        const uint index;
-        PlayerData* data;
-        PlayerState state;
-
-        this(uint index, ref PlayerData data) {
-            this.index = index;
-            this.data = &data;
-        }
-
-        @property bool isCPU() const {
-            return data.flags & 0b00000001;
-        }
-
-        bool isAheadOf(const Player o) const {
-            if (data.stars == o.data.stars) {
-                return data.coins > o.data.coins;
-            } else {
-                return data.stars > o.data.stars;
-            }
-        }
-    }
-
-    MemoryType* data;
+    Memory* data;
     Player[] players;
     int[Character.max+1] teams = [1, 1, 0, 0, 0, 0, 0, 0];
 
     this(string name, string hash) {
         super(name, hash);
 
-        data = cast(MemoryType*)memory.ptr;
-        players = iota(4).map!(i => new Player(i, data.players[i])).array;
+        data = cast(Memory*)memory.ptr;
     }
 
     override void loadConfig() {

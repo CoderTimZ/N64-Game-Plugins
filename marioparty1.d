@@ -41,8 +41,8 @@ class State {
     ];
 }
 
-union Player {
-    ubyte[48] _data;
+union PlayerData {
+    ubyte[0x30] _data;
     mixin Field!(0x01, ubyte, "cpuDifficulty1");
     mixin Field!(0x02, ubyte, "cpuDifficulty2");
     mixin Field!(0x04, Character, "character");
@@ -75,12 +75,37 @@ union Memory {
     mixin Field!(0x800ED5C9, ubyte, "currentTurn");
     mixin Field!(0x800ED5DC, ushort, "currentPlayerIndex");
     mixin Field!(0x800F09F4, Scene, "currentScene");
-    mixin Field!(0x800F32B0, Arr!(Player, 4), "players");
+    mixin Field!(0x800F32B0, Arr!(PlayerData, 4), "players");
 }
 
-class MarioParty1 : MarioParty!(Config, State, Memory) {
+class Player {
+    const uint index;
+    PlayerData* data;
+    PlayerState state;
+
+    this(uint index, ref PlayerData data) {
+        this.index = index;
+        this.data = &data;
+    }
+
+    @property bool isCPU() const {
+        return data.flags & 0b00000001;
+    }
+
+    bool isAheadOf(const Player o) const {
+        if (data.stars == o.data.stars) {
+            return data.coins > o.data.coins;
+        } else {
+            return data.stars > o.data.stars;
+        }
+    }
+}
+
+class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
     this(string name, string hash) {
         super(name, hash);
+
+        players = iota(4).map!(i => new Player(i, data.players[i])).array;
     }
 
     override void loadConfig() {
