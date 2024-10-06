@@ -15,6 +15,7 @@ import std.typecons;
 import std.math;
 import std.bitmanip;
 import std.regex;
+import std.digest.sha;
 
 alias Address     = uint;
 alias Instruction = uint;
@@ -731,6 +732,8 @@ __gshared {
     ubyte[] memory;
     ulong frame;
     InputData[4] input;
+    SHA256 sha256;
+    bool sha256Started;
     Plugin function(string, string) pluginFactory;
     void delegate(Address)[][Address] executeHandlers;
     void delegate(Address)[][Address] executeOnceHandlers;
@@ -792,7 +795,7 @@ extern (C) {
     export void InitiateExecution(ExecutionInfo ei) {
         try {
             info("Initializing...");
-            random.seed([unpredictableSeed!ulong, unpredictableSeed!ulong, unpredictableSeed!ulong, unpredictableSeed!ulong]);
+            random.seed([0xe3b0c44298fc1c14, 0x9afbf4c8996fb924, 0x27ae41e4649b934c, 0xa495991b7852b855]);
             window = ei.window;
             addrMask = ei.addrMask;
             pc = ei.pc;
@@ -830,12 +833,24 @@ extern (C) {
     }
 
     export void Input(int port, InputData* data) {
-        input[port] = *data;
-
         if (plugin) {
             try { plugin.onInput(port, data); }
             catch (Exception e) { error(e); }
         }
+
+        if (*data != input[port] && (data.buttons || data.analogX >= 0x10 || data.analogX < -0x10
+                                                  || data.analogY >= 0x10 || data.analogY < -0x10)) {
+            if (!sha256Started) {
+                sha256.start();
+                sha256Started = true;
+            }
+            
+            sha256.put((cast(ubyte*)&frame)[0..frame.sizeof]);
+            sha256.put((cast(ubyte*)&port)[0..port.sizeof]);
+            sha256.put((cast(ubyte*)data)[0..data.sizeof]);
+        }
+
+        input[port] = *data;
     }
 
     export void Frame(uint f) {
@@ -845,6 +860,15 @@ extern (C) {
         }
         
         frame++;
+
+        random.popFront();
+
+        if (sha256Started && frame % 300 == 0) {
+            sha256.put((cast(ubyte*)&random.state)[0..random.state.sizeof]);
+            auto hash = sha256.finish();
+            iota(4).each!(i => random.state[i] = (cast(ulong*)hash)[i]);
+            sha256Started = false;
+        }
     }
 
     export void Execute(Address pc) {

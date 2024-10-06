@@ -158,6 +158,7 @@ union Memory {
     mixin Field!(0x8004DE7C, Instruction, "openItemMenuRoutine");
     mixin Field!(0x80064200, Instruction, "duelRoutine");
     mixin Field!(0x80064478, Instruction, "duelCancelRoutine");
+    mixin Field!(0x800C99B4, uint, "randomState");
     mixin Field!(0x800CC000, Arr!(ubyte, 10), "itemPrices");
     mixin Field!(0x800DF645, ubyte, "numberOfRolls");
     mixin Field!(0x800DF6C0, Arr!(MiniGame, 5), "miniGameRoulette");

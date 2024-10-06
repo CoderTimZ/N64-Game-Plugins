@@ -164,9 +164,9 @@ class MarioParty(ConfigType, StateType, MemoryType) : Game!(ConfigType, StateTyp
             //info("Scene: ", scene);
         });
 
-        static if (is(typeof(data.randomByteRoutine))) {
-            data.randomByteRoutine.addr.onExec({
-                gpr.v0 = random.uniform!ubyte;
+        static if (is(typeof(data.randomState))) {
+            data.randomState.onWrite((ref uint state) {
+                state = random.uniform!uint;
             });
         }
 

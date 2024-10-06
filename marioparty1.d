@@ -70,6 +70,7 @@ union Player {
 union Memory {
     ubyte[0x800000] ram;
     mixin Field!(0x800175B8, Instruction, "randomByteRoutine");
+    mixin Field!(0x800C2FF4, uint, "randomState");
     mixin Field!(0x800ED5C7, ubyte, "totalTurns");
     mixin Field!(0x800ED5C9, ubyte, "currentTurn");
     mixin Field!(0x800ED5DC, ushort, "currentPlayerIndex");
