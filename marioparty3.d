@@ -40,7 +40,7 @@ class Config {
     bool increaseItemShopVariety = false;
     float toadShopChance = -1.0;
     bool replaceWackyWatch = false;
-    bool automaticallyStartNextBoard = false;
+    bool autoStartNextBoard = false;
     bool balanceSuperHardCPU = false;
 
     this() {
@@ -1107,7 +1107,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             });
         }
 
-        if (config.automaticallyStartNextBoard) {
+        if (config.autoStartNextBoard) {
             0x80048228.onExec({
                 if (gpr.a0 == Scene.TRANSITION && data.currentScene == Scene.FINAL_RESULTS) {
                     gpr.a0 = Scene.CHILLY_WATERS_BOARD + (data.currentBoard + 1) % 6;
