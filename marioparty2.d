@@ -23,10 +23,9 @@ class Config {
     int[Character] teams;
     bool randomBonus = false;
     string[BonusType] bonuses;
-    float itemSpaceRatio = 0;
+    float[Space.Type] standardSpaceRatio;
     float luckySpaceRatio = 0;
     //bool revealHiddenBlocksOnFinalTurn = false;
-    int extraChanceSpaces = 0;
     float mapScrollSpeedMultiplier = 1.0;
     bool preventRepeatMiniGames = false;
     MiniGame[] blockedMiniGames;
@@ -73,53 +72,70 @@ union Chain {
 
 union Space {
     static enum Type : byte {
-        START       =  0,
-        BLUE        =  1,
-        RED         =  2,
-        INVIS_1     =  3,
-        HAPPENING   =  4,
-        CHANCE      =  5,
-        ITEM        =  6,
-        BANK        =  7,
-        INVIS_2     =  8,
-        BATTLE      =  9,
-        UNKNOWN_1   = 10,
-        UNKNOWN_2   = 11,
-        BOWSER      = 12,
-        ARROW       = 13,
-        STAR        = 14,
-        BLACK_STAR  = 15,
-        TOAD        = 16,
-        BABY_BOWSER = 17
+        START       = 0x00,
+        BLUE        = 0x01,
+        RED         = 0x02,
+        INVIS_1     = 0x03,
+        HAPPENING   = 0x04,
+        CHANCE      = 0x05,
+        ITEM        = 0x06,
+        BANK        = 0x07,
+        INVIS_2     = 0x08,
+        BATTLE      = 0x09,
+        UNKNOWN_1   = 0x0A,
+        UNKNOWN_2   = 0x0B,
+        BOWSER      = 0x0C,
+        ARROW       = 0x0D,
+        STAR        = 0x0E,
+        BLACK_STAR  = 0x0F,
+        TOAD        = 0x10,
+        BABY_BOWSER = 0x11
     }
 
     ubyte[0x24] _data;
     mixin Field!(0x01, Type, "type");
     mixin Field!(0x20, Ptr!Event, "eventPtr");
+
+    bool isSolid() {
+        switch (type) {
+            case Type.BLUE:
+            case Type.RED:
+            case Type.HAPPENING:
+            case Type.CHANCE:
+            case Type.ITEM:
+            case Type.BANK:
+            case Type.BATTLE:
+            case Type.BOWSER:
+                return true;
+            default:
+                return false;
+        }
+    }
 }
 
 enum CustomSpace : byte {
-    DEFAULT     = -1,
-    START       =  0,
-    BLUE        =  1,
-    RED         =  2,
-    INVIS_1     =  3,
-    HAPPENING   =  4,
-    CHANCE      =  5,
-    ITEM        =  6,
-    BANK        =  7,
-    INVIS_2     =  8,
-    BATTLE      =  9,
-    UNKNOWN_1   = 10,
-    UNKNOWN_2   = 11,
-    BOWSER      = 12,
-    ARROW       = 13,
-    STAR        = 14,
-    BLACK_STAR  = 15,
-    TOAD        = 16,
-    BABY_BOWSER = 17,
-    LUCKY       = 18,
-//  HIDDEN      = 19
+    DEFAULT     =   -2,
+    LOCKED      =   -1,
+    START       = 0x00,
+    BLUE        = 0x01,
+    RED         = 0x02,
+    INVIS_1     = 0x03,
+    HAPPENING   = 0x04,
+    CHANCE      = 0x05,
+    ITEM        = 0x06,
+    BANK        = 0x07,
+    INVIS_2     = 0x08,
+    BATTLE      = 0x09,
+    UNKNOWN_1   = 0x0A,
+    UNKNOWN_2   = 0x0B,
+    BOWSER      = 0x0C,
+    ARROW       = 0x0D,
+    STAR        = 0x0E,
+    BLACK_STAR  = 0x0F,
+    TOAD        = 0x10,
+    BABY_BOWSER = 0x11,
+    LUCKY       = 0x12,
+//  HIDDEN      = 0x13
 }
 
 union Event {
@@ -639,7 +655,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
             });
         }
 
-        if (config.itemSpaceRatio > 0 || config.luckySpaceRatio > 0 || config.extraChanceSpaces > 0) {
+        if (config.luckySpaceRatio > 0 || config.standardSpaceRatio.values.any!(v => v > 0.0)) {
             immutable ITEM_WEIGHTS_EARLY = [
                 Item.MUSHROOM:        22,
                 Item.SKELETON_KEY:     9,
@@ -738,45 +754,55 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
             0x800542FC.onExec({ // Space render function
                 if (!isBoardScene()) return;
 
-                if (data.spaceCount > state.spaces.length) {
+                bool changed = false;
+
+                if (state.spaces.length != data.spaceCount) {
                     state.spaces.length = data.spaceCount;
-                    auto blueSpaces = iota(data.spaceCount).filter!(i => data.spaces[i].type == Space.Type.BLUE).array;
+                    changed = true;
+                }
 
-                    long chanceCount = config.extraChanceSpaces
-                                     - blueSpaces.count!(i => state.spaces[i] == CustomSpace.CHANCE);
-                    if (chanceCount > 0) {
+                auto solidCount = iota(data.spaceCount).filter!(i => data.spaces[i].isSolid).count;
+                auto blueSpaces = iota(data.spaceCount).filter!(i => data.spaces[i].type == Space.Type.BLUE);
+
+                foreach (type, ratio; config.standardSpaceRatio) {
+                    long newCount = roundTo!long(solidCount * min(ratio, 1.0))
+                                  - iota(data.spaceCount).count!(i => data.spaces[i].type == type || state.spaces[i] == cast(CustomSpace)type);
+                    if (newCount > 0) {
                         blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
-                                  .array.randomShuffle(random)[0..min(chanceCount, $)]
-                                  .each!((i) { data.spaces[i].type = Space.Type.CHANCE; state.spaces[i] = CustomSpace.CHANCE; });
+                                  .array.randomShuffle(random).take(newCount).each!((i) {
+                            state.spaces[i] = cast(CustomSpace)type;
+                            changed = true;
+                        });
                     }
+                }
 
-                    long itemCount = roundTo!long(blueSpaces.length * min(config.itemSpaceRatio, 1.0))
-                                   - blueSpaces.count!(i => state.spaces[i] == CustomSpace.ITEM);
-                    if (itemCount > 0) {
-                        blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
-                                  .array.randomShuffle(random)[0..min(itemCount, $)]
-                                  .each!((i) { data.spaces[i].type = Space.Type.ITEM; state.spaces[i] = CustomSpace.ITEM; });
-                    }
+                long newCount = roundTo!long(blueSpaces.count * min(config.luckySpaceRatio, 1.0))
+                              - state.spaces.count!(e => e == CustomSpace.LUCKY);
+                if (newCount > 0) {
+                    blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
+                              .array.randomShuffle(random).take(newCount).each!((i) {
+                        state.spaces[i] = CustomSpace.LUCKY;
+                        changed = true;
+                    });
+                }
 
-                    long luckyCount = roundTo!long(blueSpaces.length * min(config.luckySpaceRatio, 1.0))
-                                    - blueSpaces.count!(i => state.spaces[i] == CustomSpace.LUCKY);
-                    if (luckyCount > 0) {
-                        blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
-                                  .array.randomShuffle(random)[0..min(luckyCount, $)]
-                                  .each!(i => state.spaces[i] = CustomSpace.LUCKY);
-                    }
+                blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT).each!((i) {
+                    state.spaces[i] = CustomSpace.LOCKED;
+                    changed = true;
+                });
 
+                iota(data.spaceCount).each!((i) {
+                    if (state.spaces[i] < Space.Type.min) return;
+                    if (state.spaces[i] > Space.Type.max) return;
+                    if (data.spaces[i].type == Space.Type.STAR) return;
+                    if (data.spaces[i].type == Space.Type.BLACK_STAR) return;
+
+                    data.spaces[i].type = cast(Space.Type)state.spaces[i];
+                });
+
+                if (changed) {
                     saveState();
                 }
-            });
-            0x80054940.onExec({
-                if (!isBoardScene()) return;
-                if (gpr.s2 >= state.spaces.length) return;
-                if (state.spaces[gpr.s2] == CustomSpace.DEFAULT) return;
-                if (state.spaces[gpr.s2] > Space.Type.max) return;
-                if (gpr.v0 == Space.Type.STAR || gpr.v0 == Space.Type.BLACK_STAR) return;
-
-                gpr.v0 = state.spaces[gpr.s2];
             });
             0x80065AA4.onExec({ // Increment lucky space count
                 if (!isBoardScene()) return;

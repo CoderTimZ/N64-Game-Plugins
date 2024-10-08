@@ -184,7 +184,7 @@ union Space {
     ubyte[0x24] _data;
     mixin Field!(0x01, Type, "type");
 
-    bool isLandable() {
+    bool isSolid() {
         switch (type) {
             case Type.BLUE:
             case Type.RED:
@@ -781,32 +781,32 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     changed = true;
                 }
 
-                auto landableCount = iota(data.spaceCount).filter!(i => data.spaces[i].isLandable).count;
-                auto blueIndices   = iota(data.spaceCount).filter!(i => data.spaces[i].type == Space.Type.BLUE);
+                auto solidCount = iota(data.spaceCount).filter!(i => data.spaces[i].isSolid).count;
+                auto blueSpaces = iota(data.spaceCount).filter!(i => data.spaces[i].type == Space.Type.BLUE);
 
                 foreach (type, ratio; config.standardSpaceRatio) {
-                    long newCount = roundTo!long(landableCount * min(ratio, 1.0))
+                    long newCount = roundTo!long(solidCount * min(ratio, 1.0))
                                   - iota(data.spaceCount).count!(i => data.spaces[i].type == type || state.spaces[i] == cast(CustomSpace)type);
                     if (newCount > 0) {
-                        blueIndices.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
-                                   .array.randomShuffle(random).take(newCount).each!((i) {
+                        blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
+                                  .array.randomShuffle(random).take(newCount).each!((i) {
                             state.spaces[i] = cast(CustomSpace)type;
                             changed = true;
                         });
                     }
                 }
 
-                long newCount = roundTo!long(blueIndices.count * min(config.luckySpaceRatio, 1.0))
+                long newCount = roundTo!long(blueSpaces.count * min(config.luckySpaceRatio, 1.0))
                               - state.spaces.count!(e => e == CustomSpace.LUCKY);
                 if (newCount > 0) {
-                    blueIndices.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
-                               .array.randomShuffle(random).take(newCount).each!((i) {
+                    blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
+                              .array.randomShuffle(random).take(newCount).each!((i) {
                         state.spaces[i] = CustomSpace.LUCKY;
                         changed = true;
                     });
                 }
 
-                blueIndices.filter!(i => state.spaces[i] == CustomSpace.DEFAULT).each!((i) {
+                blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT).each!((i) {
                     state.spaces[i] = CustomSpace.LOCKED;
                     changed = true;
                 });
@@ -871,7 +871,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     info(format("    %-8s %2d", p.data.character.to!string ~ ":", p.state.luckySpaceCount));
                 });
             });
-            
+
             auto chooseHiddenBlockLocation = (ref ushort index) {
                 if (!isBoardScene()) return;
                 if (lumasPlaygroundHiddenIndex(index)) return;
