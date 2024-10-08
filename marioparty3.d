@@ -910,7 +910,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 p.data.gameCoinsExtra.onRead(doubleCoins);
             });
 
-            0x800FEF68.onExecDone({
+            0x800FEF1C.onExecDone({
                 if (!isBoardScene()) return;
                 if (data.currentTurn % INTERVAL != 0) return;
 
@@ -1108,17 +1108,9 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
         if (config.automaticallyStartNextBoard) {
             0x80048228.onExec({
-                static Scene previousScene;
-                static Scene boardScene;
-
-                if (gpr.a0 == Scene.CASTLE_GROUNDS && previousScene == Scene.FINAL_RESULTS) {
-                    boardScene++;
-                    if (!isBattleRoyaleBoardScene(boardScene)) {
-                        boardScene = Scene.CHILLY_WATERS_BOARD;
-                    }
-                    gpr.a0 = boardScene;
+                if (gpr.a0 == Scene.TRANSITION && data.currentScene == Scene.FINAL_RESULTS) {
+                    gpr.a0 = Scene.CHILLY_WATERS_BOARD + (data.currentBoard + 1) % 6;
                     gpr.a1 = 0;
-                    gpr.a2 = 402;
 
                     iota(4).each!((i) {
                         data.players[i].coins = 0;
@@ -1136,12 +1128,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                         data.players[i].bankSpaces = 0;
                         data.players[i].gameGuySpaces = 0;
                     });
-                }
-
-                previousScene = data.currentScene;
-
-                if (isBattleRoyaleBoardScene(cast(Scene)gpr.a0)) {
-                    boardScene = cast(Scene)gpr.a0;
                 }
             });
         }
