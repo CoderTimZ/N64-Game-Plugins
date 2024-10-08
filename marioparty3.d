@@ -41,6 +41,7 @@ class Config {
     float toadShopChance = -1.0;
     bool replaceWackyWatch = false;
     bool automaticallyStartNextBoard = false;
+    bool balanceSuperHardCPU = false;
 
     this() {
         bonuses = [
@@ -1131,6 +1132,31 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 }
             });
         }
+
+        if (config.balanceSuperHardCPU) {
+            iota(4).each!((i) {
+                data.players[i].cpuDifficulty.onRead((ref ubyte difficulty) {
+                    if (difficulty != CPU_DIFFICULTY.SUPER_HARD) return;
+
+                    switch (data.currentScene) {
+                        case Scene.BABY_BOWSER_BROADSIDE:
+                        case Scene.HYPER_HYDRANTS:
+                        case Scene.PICKING_PANIC:
+                        case Scene.LOG_JAM:
+                        case Scene.TOADSTOOL_TITAN:
+                        case Scene.THE_BEAT_GOES_ON:
+                        case Scene.CHEEP_CHEEP_CHASE:
+                        case Scene.POPGUN_PICK_OFF:
+                        case Scene.BOWSER_TOSS:
+                            difficulty = CPU_DIFFICULTY.HARD;
+                            break;
+
+                        default:
+                            break;
+                    }
+                });
+            });
+        }
     }
 }
 
@@ -1167,6 +1193,13 @@ enum Item : byte {
     BARTER_BOX       = 0x10,
     LUCKY_CHARM      = 0x11,
     WACKY_WATCH      = 0x12
+}
+
+enum CPU_DIFFICULTY : byte {
+    EASY       = 0,
+    NORMAL     = 1,
+    HARD       = 2,
+    SUPER_HARD = 3
 }
 
 enum Scene : uint {
