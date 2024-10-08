@@ -40,6 +40,7 @@ class Config {
     bool increaseItemShopVariety = false;
     float toadShopChance = -1.0;
     bool replaceWackyWatch = false;
+    bool automaticallyStartNextBoard = false;
 
     this() {
         bonuses = [
@@ -374,6 +375,20 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             case Scene.BLOWHARD_BOARD:
             case Scene.MR_MOVER_BOARD:
             case Scene.BACKTRACK_BOARD:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool isBattleRoyaleBoardScene(Scene scene) const {
+        switch (scene) {
+            case Scene.CHILLY_WATERS_BOARD:
+            case Scene.DEEP_BLOOBER_SEA_BOARD:
+            case Scene.SPINY_DESERT_BOARD:
+            case Scene.WOODY_WOODS_BOARD:
+            case Scene.CREEPY_CAVERN_BOARD:
+            case Scene.WALUIGIS_ISLAND_BOARD:
                 return true;
             default:
                 return false;
@@ -1087,6 +1102,46 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                             item = [Item.KOOPA_KARD, Item.BARTER_BOX, Item.LUCKY_CHARM].choice(random);
                         }
                     });
+                }
+            });
+        }
+
+        if (config.automaticallyStartNextBoard) {
+            0x80048228.onExec({
+                static Scene previousScene;
+                static Scene boardScene;
+
+                if (gpr.a0 == Scene.CASTLE_GROUNDS && previousScene == Scene.FINAL_RESULTS) {
+                    boardScene++;
+                    if (!isBattleRoyaleBoardScene(boardScene)) {
+                        boardScene = Scene.CHILLY_WATERS_BOARD;
+                    }
+                    gpr.a0 = boardScene;
+                    gpr.a1 = 0;
+                    gpr.a2 = 402;
+
+                    iota(4).each!((i) {
+                        data.players[i].coins = 0;
+                        data.players[i].stars = 0;
+                        iota(3).each!(j => data.players[i].items[j] = Item.NONE);
+                        data.players[i].miniGameCoins = 0;
+                        data.players[i].maxCoins = 0;
+                        data.players[i].happeningSpaces = 0;
+                        data.players[i].redSpaces = 0;
+                        data.players[i].blueSpaces = 0;
+                        data.players[i].chanceSpaces = 0;
+                        data.players[i].bowserSpaces = 0;
+                        data.players[i].battleSpaces = 0;
+                        data.players[i].itemSpaces = 0;
+                        data.players[i].bankSpaces = 0;
+                        data.players[i].gameGuySpaces = 0;
+                    });
+                }
+
+                previousScene = data.currentScene;
+
+                if (isBattleRoyaleBoardScene(cast(Scene)gpr.a0)) {
+                    boardScene = cast(Scene)gpr.a0;
                 }
             });
         }
