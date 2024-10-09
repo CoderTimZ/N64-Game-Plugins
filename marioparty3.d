@@ -74,6 +74,8 @@ class State {
     ];
     ShuffleQueue!MiniGame[MiniGameType] miniGameQueue;
     CustomSpace[] spaces;
+    uint luckySpaceTexturePtr;
+    uint goldSpaceTexturePtr;
     ubyte[] usedBattleSpaces;
     string[] boardNames;
 }
@@ -685,9 +687,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         }
 
         if (config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 || config.standardSpaceRatio.values.any!(v => v > 0.0)) {
-            Ptr!Address luckySpaceTexturePtr = 0;
-            Ptr!Address goldSpaceTexturePtr  = 0;
-
             bool lumasPlaygroundHiddenIndex(ushort index) {
                 if (getCurrentBoardName() != "Luma's Playground") return false;
                 
@@ -719,20 +718,23 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             }
             
             0x8003592C.onExecDone({ // Finish making temp heap
-                luckySpaceTexturePtr = 0;
-                goldSpaceTexturePtr = 0;
                 if (!isBoardScene()) return;
 
                 mallocTemp(LUCKY_SPACE_TEXTURE.length + 0x10, (ptr) {
                     LUCKY_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
-                    luckySpaceTexturePtr = ptr;
+                    state.luckySpaceTexturePtr = ptr;
 
-                    if (config.revealHiddenBlocksOnRemainingTurns > 0) {
-                        mallocTemp(GOLD_SPACE_TEXTURE.length + 0x10, (ptr) {
-                            GOLD_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
-                            goldSpaceTexturePtr = ptr;
-                        });
+                    if (config.revealHiddenBlocksOnRemainingTurns <= 0) {
+                        saveState();
+                        return;
                     }
+
+                    mallocTemp(GOLD_SPACE_TEXTURE.length + 0x10, (ptr) {
+                        GOLD_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
+                        state.goldSpaceTexturePtr = ptr;
+                        
+                        saveState();
+                    });
                 });
             });
             0x800EA4F0.onExec({ // Force high res space textures on full map view
@@ -742,8 +744,8 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             auto selectSpaceTexture = {
                 if (!isBoardScene()) return;
                 switch (gpr.s3) {
-                    case CustomSpace.LUCKY:  gpr.v0 = luckySpaceTexturePtr; break;
-                    case CustomSpace.HIDDEN: gpr.v0 = goldSpaceTexturePtr;  break;
+                    case CustomSpace.LUCKY:  gpr.v0 = state.luckySpaceTexturePtr; break;
+                    case CustomSpace.HIDDEN: gpr.v0 = state.goldSpaceTexturePtr;  break;
                     default:                                                break;
                 }
             };
