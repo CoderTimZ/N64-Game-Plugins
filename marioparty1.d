@@ -112,11 +112,11 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
         super.loadConfig();
     }
 
-    override bool lockTeams() const {
+    override bool lockTeamScores() const {
         return false;
     }
 
-    override bool disableTeams() const {
+    override bool disableTeamScores() const {
         return false;
     }
 

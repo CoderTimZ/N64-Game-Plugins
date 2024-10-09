@@ -17,10 +17,12 @@ class Config {
     Character[] characters = [Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED];
     bool alwaysDuel = false;
     bool lastPlaceDoubleRoll = false;
-    bool teamMode = false;
+    bool teamControl = false;
+    bool teamMiniGames = false;
+    bool teamScores = false;
+    int[Character] teams;
     bool randomBonus = false;
     string[BonusType] bonuses;
-    int[Character] teams;
     bool enhancedTaunts = false;
     bool preventRepeatMiniGames = false;
     bool randomChanceOrder = false;
@@ -57,6 +59,17 @@ class Config {
             BonusType.BANK:      "Banking",
             BonusType.GAME_GUY:  "Gambling",
             BonusType.LUCKY:     "Lucky"
+        ];
+
+        teams = [
+            Character.MARIO:   2,
+            Character.LUIGI:   2,
+            Character.PEACH:   1,
+            Character.YOSHI:   1,
+            Character.WARIO:   1,
+            Character.DK:      1,
+            Character.WALUIGI: 1,
+            Character.DAISY:   1
         ];
     }
 }
@@ -343,7 +356,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         players = iota(4).map!(i => new Player(i, data.players[i])).array;
     }
 
-    override bool lockTeams() const {
+    override bool lockTeamScores() const {
         if (data.currentScene == Scene.CHANCE_TIME) {
             if (data.chancePlayer1 < players.length && data.chancePlayer2 < players.length) {
                 return team(players[data.chancePlayer1])
@@ -353,7 +366,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         return false;
     }
 
-    override bool disableTeams() const {
+    override bool disableTeamScores() const {
         if (data.currentScene == Scene.BOWSER_EVENT) {
             return data.bowserEventType == BowserEventType.COIN_POTLUCK
                 || data.bowserEventType == BowserEventType.REVOLUTION;
@@ -533,7 +546,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         });
         data.textChar.addr.onExec({ gpr.v0 = gameText[gpr.a0]; });
 
-        if (config.teamMode) {
+        if (config.teamScores) {
             data.duelRoutine.addr.onExec({
                 if (!isBoardScene()) return;
                 teammates(currentPlayer).each!((t) {

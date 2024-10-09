@@ -72,7 +72,7 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
 
     Memory* data;
     Player[] players;
-    int[Character.max+1] teams = [1, 1, 0, 0, 0, 0, 0, 0];
+    int[Character.max+1] teams;
 
     this(string name, string hash) {
         super(name, hash);
@@ -83,7 +83,7 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
     override void loadConfig() {
         super.loadConfig();
 
-        static if (is(typeof(config.teamMode))) {
+        static if (is(typeof(config.teams))) {
             teams.each!((c, ref t) => t = config.teams.require(cast(Character)c, t));
         }
     }
@@ -98,8 +98,8 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
         return data.currentPlayerIndex < 4 ? players[data.currentPlayerIndex] : null;
     }
 
-    abstract bool lockTeams() const;
-    abstract bool disableTeams() const;
+    abstract bool lockTeamScores() const;
+    abstract bool disableTeamScores() const;
     abstract bool isBoardScene(Scene scene) const;
     abstract bool isScoreScene(Scene scene) const;
     bool isBoardScene() const { return isBoardScene(data.currentScene); }
@@ -109,8 +109,12 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
         return teams[p.data.character];
     }
 
+    auto teamMembers(const Player p) {
+        return players.filter!(t => p && team(t) == team(p));
+    }
+
     auto teammates(const Player p) {
-        return players.filter!(t => p && t !is p && team(t) == team(p));
+        return teamMembers(p).filter!(t => t !is p);
     }
 
     bool isIn4thPlace(const Player p) const {
@@ -144,14 +148,14 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
             });
         }
 
-        static if (is(typeof(config.teamMode))) {
-            if (config.teamMode) {
+        static if (is(typeof(config.teamScores))) {
+            if (config.teamScores) {
                 players.each!((p) {
                     p.data.coins.onWrite((ref ushort coins) {
                         if (!isScoreScene()) return;
-                        if (lockTeams()) {
+                        if (lockTeamScores()) {
                             coins = p.data.coins;
-                        } else if (!disableTeams()) {
+                        } else if (!disableTeamScores()) {
                             teammates(p).each!((t) {
                                 t.data.coins = coins;
                             });
@@ -159,9 +163,9 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
                     });
                     p.data.stars.onWrite((ref typeof(p.data.stars) stars) {
                         if (!isScoreScene()) return;
-                        if (lockTeams()) {
+                        if (lockTeamScores()) {
                             stars = p.data.stars;
-                        } else if (!disableTeams()) {
+                        } else if (!disableTeamScores()) {
                             teammates(p).each!((t) {
                                 t.data.stars = stars;
                             });
@@ -169,7 +173,7 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
                     });
                     p.data.maxCoins.onWrite((ref ushort maxCoins) {
                         if (!isScoreScene()) return;
-                        if (lockTeams()) {
+                        if (lockTeamScores()) {
                             maxCoins = p.data.maxCoins;
                         } else {
                             teammates(p).each!((t) {
@@ -177,56 +181,7 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
                             });
                         }
                     });
-                    /*
-                    p.data.color.onWrite((ref PanelColor color) {
-                        if (!isBoardScene()) return;
-                        if (color == PanelColor.CLEAR) return;
-                        auto t = teammates(p).find!(t => t.index < p.index);
-                        if (!t.empty) {
-                            color = t.front.data.color;
-                        }
-                    });
-                    */
-                    p.data.flags.onWrite((ref ubyte flags) {
-                        if (!isBoardScene()) return;
-                        if (p.data.flags == flags) return;
-                        p.data.flags = flags;
-                    });
-                    p.data.controller.onWrite((ref ubyte controller) {
-                        if (!isBoardScene()) return;
-                        if (p.data.controller == controller) return;
-                        p.data.controller = controller;
-                    });
                 });
-
-                /*
-                static if (is(typeof(data.playerPanels)) && is(typeof(data.drawPlayerColor))) {
-                    data.drawPlayerColor.addr.onExec({
-                        if (!isBoardScene()) return;
-                        if (gpr.a1 == PanelColor.CLEAR) return;
-                        auto p = players[gpr.a0];
-                        auto t = teammates(p).find!(t => t.index < p.index);
-                        if (!t.empty) {
-                            gpr.a1 = data.playerPanels[t.front.index].color;
-                        }
-                    });
-                }
-                */
-
-                static if (is(typeof(data.playerPanels)) && is(typeof(data.determineTeams))) {
-                    data.determineTeams.addr.onExec({
-                        if (!isBoardScene()) return;
-
-                        auto allTeamsSplit = players.all!(p => teammates(p).any!(t =>
-                        data.playerPanels[t.index].color != data.playerPanels[p.index].color));
-                        
-                        if (!allTeamsSplit) return;
-                        
-                        players.each!((i, p) {
-                            data.playerPanels[i].color = (team(p) == team(players[0]) ? PanelColor.BLUE : PanelColor.RED);
-                        });
-                    });
-                }
 
                 data.currentPlayerIndex.onWrite((ref typeof(data.currentPlayerIndex) index) {
                     if (!isBoardScene()) return;
@@ -267,6 +222,59 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
                     });
                     booRoutinePtrHandler(data.booRoutinePtr);
                 }
+            }
+        }
+
+        static if (is(typeof(config.teamMiniGames)) && is(typeof(data.playerPanels)) && is(typeof(data.determineTeams))) {
+            if (config.teamMiniGames) {
+                data.determineTeams.addr.onExec({
+                    if (!isBoardScene()) return;
+
+                    auto allTeamsSplit = players.all!(p => teammates(p).any!(t =>
+                        data.playerPanels[t.index].color != data.playerPanels[p.index].color)
+                    );
+                    
+                    if (!allTeamsSplit) return;
+                    
+                    players.each!((i, p) {
+                        data.playerPanels[i].color = (team(p) == team(players[0]) ? PanelColor.BLUE : PanelColor.RED);
+                    });
+                });
+            }
+        }
+
+        static if (is(typeof(config.teamControl))) {
+            void setDistinctCPUControllers() {
+                players.filter!(p => p.isCPU).each!((p) {
+                    p.data.controller = cast(ubyte)iota(4).filter!(i =>
+                        players.filter!(o => o !is p).all!(o => o.data.controller != i)
+                    ).front;
+                });
+            }
+
+            if (config.teamControl) {
+                players.each!((p) {
+                    p.data.flags.onWrite((ref ubyte flags) {
+                        auto leader = teamMembers(p).front;
+                        if (p is leader) {
+                            teammates(p).each!(t => t.data.flags = flags);
+                        } else {
+                            flags = p.data.flags = leader.data.flags;
+                        }
+
+                        setDistinctCPUControllers();
+                    });
+                    p.data.controller.onWrite((ref ubyte controller) {
+                        auto leader = teamMembers(p).front;
+                        if (p is leader) {
+                            teammates(p).each!(t => t.data.controller = controller);
+                        } else {
+                            controller = leader.data.controller;
+                        }
+
+                        setDistinctCPUControllers();
+                    });
+                });
             }
         }
 

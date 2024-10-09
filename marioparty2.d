@@ -16,11 +16,13 @@ class Config {
     Character[] characters = [Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED];
     bool alwaysDuel = false;
     bool lastPlaceDoubleRoll = false;
-    bool teamMode = false;
+    bool teamControl = false;
+    bool teamMiniGames = false;
+    bool teamScores = false;
+    int[Character] teams;
     bool carryThreeItems = false;
     bool randomItemAndDuelMiniGames = false;
     bool cheaperAndBetterItems = false;
-    int[Character] teams;
     bool randomBonus = false;
     string[BonusType] bonuses;
     float[Space.Type] standardSpaceRatio;
@@ -43,6 +45,15 @@ class Config {
             BonusType.ITEM:      "Item",
             BonusType.BANK:      "Banking",
             BonusType.LUCKY:     "Lucky"
+        ];
+
+        teams = [
+            Character.MARIO: 2,
+            Character.LUIGI: 2,
+            Character.PEACH: 1,
+            Character.YOSHI: 1,
+            Character.WARIO: 1,
+            Character.DK:    1
         ];
     }
 }
@@ -247,11 +258,11 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
         players = iota(4).map!(i => new Player(i, data.players[i])).array;
     }
 
-    override bool lockTeams() const {
+    override bool lockTeamScores() const {
         return false;
     }
 
-    override bool disableTeams() const {
+    override bool disableTeamScores() const {
         return false;
     }
 
@@ -357,7 +368,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
             0x8004A4A8.onExec({ if (isBoardScene()) gpr.v0 = 1; });
         }
 
-        if (config.teamMode) {
+        if (config.teamScores) {
             data.duelRoutine.addr.onExec({
                 if (!isBoardScene()) return;
                 teammates(currentPlayer).each!((t) {
