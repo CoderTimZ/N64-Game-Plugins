@@ -44,6 +44,7 @@ class Config {
     bool replaceWackyWatch = false;
     bool autoStartNextBoard = false;
     bool balanceSuperHardCPU = false;
+    bool chanceSwapInsteadOfTransfer = false;
 
     this() {
         bonuses = [
@@ -108,6 +109,7 @@ union Memory {
     mixin Field!(0x800CD05B, ubyte, "currentTurn");
     mixin Field!(0x800CD067, ubyte, "currentPlayerIndex");
     mixin Field!(0x800CD069, ubyte, "currentSpaceIndex");
+    mixin Field!(0x800CD06C, MessageSpeed, "messageSpeed");
     mixin Field!(0x800CDA7C, Arr!(ushort, 4), "buttons");
     mixin Field!(0x800CDBD2, Arr!(PlayerExtra, 4), "playerExtras");
     mixin Field!(0x800CE1C4, ushort, "coinHiddenBlock");
@@ -142,6 +144,9 @@ union Memory {
     mixin Field!(0x800A11D0, Arr!(short, 5), "itemMiniGameItems");
     mixin Field!(0x8010D40C, Arr!(Item, 5), "itemMiniGameHelpScreenItems");
     mixin Field!(0x8010FE64, Arr!(ubyte, 3), "chanceOrder");
+    mixin Field!(0x801100DD, Character, "chanceCharacter1");
+    mixin Field!(0x801100DE, Character, "chanceCharacter2");
+    mixin Field!(0x801100DF, ChancePrize, "chancePrize");
 }
 
 union PlayerData {
@@ -661,15 +666,15 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
                 SFX sfx;
                 switch (data.buttons[gpr.t0]) {
-                    case BUTTON.L:   sfx = SFX.TAUNT;               break;
-                    case BUTTON.D_R: sfx = SFX.BEING_CHOSEN;        break;
-                    case BUTTON.D_L: sfx = SFX.GETTING_AN_ITEM;     break;
-                    case BUTTON.D_D: sfx = SFX.WINNING_A_STAR;      break;
-                    case BUTTON.D_U: sfx = SFX.WINNING_A_MINI_GAME; break;
-                    case BUTTON.C_R: sfx = SFX.DESPAIR_1;           break;
-                    case BUTTON.C_L: sfx = SFX.DESPAIR_2;           break;
-                    case BUTTON.C_D: sfx = SFX.LOSING_A_MINI_GAME;  break;
-                    case BUTTON.C_U: sfx = SFX.LOSING_A_MINI_GAME;  break;
+                    case Button.L:   sfx = SFX.TAUNT;               break;
+                    case Button.D_R: sfx = SFX.BEING_CHOSEN;        break;
+                    case Button.D_L: sfx = SFX.GETTING_AN_ITEM;     break;
+                    case Button.D_D: sfx = SFX.WINNING_A_STAR;      break;
+                    case Button.D_U: sfx = SFX.WINNING_A_MINI_GAME; break;
+                    case Button.C_R: sfx = SFX.DESPAIR_1;           break;
+                    case Button.C_L: sfx = SFX.DESPAIR_2;           break;
+                    case Button.C_D: sfx = SFX.LOSING_A_MINI_GAME;  break;
+                    case Button.C_U: sfx = SFX.LOSING_A_MINI_GAME;  break;
                     default:                                        return;
                 }
 
@@ -960,7 +965,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             0x80109348.onExec({
                 if (data.currentScene != Scene.FINAL_RESULTS) return;
                 gpr.v0 = input[0..$].map!(i => i.buttons << 8)
-                                    .canFind!(b => (b & BUTTON.A) && (b & BUTTON.Z));
+                                    .canFind!(b => (b & Button.A) && (b & Button.Z));
             });
         }
 
@@ -1151,25 +1156,85 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         if (config.balanceSuperHardCPU) {
             iota(4).each!((i) {
                 data.players[i].cpuDifficulty.onRead((ref ubyte difficulty) {
-                    if (difficulty != CPU_DIFFICULTY.SUPER_HARD) return;
+                    if (difficulty != CPUDifficulty.SUPER_HARD) return;
 
                     switch (data.currentScene) {
+                        case Scene.TOADSTOOL_TITAN:
+                        case Scene.LOG_JAM:
+                            difficulty = CPUDifficulty.NORMAL;
+                            break;
+
                         case Scene.BABY_BOWSER_BROADSIDE:
                         case Scene.HYPER_HYDRANTS:
                         case Scene.PICKING_PANIC:
-                        case Scene.LOG_JAM:
-                        case Scene.TOADSTOOL_TITAN:
                         case Scene.THE_BEAT_GOES_ON:
                         case Scene.CHEEP_CHEEP_CHASE:
                         case Scene.POPGUN_PICK_OFF:
                         case Scene.BOWSER_TOSS:
-                            difficulty = CPU_DIFFICULTY.HARD;
+                            difficulty = CPUDifficulty.HARD;
                             break;
 
                         default:
                             break;
                     }
                 });
+            });
+        }
+
+        if (config.chanceSwapInsteadOfTransfer) {
+            0x8010D5FC.onExecDone({ // Write chance outcome
+                if (data.currentScene != Scene.CHANCE_TIME) return;
+                if (data.chanceCharacter1 == -1) return;
+                if (data.chanceCharacter2 == -1) return;
+                if (data.chancePrize      == -1) return;
+
+                auto p1 = players.find!(p => p.data.character == data.chanceCharacter1).front;
+                auto p2 = players.find!(p => p.data.character == data.chanceCharacter2).front;
+
+                switch (data.chancePrize) {
+                    case ChancePrize.COINS_ALL:
+                        if (p1.data.coins < p2.data.coins) {
+                            data.chanceCharacter1 = p2.data.character;
+                            data.chanceCharacter2 = p1.data.character;
+                        }
+                        break;
+
+                    case ChancePrize.STARS_ALL:
+                        if (p1.data.stars < p2.data.stars) {
+                            data.chanceCharacter1 = p2.data.character;
+                            data.chanceCharacter2 = p1.data.character;
+                        }
+                        break;
+
+                    default:
+                        break;
+                }
+            });
+
+            0x8010FA4C.onExecDone({ // Decide if coins will transfer
+                if (data.currentScene != Scene.CHANCE_TIME) return;
+
+                gpr.v0 = 1;
+            });
+
+            0x8010FA80.onExecDone({ // Decide if stars will transfer
+                if (data.currentScene != Scene.CHANCE_TIME) return;
+
+                gpr.v0 = 1;
+            });
+
+            0x8010E650.onExecDone({ // Decide coin transfer amount
+                if (data.currentScene != Scene.CHANCE_TIME) return;
+                if (data.chancePrize != ChancePrize.COINS_ALL) return;
+
+                gpr.v0 = data.players[data.chancePlayer1].coins - data.players[data.chancePlayer2].coins;
+            });
+
+            0x8010E684.onExecDone({ // Decide star transfer amount
+                if (data.currentScene != Scene.CHANCE_TIME) return;
+                if (data.chancePrize != ChancePrize.STARS_ALL) return;
+
+                gpr.v0 = data.players[data.chancePlayer1].stars - data.players[data.chancePlayer2].stars;
             });
         }
     }
@@ -1210,11 +1275,24 @@ enum Item : byte {
     WACKY_WATCH      = 0x12
 }
 
-enum CPU_DIFFICULTY : byte {
+enum CPUDifficulty : byte {
     EASY       = 0,
     NORMAL     = 1,
     HARD       = 2,
     SUPER_HARD = 3
+}
+
+enum ChancePrize : byte {
+    UNDEFINED = -1,
+    COINS_ALL =  0,
+    COINS_30  =  1,
+    COINS_20  =  2,
+    COINS_10  =  3,
+    COINS_1   =  4, 
+    STARS_ALL =  5,
+    STARS_3   =  6,
+    STARS_2   =  7,
+    STARS_1   =  8
 }
 
 enum Scene : uint {
@@ -1455,6 +1533,12 @@ enum GamePhase {
     EARLY = 0,
     MID   = 1,
     END   = 2
+}
+
+enum MessageSpeed : ubyte {
+    FAST   = 0,
+    NORMAL = 1,
+    SLOW   = 2
 }
 
 MiniGameType type(MiniGame game) {

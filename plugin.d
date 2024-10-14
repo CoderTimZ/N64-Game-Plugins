@@ -422,7 +422,7 @@ union FPR {
     }
 };
 
-enum BUTTON : ushort {
+enum Button : ushort {
     C_R = 0x0001,
     C_L = 0x0002,
     C_D = 0x0004,
@@ -439,7 +439,7 @@ enum BUTTON : ushort {
     A   = 0x8000
 }
 
-enum MSG_LEVEL {
+enum MsgLevel {
     ERROR   = 1,
     WARNING = 2,
     INFO    = 3,
@@ -675,27 +675,27 @@ Address[] searchMemory(immutable uint[] data) {
 }
 
 void info(T...)(T args) {
-    msg(MSG_LEVEL.INFO, args);
+    msg(MsgLevel.INFO, args);
     version (Windows) { } else {
         stdout.writeln(args);
     }
 }
 
 void warning(T...)(T args) {
-    msg(MSG_LEVEL.WARNING, args);
+    msg(MsgLevel.WARNING, args);
     version (Windows) { } else {
         stderr.writeln(args);
     }
 }
 
 void error(T...)(T args) {
-    msg(MSG_LEVEL.ERROR, args);
+    msg(MsgLevel.ERROR, args);
     version (Windows) { } else {
         stderr.writeln(args);
     }
 }
 
-void msg(T...)(MSG_LEVEL level, T args) {
+void msg(T...)(MsgLevel level, T args) {
     if (!debugCallback) return;
 
     string message;
