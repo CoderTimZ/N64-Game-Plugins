@@ -522,7 +522,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 gameText ~= *(c++);
             }
 
-            if (gameText == "\x0B\x27\x85\x85\x85Board\x00\x00") {
+            if (gameText == "\x0B\x27\x85\x85\x85Board\x00\x00" && isBoardScene()) {
                 gameText = formatText("<YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET><NUL><NUL>");
             }
 
@@ -546,6 +546,17 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 if (gameText.canFind("present of")) {
                     gameText = gameText.replace("10", lastFiveTurnsBonus.to!string);
                 }
+            }
+
+            if (config.chanceSwapInsteadOfTransfer && data.currentScene == Scene.CHANCE_TIME) {
+                if (gameText.canFind("all coins") || gameText.canFind("all stars")) {
+                    gameText = gameText.replace("gives\n", "swaps\n").replace("\nto", "\nwith");
+                }
+
+                gameText = gameText.replace("\u0005\u0011\u0019 doesn\\t have\na \u0007\u000Fsingle\u0016\u0019 \u0007\u000Fstar",
+                                            "Both players have the\n\u0007\u000Fsame number\u0016\u0019 of stars")
+                                   .replace("\u0005\u0011\u0019 doesn\\t have\na \u0003\u000Fsingle coin\u0016\u0019",
+                                            "Both players have the\n\u0007\u000Fsame number\u0016\u0019 of coins");
             }
             
             gpr.s1 = cast(ushort)gameText.length;
@@ -1212,26 +1223,34 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 }
             });
 
-            0x8010FA4C.onExecDone({ // Decide if coins will transfer
+            0x8010FA4C.onExecDone({ // Check if coins will transfer
                 if (data.currentScene != Scene.CHANCE_TIME) return;
+                if (data.chancePrize != ChancePrize.COINS_ALL) return;
 
-                gpr.v0 = 1;
+                auto p1 = players.find!(p => p.data.character == data.chanceCharacter1).front;
+                auto p2 = players.find!(p => p.data.character == data.chanceCharacter2).front;
+
+                gpr.v0 = p1.data.coins - p2.data.coins;
             });
 
-            0x8010FA80.onExecDone({ // Decide if stars will transfer
+            0x8010FA80.onExecDone({ // Check if stars will transfer
                 if (data.currentScene != Scene.CHANCE_TIME) return;
+                if (data.chancePrize != ChancePrize.STARS_ALL) return;
 
-                gpr.v0 = 1;
+                auto p1 = players.find!(p => p.data.character == data.chanceCharacter1).front;
+                auto p2 = players.find!(p => p.data.character == data.chanceCharacter2).front;
+
+                gpr.v0 = p1.data.stars - p2.data.stars;
             });
 
-            0x8010E650.onExecDone({ // Decide coin transfer amount
+            0x8010E650.onExecDone({ // Determine coin transfer amount
                 if (data.currentScene != Scene.CHANCE_TIME) return;
                 if (data.chancePrize != ChancePrize.COINS_ALL) return;
 
                 gpr.v0 = data.players[data.chancePlayer1].coins - data.players[data.chancePlayer2].coins;
             });
 
-            0x8010E684.onExecDone({ // Decide star transfer amount
+            0x8010E684.onExecDone({ // Determine star transfer amount
                 if (data.currentScene != Scene.CHANCE_TIME) return;
                 if (data.chancePrize != ChancePrize.STARS_ALL) return;
 
