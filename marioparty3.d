@@ -549,14 +549,16 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             }
 
             if (config.chanceSwapInsteadOfTransfer && data.currentScene == Scene.CHANCE_TIME) {
-                if (gameText.canFind("all coins") || gameText.canFind("all stars")) {
-                    gameText = gameText.replace("gives\n", "swaps\n").replace("\nto", "\nwith");
-                }
+                if (data.chancePrize == ChancePrize.COINS_ALL || data.chancePrize == ChancePrize.STARS_ALL) {
+                    if (gameText.canFind("all coins") || gameText.canFind("all stars")) {
+                        gameText = gameText.replace("all ", "").replace("gives\n", "swaps\n").replace("\nto", " with");
+                    }
 
-                gameText = gameText.replace("\u0005\u0011\u0019 doesn\\t have\na \u0007\u000Fsingle\u0016\u0019 \u0007\u000Fstar",
-                                            "Both players have the\n\u0007\u000Fsame number\u0016\u0019 of stars")
-                                   .replace("\u0005\u0011\u0019 doesn\\t have\na \u0003\u000Fsingle coin\u0016\u0019",
-                                            "Both players have the\n\u0007\u000Fsame number\u0016\u0019 of coins");
+                    gameText = gameText.replace("\u0005\u0011\u0019 doesn\\t have\na \u0007\u000Fsingle\u0016\u0019 \u0007\u000Fstar",
+                                                "Both players have the\n\u0007\u000Fsame number\u0016\u0019 of stars")
+                                       .replace("\u0005\u0011\u0019 doesn\\t have\na \u0003\u000Fsingle coin\u0016\u0019",
+                                                "Both players have the\n\u0007\u000Fsame number\u0016\u0019 of coins");
+                }
             }
             
             gpr.s1 = cast(ushort)gameText.length;
