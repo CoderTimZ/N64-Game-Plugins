@@ -45,6 +45,7 @@ class Config {
     bool autoStartNextBoard = false;
     bool balanceSuperHardCPU = false;
     bool chanceSwapInsteadOfTransfer = false;
+    ChancePrize[ChancePrize] chancePrizeReplace;
 
     this() {
         bonuses = [
@@ -1235,6 +1236,15 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 if (data.chancePrize != ChancePrize.STARS_ALL) return;
 
                 gpr.v0 = data.players[data.chancePlayer1].stars - data.players[data.chancePlayer2].stars;
+            });
+        }
+
+        if (!config.chancePrizeReplace.empty) {
+            0x8010D190.onExecDone({
+                if (data.currentScene != Scene.CHANCE_TIME) return;
+
+                auto replacement = cast(ChancePrize)gpr.v0 in config.chancePrizeReplace;
+                if (replacement) gpr.v0 = *replacement;
             });
         }
     }
