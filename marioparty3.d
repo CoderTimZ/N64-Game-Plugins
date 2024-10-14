@@ -1178,11 +1178,11 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
                         case Scene.BABY_BOWSER_BROADSIDE:
                         case Scene.HYPER_HYDRANTS:
-                        case Scene.PICKING_PANIC:
                         case Scene.THE_BEAT_GOES_ON:
                         case Scene.CHEEP_CHEEP_CHASE:
                         case Scene.POPGUN_PICK_OFF:
                         case Scene.BOWSER_TOSS:
+                        case Scene.SILLY_SCREWS:
                             difficulty = CPUDifficulty.HARD;
                             break;
 
