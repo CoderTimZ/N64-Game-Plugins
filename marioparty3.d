@@ -1173,8 +1173,11 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     if (difficulty != CPUDifficulty.SUPER_HARD) return;
 
                     switch (data.currentScene) {
-                        case Scene.TOADSTOOL_TITAN:
                         case Scene.LOG_JAM:
+                            difficulty = CPUDifficulty.EASY;
+                            break;
+
+                        case Scene.TOADSTOOL_TITAN:
                             difficulty = CPUDifficulty.NORMAL;
                             break;
 
