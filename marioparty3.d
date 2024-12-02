@@ -91,7 +91,6 @@ class State {
     CustomSpace[] spaces;
     uint luckySpaceTexturePtr;
     uint goldSpaceTexturePtr;
-    ubyte[] usedBattleSpaces;
     string[] boardNames;
 }
 
@@ -1006,27 +1005,11 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         }
 
         if (config.singleUseBattleSpaces) {
-            data.currentScene.onWrite((ref Scene scene) {
-                if (scene == Scene.START_BOARD) {
-                    state.usedBattleSpaces.length = 0;
-                    saveState();
-                }
-            });
-
             data.battleRoutineComplete.addr.onExec({
                 if (!isBoardScene()) return;
                 if (!gpr.v0) return; // Battle cancelled
-                if (data.spaces[data.currentSpaceIndex].type != Space.Type.BATTLE) return;
-                if (state.usedBattleSpaces.canFind(data.currentSpaceIndex)) return;
-                state.usedBattleSpaces ~= data.currentSpaceIndex;
+                state.spaces[data.currentSpaceIndex] = CustomSpace.BLUE;
                 saveState();
-            });
-
-            0x800EAEF4.onExec({
-                if (!isBoardScene()) return;
-                if (gpr.v0 == Space.Type.BATTLE && state.usedBattleSpaces.canFind(gpr.s2)) {
-                    gpr.v0 = Space.Type.BLUE;
-                }
             });
         }
 
