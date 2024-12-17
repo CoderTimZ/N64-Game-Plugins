@@ -243,41 +243,6 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
             }
         }
 
-        static if (is(typeof(config.teamControl))) {
-            void setDistinctCPUControllers() {
-                players.filter!(p => p.isCPU).each!((p) {
-                    p.data.controller = cast(ubyte)iota(4).filter!(i =>
-                        players.filter!(o => o !is p).all!(o => o.data.controller != i)
-                    ).front;
-                });
-            }
-
-            if (config.teamControl) {
-                players.each!((p) {
-                    p.data.flags.onWrite((ref ubyte flags) {
-                        auto leader = teamMembers(p).front;
-                        if (p is leader) {
-                            teammates(p).each!(t => t.data.flags = flags);
-                        } else {
-                            flags = p.data.flags = leader.data.flags;
-                        }
-
-                        setDistinctCPUControllers();
-                    });
-                    p.data.controller.onWrite((ref ubyte controller) {
-                        auto leader = teamMembers(p).front;
-                        if (p is leader) {
-                            teammates(p).each!(t => t.data.controller = controller);
-                        } else {
-                            controller = leader.data.controller;
-                        }
-
-                        setDistinctCPUControllers();
-                    });
-                });
-            }
-        }
-
         static if (is(typeof(data.numberOfRolls))) {
             if (config.lastPlaceDoubleRoll) {
                 data.numberOfRolls.onRead((ref ubyte rolls) {
@@ -289,5 +254,27 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
                 });
             }
         }
+    }
+
+    override void onInput(int port, InputData* data) {
+        static InputData[4] input;
+
+        super.onInput(port, data);
+
+        static if (is(typeof(config.teamControl))) {
+            if (config.teamControl) {
+                auto p = players.find!(p => p.data.controller == port);
+                if (!p.empty) {
+                    auto t = players.find!(t => team(t) == team(p.front) && t.data.controller < port && !t.isCPU);
+                    if (!t.empty) {
+                        p.front.data.flags &= ~0b1; // Disable CPU flag
+
+                        *data = input[t.front.data.controller];
+                    }
+                }
+            }
+        }
+
+        input[port] = *data;
     }
 }
