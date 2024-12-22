@@ -475,16 +475,16 @@ static T loadJson(T)(string filename) {
         if (!json) json = new T;
         json.saveJson(filename);
         return json;
-    } catch (JSONException e) {
-        auto msg = filename ~ ": " ~ e.message;
-        error("[" ~ e.classinfo.name ~ "] " ~ msg);
-        MessageBoxA(window, msg.toStringz, e.classinfo.name.toStringz, MB_ICONEXCLAMATION);
-        return null;
-    } catch (Exception e) {
+    } catch (FileException e) {
         warning("[" ~ e.classinfo.name ~ "] " ~ e.message);
         T json = new T;
         json.saveJson(filename);
         return json;
+    } catch (Exception e) {
+        auto msg = e.classinfo.name ~ ": " ~ e.message;
+        error("[" ~ filename ~ "] " ~ msg);
+        MessageBoxA(window, msg.toStringz, filename.toStringz, MB_ICONEXCLAMATION);
+        return null;
     }
 }
 
@@ -493,9 +493,9 @@ static void saveJson(T)(T json, string filename) {
         try {
             std.file.write(filename, json.toJSON().toPrettyString().lossyFloats());
         } catch (Exception e) {
-            auto msg = filename ~ ": " ~ e.message;
-            error("[" ~ e.classinfo.name ~ "] " ~ msg);
-            MessageBoxA(window, msg.toStringz, e.classinfo.name.toStringz, MB_ICONEXCLAMATION);
+            auto msg = e.classinfo.name ~ ": " ~ e.message;
+            error("[" ~ filename ~ "] " ~ msg);
+            MessageBoxA(window, msg.toStringz, filename.toStringz, MB_ICONEXCLAMATION);
         }
     }
 }
