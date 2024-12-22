@@ -102,8 +102,10 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
     abstract bool disableTeamScores() const;
     abstract bool isBoardScene(Scene scene) const;
     abstract bool isScoreScene(Scene scene) const;
+    abstract bool isSetupScene(Scene scene) const;
     bool isBoardScene() const { return isBoardScene(data.currentScene); }
     bool isScoreScene() const { return isScoreScene(data.currentScene); }
+    bool isSetupScene() const { return isSetupScene(data.currentScene); }
 
     auto team(const Player p) const {
         return teams[p.data.character];
@@ -262,7 +264,7 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
         super.onInput(port, data);
 
         static if (is(typeof(config.teamControl))) {
-            if (config.teamControl) {
+            if (config.teamControl && !isSetupScene()) {
                 auto p = players.find!(p => p.data.controller == port);
                 if (!p.empty) {
                     auto t = players.find!(t => team(t) == team(p.front) && t.data.controller < port && !t.isCPU);
