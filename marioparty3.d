@@ -379,9 +379,13 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         return false;
     }
 
+    override bool disableTeamControl() const {
+        return data.currentScene == Scene.GAME_SETUP
+            || data.currentScene == Scene.FINAL_RESULTS;
+    }
+
     alias isBoardScene = typeof(super).isBoardScene;
     alias isScoreScene = typeof(super).isScoreScene;
-    alias isSetupScene = typeof(super).isSetupScene;
 
     override bool isBoardScene(Scene scene) const {
         switch (scene) {
@@ -431,10 +435,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             default:
                 return isBoardScene(scene);
         }
-    }
-
-    override bool isSetupScene(Scene scene) const {
-        return scene == Scene.GAME_SETUP;
     }
 
     GamePhase getGamePhase() {

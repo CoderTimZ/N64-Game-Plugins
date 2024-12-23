@@ -120,9 +120,13 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
         return false;
     }
 
+    override bool disableTeamControl() const {
+        return data.currentScene == Scene.GAME_SETUP
+            || data.currentScene == Scene.FINAL_RESULTS;
+    }
+
     alias isBoardScene = typeof(super).isBoardScene;
     alias isScoreScene = typeof(super).isScoreScene;
-    alias isSetupScene = typeof(super).isSetupScene;
 
     override bool isBoardScene(Scene scene) const {
         return false;
@@ -130,10 +134,6 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
 
     override bool isScoreScene(Scene scene) const {
         return false;
-    }
-
-    override bool isSetupScene(Scene scene) const {
-        return scene == Scene.GAME_SETUP;
     }
 
     override void onStart() {
@@ -167,6 +167,7 @@ enum Block : ubyte {
 }
 
 enum Scene : uint {
-    BOOT = 0,
-    GAME_SETUP = 106
+    BOOT          =   0,
+    FINAL_RESULTS =  64,
+    GAME_SETUP    = 106
 }
