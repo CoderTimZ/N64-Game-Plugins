@@ -29,6 +29,7 @@ class Config {
     bool itemsOnFinalTurn = false;
     float[Space.Type] standardSpaceRatio;
     float luckySpaceRatio = 0.0;
+    float luckySpaceItemChance = 0.333;
     MiniGame[] blockedMiniGames;
     bool doubleCoinMiniGames = false;
     bool mpiqPermadeath = false;
@@ -102,6 +103,7 @@ union Memory {
     mixin Field!(0x800365A8, Instruction, "textChar");
     mixin Field!(0x8004ACE0, Instruction, "playSFX");
     mixin Field!(0x80097650, uint, "randomState");
+    mixin Field!(0x800ABF8A, Arr!(ubyte, 4), "controllerPresent");
     mixin Field!(0x800CC378, Arr!(short, 4), "finalPlayerRankOrder");
     mixin Field!(0x800CC4E4, ushort, "itemHiddenBlock");
     mixin Field!(0x800CD059, ubyte, "currentBoard");
@@ -896,8 +898,8 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 if (state.spaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
                 if (data.spaces[data.currentSpaceIndex].type != Space.Type.BLUE) return;
 
-                if (uniform!"[]"(1, 3, random) == 1) {
-                    gpr.v0 = Space.Type.ITEM; // 1 in 3 chance of item event on lucky space 
+                if (random.uniform01() < config.luckySpaceItemChance) {
+                    gpr.v0 = Space.Type.ITEM;
                 }
             });
             data.blueOrRedSpaceCoins.addr.onExec({ // Give extra coins on lucky space

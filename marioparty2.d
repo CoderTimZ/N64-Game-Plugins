@@ -27,6 +27,7 @@ class Config {
     string[BonusType] bonuses;
     float[Space.Type] standardSpaceRatio;
     float luckySpaceRatio = 0;
+    float luckySpaceItemChance = 0.5;
     //bool revealHiddenBlocksOnFinalTurn = false;
     float mapScrollSpeedMultiplier = 1.0;
     bool preventRepeatMiniGames = false;
@@ -839,7 +840,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                 if (gpr.s1) return; // Space already has an event defined
                 if (gpr.s0 >= state.spaces.length) return;
                 if (state.spaces[gpr.s0] != CustomSpace.LUCKY) return;
-                if (itemsFull(currentPlayer) || uniform!"[]"(0, 1, random)) return;
+                if (itemsFull(currentPlayer) || random.uniform01() >= config.luckySpaceItemChance) return; // Give coins
 
                 0x800662F0.onExecOnce({ gpr.v0 = 1; }); // Skip giving coins
                 gpr.ra.onExecOnce({ clearExecOnce(0x800662F0); });
