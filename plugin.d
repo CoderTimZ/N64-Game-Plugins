@@ -717,6 +717,8 @@ struct ExecutionInfo {
     FPR* fpr;
     ubyte* memory;
     uint memorySize;
+    void function() saveGameState;
+    void function(int) setSaveStateSlot;
 }
 
 __gshared {
@@ -730,6 +732,8 @@ __gshared {
     GPR* gpr;
     FPR* fpr;
     ubyte[] memory;
+    void function() saveGameState;
+    void function(int) setSaveStateSlot;
     ulong frame;
     InputData[4] input;
     SHA256 sha256;
@@ -813,6 +817,8 @@ extern (C) {
             gpr = ei.gpr;
             fpr = ei.fpr;
             memory = ei.memory[0..ei.memorySize];
+            saveGameState = ei.saveGameState;
+            setSaveStateSlot = ei.setSaveStateSlot;
             frame = 0;
             input.each!((ref b) { b.value = 0; });
             executeHandlers.clear();

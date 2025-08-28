@@ -32,6 +32,7 @@ class Config {
     float mapScrollSpeedMultiplier = 1.0;
     bool preventRepeatMiniGames = false;
     MiniGame[] blockedMiniGames;
+    bool saveStateBeforeEachPlayerTurn = false;
 
     this() {
         bonuses = [
@@ -75,6 +76,7 @@ class State {
     ShuffleQueue!Board itemGameQueue;
     ShuffleQueue!Board duelGameQueue;
     CustomSpace[] spaces;
+    float lastPlayerSaveTurn = 0;
 }
 
 union Chain {

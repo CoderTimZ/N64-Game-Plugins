@@ -47,6 +47,7 @@ class Config {
     bool balanceSuperHardCPU = false;
     bool chanceSwapInsteadOfTransfer = false;
     ChancePrize[ChancePrize] chancePrizeReplace;
+    bool saveStateBeforeEachPlayerTurn = false;
 
     this() {
         bonuses = [
@@ -93,6 +94,7 @@ class State {
     uint luckySpaceTexturePtr;
     uint goldSpaceTexturePtr;
     string[] boardNames;
+    float lastPlayerSaveTurn = 0;
 }
 
 union Memory {
@@ -653,6 +655,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             data.currentScene.onWrite((ref Scene scene) {
                 if (scene == Scene.START_BOARD) {
                     state.miniGameQueue.clear();
+                    state.lastPlayerSaveTurn = 0;
                     saveState();
                 }
             });

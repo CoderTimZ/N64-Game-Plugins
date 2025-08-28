@@ -186,10 +186,10 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
 
                 data.currentPlayerIndex.onWrite((ref typeof(data.currentPlayerIndex) index) {
                     if (!isBoardScene()) return;
-                    data.currentPlayerIndex = index;
-                    teammates(currentPlayer).each!((t) {
-                        t.data.coins = currentPlayer.data.coins;
-                        t.data.stars = currentPlayer.data.stars;
+                    if (index >= 4) return;
+                    teammates(players[index]).each!((t) {
+                        t.data.coins = players[index].data.coins;
+                        t.data.stars = players[index].data.stars;
                     });
                 });
 
@@ -277,5 +277,20 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
         }
 
         input[port] = *data;
+    }
+
+    override void onFrame(ulong frame) {
+        if (config.saveStateBeforeEachPlayerTurn) {
+            if (!isBoardScene(data.currentScene)) return;
+
+            float currentPlayerTurn = data.currentTurn + data.currentPlayerIndex / 4.0f;
+            if (currentPlayerTurn <= state.lastPlayerSaveTurn) return;
+
+            state.lastPlayerSaveTurn = currentPlayerTurn;
+            saveState();
+
+            setSaveStateSlot(data.currentPlayerIndex + 1);
+            saveGameState();
+        }
     }
 }

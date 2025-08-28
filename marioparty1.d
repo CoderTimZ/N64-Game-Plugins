@@ -15,6 +15,7 @@ import std.traits;
 class Config {
     Character[] characters = [Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED];
     float[Block] blockWeights;
+    bool saveStateBeforeEachPlayerTurn = false;
 
     this() {
         blockWeights = [
@@ -39,6 +40,8 @@ class State {
         new PlayerState(),
         new PlayerState()
     ];
+
+    float lastPlayerSaveTurn = 0;
 }
 
 union PlayerData {
