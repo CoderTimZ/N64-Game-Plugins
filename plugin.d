@@ -13,9 +13,7 @@ import std.traits;
 import std.stdio;
 import std.typecons;
 import std.math;
-import std.bitmanip;
 import std.regex;
-import std.digest.sha;
 
 alias Address     = uint;
 alias Instruction = uint;
@@ -175,27 +173,6 @@ T fromJSON(T)(const JSONValue obj, T result = null) if (is(T == class)) {
     }
 }
 
-struct PCG {
-    import core.bitop;
-
-    enum isUniformRandom = true;
-    enum hasFixedRange = true;
-    enum min = uint.min;
-    enum max = uint.max;
-    enum empty = false;
-    enum a = 0x5851f42d4c957f2d;
-    enum c = 0x14057b7ef767814f;
-
-    ulong state;
-
-    this(ulong s) @safe nothrow @nogc { seed(s); }
-    void seed(ulong s) @safe nothrow @nogc { state = s; popFront(); }
-    auto save() const @safe nothrow @nogc { return this; }
-    @property uint front() const @safe nothrow @nogc { return ror(cast(uint)(((state >> 18) ^ state) >> 27), state >> 59); }
-    void popFront() @safe nothrow @nogc { state = state * a + c; }
-    uint next() @safe nothrow @nogc { uint f = front; popFront(); return f; }
-}
-
 struct SplitMix64 {
     enum isUniformRandom = true;
     enum hasFixedRange = true;
@@ -206,16 +183,16 @@ struct SplitMix64 {
     ulong state;
 
     this(ulong s) @safe nothrow @nogc { seed(s); }
-    void seed(ulong s) @safe nothrow @nogc { state = s; popFront(); }
+    void seed(ulong s) @safe nothrow @nogc { state = s; }
     auto save() const @safe nothrow @nogc { return this; }
     @property ulong front() const @safe nothrow @nogc { return hash(state); }
     void popFront() @safe nothrow @nogc { state += 0x9e3779b97f4a7c15; }
-    ulong next() @safe nothrow @nogc { ulong f = front; popFront(); return f; }
+    ulong next() @safe nothrow @nogc { popFront(); return front; }
 
     static ulong hash(ulong z) @safe nothrow @nogc pure {
-        z ^= z >> 30; z *= 0xbf58476d1ce4e5b9;
-        z ^= z >> 27; z *= 0x94d049bb133111eb;
-        z ^= z >> 31; return z;
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
+        z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
+        return z ^ (z >> 31);
     }
 }
 
@@ -230,13 +207,11 @@ struct Xoshiro256pp {
 
     ulong[4] state;
     
-    this(ulong s) @safe nothrow @nogc { seed(s); }
     this(ulong[4] s) @safe nothrow @nogc { seed(s); }
-    void seed(ulong s) @safe nothrow @nogc {
-        auto r = SplitMix64(s);
-        seed([r.next, r.next, r.next, r.next]);
-    }
+    this(ulong s) @safe nothrow @nogc { seed(s); }
     void seed(ulong[4] s) @safe nothrow @nogc { state = s; }
+    void seed(ulong s) @safe nothrow @nogc { seed([0, 0, 0, 0]); reseed(s); }
+    void reseed(ulong s) @safe nothrow @nogc { auto r = SplitMix64(s); state.each!((ref e) => e ^= r.next); }
     auto save() const @safe nothrow @nogc { return this; }
     @property ulong front() const @safe nothrow @nogc { return rol(state[0] + state[3], 23) + state[0]; }
     void popFront() @safe nothrow @nogc {
@@ -248,7 +223,7 @@ struct Xoshiro256pp {
         state[2] ^= temp;
         state[3] = rol(state[3], 45);
     }
-    ulong next() @safe nothrow @nogc { ulong f = front; popFront(); return f; }
+    ulong next() @safe nothrow @nogc { popFront(); return front; }
 }
 
 double normal(Random)(ref Random r) @safe {
@@ -736,9 +711,6 @@ __gshared {
     void function(int) setSaveStateSlot;
     ulong frame;
     InputData[4] input;
-    SHA256 sha256;
-    int reseedCooldown;
-    bool reseedPending;
     Plugin function(string, string) pluginFactory;
     void delegate(Address)[][Address] executeHandlers;
     void delegate(Address)[][Address] executeOnceHandlers;
@@ -797,19 +769,10 @@ extern (C) {
         }
     }
 
-    void reseed(int cooldown) {
-        auto hash = sha256.finish();
-        sha256.start();
-        iota(4).each!(i => random.state[i] = (cast(ulong*)hash)[i]);
-        reseedPending = false;
-        reseedCooldown = cooldown;
-    }
-
     export void InitiateExecution(ExecutionInfo ei) {
         try {
             info("Initializing...");
-            sha256.start();
-            reseed(0);
+            random.seed(0);
             window = ei.window;
             addrMask = ei.addrMask;
             pc = ei.pc;
@@ -854,12 +817,8 @@ extern (C) {
             catch (Exception e) { error(e); }
         }
 
-        if (*data != input[port] && (data.buttons || data.analogX >= 0x10 || data.analogX < -0x10
-                                                  || data.analogY >= 0x10 || data.analogY < -0x10)) {            
-            sha256.put((cast(ubyte*)&frame)[0..frame.sizeof]);
-            sha256.put((cast(ubyte*) &port)[0..port.sizeof]);
-            sha256.put((cast(ubyte*)  data)[0..data.sizeof]);
-            reseedPending = true;
+        if (*data && *data != input[port]) {
+            random.reseed((frame << 34) | (cast(ulong)port << 32) | *data);
         }
 
         input[port] = *data;
@@ -867,20 +826,9 @@ extern (C) {
 
     export void Frame(uint f) {
         if (plugin) {
-            try { plugin.onFrame(frame); }
+            try { plugin.onFrame(frame++); }
             catch (Exception e) { error(e); }
         }
-
-        if (reseedCooldown > 0) {
-            reseedCooldown--;
-        } else if (reseedCooldown == 0 && reseedPending) {
-            sha256.put((cast(ubyte*)&random.state)[0..random.state.sizeof]);
-            reseed(300);
-        }
-
-        random.popFront();
-
-        frame++;
     }
 
     export void Execute(Address pc) {
