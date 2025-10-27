@@ -126,6 +126,10 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
         return p && !players.filter!(o => o !is p).any!(o => p.isAheadOf(o));
     }
 
+    int remainingTurns() const {
+        return cast(int)data.totalTurns - cast(int)data.currentTurn + 1;
+    }
+
     override void onStart() {
         super.onStart();
 

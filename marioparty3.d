@@ -42,7 +42,7 @@ class Config {
     bool increaseItemGameVariety = false;
     bool increaseItemShopVariety = false;
     float toadShopChance = -1.0;
-    bool replaceWackyWatch = false;
+    int replaceWackyWatchBeforeRemainingTurns = 50;
     bool autoStartNextBoard = false;
     bool balanceSuperHardCPU = false;
     bool chanceSwapInsteadOfTransfer = false;
@@ -803,7 +803,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     spaceLists.each!((ref e) => e.length = 0);
                     foreach (i; iota(data.spaceCount)) {
                         if (data.spaces[i].type == Space.Type.BLUE) {
-                            if (data.currentTurn + config.revealHiddenBlocksOnRemainingTurns > data.totalTurns &&
+                            if (remainingTurns() <= config.revealHiddenBlocksOnRemainingTurns &&
                                (i == data.itemHiddenBlock || i == data.coinHiddenBlock || i == data.starHiddenBlock)) {
                                 spaceLists[CustomSpace.HIDDEN] ~= cast(ubyte)i;
                                 continue;
@@ -1122,17 +1122,17 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             });
         }
 
-        if (config.replaceWackyWatch) {
-            players.each!((p) {
-                foreach (i; iota(3)) {
-                    p.data.items[i].onWrite((ref Item item) {
-                        if (item == Item.WACKY_WATCH) {
-                            item = [Item.KOOPA_KARD, Item.BARTER_BOX, Item.LUCKY_CHARM].choice(random);
-                        }
-                    });
-                }
-            });
-        }
+        players.each!((p) {
+            foreach (i; iota(3)) {
+                p.data.items[i].onWrite((ref Item item) {
+                    if (remainingTurns() <= config.replaceWackyWatchBeforeRemainingTurns) return;
+
+                    if (item == Item.WACKY_WATCH) {
+                        item = [Item.KOOPA_KARD, Item.BARTER_BOX, Item.LUCKY_CHARM].choice(random);
+                    }
+                });
+            }
+        });
 
         if (config.autoStartNextBoard) {
             0x80048228.onExec({

@@ -900,10 +900,10 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                 if (i >= state.spaces.length) return;
                 if (state.spaces[i] != CustomSpace.LUCKY) return;
 
-                if (data.currentTurn <= data.totalTurns - 5) {
-                    gpr.s0 = [7, 10, 12, 15, 20].choice(random);
-                } else {
+                if (remainingTurns() <= 5) {
                     gpr.s0 =        [12, 15, 20].choice(random);
+                } else {
+                    gpr.s0 = [7, 10, 12, 15, 20].choice(random);
                 }
             });
             data.currentScene.onWrite((ref Scene scene) {
