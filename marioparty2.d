@@ -76,7 +76,7 @@ class State {
     ShuffleQueue!Board itemGameQueue;
     ShuffleQueue!Board duelGameQueue;
     CustomSpace[] spaces;
-    float lastPlayerSaveTurn = 0;
+    float currentPlayerTurn = 0;
 }
 
 union Chain {

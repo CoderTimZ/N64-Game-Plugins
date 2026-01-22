@@ -2,6 +2,7 @@ module me.timz.n64.marioparty3;
 
 import me.timz.n64.marioparty;
 import me.timz.n64.plugin;
+import core.time;
 import std.algorithm;
 import std.random;
 import std.range;
@@ -12,6 +13,7 @@ import std.string;
 import std.file;
 import std.json;
 import std.container.array;
+import vibe.vibe;
 
 class Config {
     Character[] characters = [Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED];
@@ -48,6 +50,7 @@ class Config {
     bool chanceSwapInsteadOfTransfer = false;
     ChancePrize[ChancePrize] chancePrizeReplace;
     bool saveStateBeforeEachPlayerTurn = false;
+    string bingoURL = "";
 
     this() {
         bonuses = [
@@ -94,7 +97,7 @@ class State {
     uint luckySpaceTexturePtr;
     uint goldSpaceTexturePtr;
     string[] boardNames;
-    float lastPlayerSaveTurn = 0;
+    float currentPlayerTurn = 0;
 }
 
 union Memory {
@@ -488,6 +491,21 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     override void onStart() {
         super.onStart();
 
+        if (config.bingoURL && config.bingoURL.length > 0) {
+            URL url;
+            if (config.bingoURL.startsWith("http://")) {
+                url = URL("ws://" ~ config.bingoURL["http://".length..$]);
+            } else if (config.bingoURL.startsWith("https://")) {
+                url = URL("wss://" ~ config.bingoURL["https://".length..$]);
+            } else if (config.bingoURL.startsWith("ws://") || config.bingoURL.startsWith("wss://")) {
+                url = URL(config.bingoURL);
+            } else {
+                url = URL("ws://" ~ config.bingoURL);
+            }
+
+            connect(url);
+        }
+
         /*
         bool[uint] seen;
         0x800843F0.onExec({
@@ -501,6 +519,12 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             gpr.a0 = gpr.a1 = 0x80240340;
         });
         */
+
+        data.currentScene.onWrite((ref Scene scene) {
+            if (scene != Scene.START_BOARD) return;
+            state.currentPlayerTurn = 0;
+            saveState();
+        });
 
         data.currentScene.onWrite((ref Scene scene) {
             if (scene != Scene.CASTLE_GROUNDS) return;
@@ -655,7 +679,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             data.currentScene.onWrite((ref Scene scene) {
                 if (scene == Scene.START_BOARD) {
                     state.miniGameQueue.clear();
-                    state.lastPlayerSaveTurn = 0;
                     saveState();
                 }
             });

@@ -41,7 +41,7 @@ class State {
         new PlayerState()
     ];
 
-    float lastPlayerSaveTurn = 0;
+    float currentPlayerTurn = 0;
 }
 
 union PlayerData {

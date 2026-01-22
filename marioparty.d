@@ -284,17 +284,27 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
     }
 
     override void onFrame(ulong frame) {
+        if (!isBoardScene(data.currentScene)) return;
+
+        float currentPlayerTurn = data.currentTurn + data.currentPlayerIndex / 4.0f;
+        if (currentPlayerTurn <= state.currentPlayerTurn) return;
+
+        state.currentPlayerTurn = currentPlayerTurn;
+        saveState();
+
         if (config.saveStateBeforeEachPlayerTurn) {
-            if (!isBoardScene(data.currentScene)) return;
-
-            float currentPlayerTurn = data.currentTurn + data.currentPlayerIndex / 4.0f;
-            if (currentPlayerTurn <= state.lastPlayerSaveTurn) return;
-
-            state.lastPlayerSaveTurn = currentPlayerTurn;
-            saveState();
-
             setSaveStateSlot(data.currentPlayerIndex + 1);
             saveGameState();
         }
+
+        struct TurnMessage {
+            immutable type = "turn";
+            float currentTurn;
+            int totalTurns;
+        }
+        TurnMessage msg;
+        msg.currentTurn = currentPlayerTurn;
+        msg.totalTurns = data.totalTurns;
+        sendMessage(msg.toJSON());
     }
 }

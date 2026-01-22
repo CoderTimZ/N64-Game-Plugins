@@ -14,6 +14,9 @@ import std.stdio;
 import std.typecons;
 import std.math;
 import std.regex;
+import vibe.core.concurrency;
+import vibe.core.task;
+import vibe.vibe;
 
 alias Address     = uint;
 alias Instruction = uint;
@@ -438,6 +441,7 @@ interface Plugin {
     void loadConfig();
     void onStart();
     void onInput(int, InputData*);
+    void onMessage(string msg);
     void onFrame(ulong);
     void onFinish();
 }
@@ -466,7 +470,7 @@ static T loadJson(T)(string filename) {
 static void saveJson(T)(T json, string filename) {
     static if (!is(T == NoState)) {
         try {
-            std.file.write(filename, json.toJSON().toPrettyString().lossyFloats());
+            std.file.write(filename, json.toJSON().toPrettyString(JSONOptions.doNotEscapeSlashes).lossyFloats());
         } catch (Exception e) {
             auto msg = e.classinfo.name ~ ": " ~ e.message;
             error("[" ~ filename ~ "] " ~ msg);
@@ -511,11 +515,54 @@ abstract class Game(Config, State = NoState) : Plugin {
         }
     }
 
+    void connect(URL url) {
+        spawn((Tid parentTid, URL url) {
+            runTask({
+                while (true) {
+                    try {
+                        auto ws = connectWebSocket(url);
+
+                        synchronized (plugin) {
+                            wsSender = runTask({
+                                try {
+                                    while (ws.connected) {
+                                        ws.send(receiveOnly!string);
+                                    }
+                                } catch (Exception e) { }
+                            });
+                        }
+
+                        while (ws.waitForData()) {
+                            send(parentTid, ws.receiveText());
+                        }
+                    } catch (Exception e) { }
+
+                    try { sleep(1000.msecs); } catch (Exception e) { }
+                }
+            });
+
+            runApplication();
+        }, thisTid, url);
+    }
+
+    void sendMessage(string msg) {
+        synchronized (plugin) {
+            if (wsSender) {
+                send(wsSender, msg);
+            }
+        }
+    }
+
+    void sendMessage(JSONValue msg) {
+        sendMessage(msg.toString(JSONOptions.doNotEscapeSlashes).lossyFloats());
+    }
+
     void onStart() {
         loadConfig();
         loadState();
     }
     void onInput(int, InputData*) { }
+    void onMessage(string msg) { }
     void onFrame(ulong) { }
     void onFinish() {
         if (!stateError) {
@@ -712,6 +759,7 @@ __gshared {
     ulong frame;
     InputData[4] input;
     Plugin function(string, string) pluginFactory;
+    Task wsSender;
     void delegate(Address)[][Address] executeHandlers;
     void delegate(Address)[][Address] executeOnceHandlers;
     void delegate(Address)[][Address] executeDoneHandlers;
@@ -826,7 +874,20 @@ extern (C) {
 
     export void Frame(uint f) {
         if (plugin) {
-            try { plugin.onFrame(frame++); }
+            try {
+                synchronized (plugin) {
+                    if (wsSender) {
+                        receiveTimeout(Duration.zero, (string msg) {
+                            try {
+                                plugin.onMessage(msg);
+                            }
+                            catch (Exception e) { error(e); }
+                        });
+                    }
+                }
+                
+                plugin.onFrame(frame++);
+            }
             catch (Exception e) { error(e); }
         }
     }
