@@ -51,6 +51,7 @@ class Config {
     ChancePrize[ChancePrize] chancePrizeReplace;
     bool saveStateBeforeEachPlayerTurn = false;
     string bingoURL = "";
+    bool rankPlayersByBingoScore = false;
 
     this() {
         bonuses = [
@@ -83,6 +84,9 @@ class Config {
 
 class PlayerState {
     int luckySpaceCount = 0;
+    string name;
+    int bingoCount;
+    int squareCount;
 }
 
 class State {
@@ -657,6 +661,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 if (data.currentScene != Scene.FINISH_BOARD) return;
                 if (bonus.length < 3) return;
                 gpr.v0 = getBonusStat(players[gpr.s2], bonus[BonusType.HAPPENING]);
+            });
+            0x800EEA78.onExec({
+                if (0x800EE9E0.val!uint != 0x0C03BB2C) return;
+                gpr.v0 = 0; // Disable vanilla bonus stars for GetPlayerPlacementAtEndOfGame
             });
         }
 
@@ -1270,6 +1278,28 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
                 auto replacement = cast(ChancePrize)gpr.v0 in config.chancePrizeReplace;
                 if (replacement) gpr.v0 = *replacement;
+            });
+        }
+
+        if (config.rankPlayersByBingoScore) {
+            Player player = null;
+
+            0x800EE9C0.onExec({
+                if (0x800EE9E0.val!uint != 0x0C03BB2C) return;
+                player = players[gpr.a0];
+            });
+            0x800EEA50.onExec({
+                if (0x800EE9E0.val!uint != 0x0C03BB2C) return;
+                gpr.v0 = 0;
+                players.filter!(p => p != player).each!((p) {
+                    if (p.state.bingoCount > player.state.bingoCount) gpr.v0++;
+                    else if (p.state.bingoCount < player.state.bingoCount) { }
+                    else if (p.state.squareCount > player.state.squareCount) gpr.v0++;
+                    else if (p.state.squareCount < player.state.squareCount) { }
+                    else if (p.data.stars > player.data.stars) gpr.v0++;
+                    else if (p.data.stars < player.data.stars) { }
+                    else if (p.data.coins > player.data.coins) gpr.v0++;
+                });
             });
         }
     }

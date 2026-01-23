@@ -287,7 +287,37 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
         input[port] = *data;
     }
 
+    override void onMessage(string msg) {
+        super.onMessage(msg);
+
+        auto json = parseJSON(msg);
+
+        if (json.object["type"].str == "cards") {
+            struct Message {
+                struct Card {
+                    int player;
+                    string card_name;
+                    int bingo_count;
+                    int square_count;
+                    int rank;
+                }
+                
+                Card[] cards;
+            }
+
+            json.fromJSON!Message().cards.each!((card) {
+                state.players[card.player - 1].name = card.card_name;
+                state.players[card.player - 1].bingoCount = card.bingo_count;
+                state.players[card.player - 1].squareCount = card.square_count;
+            });
+
+            saveState();
+        }
+    }
+
     override void onFrame(ulong frame) {
+        super.onFrame(frame);
+
         if (!isBoardScene(data.currentScene)) return;
 
         float currentPlayerTurn = data.currentTurn + data.currentPlayerIndex / 4.0f;

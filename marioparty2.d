@@ -34,6 +34,7 @@ class Config {
     MiniGame[] blockedMiniGames;
     bool saveStateBeforeEachPlayerTurn = false;
     string bingoURL = "";
+    bool rankPlayersByBingoScore = false;
 
     this() {
         bonuses = [
@@ -64,6 +65,9 @@ class Config {
 class PlayerState {
     Item[] items;
     int luckySpaceCount = 0;
+    string name;
+    int bingoCount;
+    int squareCount;
 }
 
 class State {
@@ -921,6 +925,28 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                 if (!isBoardScene()) return;
 
                 fpr.f12 *= config.mapScrollSpeedMultiplier;
+            });
+        }
+
+        if (config.rankPlayersByBingoScore) {
+            Player player = null;
+
+            0x80059FD0.onExec({
+                if (0x8005A000.val!uint != 0x8484D2CE) return;
+                player = players[gpr.a0];
+            });
+            0x8005A07C.onExec({
+                if (0x8005A000.val!uint != 0x8484D2CE) return;
+                gpr.v0 = 0;
+                players.filter!(p => p != player).each!((p) {
+                    if (p.state.bingoCount > player.state.bingoCount) gpr.v0++;
+                    else if (p.state.bingoCount < player.state.bingoCount) { }
+                    else if (p.state.squareCount > player.state.squareCount) gpr.v0++;
+                    else if (p.state.squareCount < player.state.squareCount) { }
+                    else if (p.data.stars > player.data.stars) gpr.v0++;
+                    else if (p.data.stars < player.data.stars) { }
+                    else if (p.data.coins > player.data.coins) gpr.v0++;
+                });
             });
         }
     }

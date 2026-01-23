@@ -17,6 +17,7 @@ class Config {
     float[Block] blockWeights;
     bool saveStateBeforeEachPlayerTurn = false;
     string bingoURL = "";
+    bool rankPlayersByBingoScore = false;
 
     this() {
         blockWeights = [
@@ -31,7 +32,9 @@ class Config {
 }
 
 class PlayerState {
-    
+    string name;
+    int bingoCount;
+    int squareCount;
 }
 
 class State {
@@ -146,6 +149,28 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
         0x80040828.onExec({
             gpr.v0 = weighted(config.blockWeights, random);
         });
+
+        if (config.rankPlayersByBingoScore) {
+            Player player = null;
+
+            0x8004FEBC.onExec({
+                if (0x8004FEE4.val!uint != 0x846332BC) return;
+                player = players[gpr.a0];
+            });
+            0x8004FF60.onExec({
+                if (0x8004FEE4.val!uint != 0x846332BC) return;
+                gpr.v0 = 0;
+                players.filter!(p => p != player).each!((p) {
+                    if (p.state.bingoCount > player.state.bingoCount) gpr.v0++;
+                    else if (p.state.bingoCount < player.state.bingoCount) { }
+                    else if (p.state.squareCount > player.state.squareCount) gpr.v0++;
+                    else if (p.state.squareCount < player.state.squareCount) { }
+                    else if (p.data.stars > player.data.stars) gpr.v0++;
+                    else if (p.data.stars < player.data.stars) { }
+                    else if (p.data.coins > player.data.coins) gpr.v0++;
+                });
+            });
+        }
     }
 }
 
