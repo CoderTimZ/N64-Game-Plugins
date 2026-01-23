@@ -515,7 +515,18 @@ abstract class Game(Config, State = NoState) : Plugin {
         }
     }
 
-    void connect(URL url) {
+    void connect(string urlString) {
+        URL url;
+        if (urlString.startsWith("http://")) {
+            url = URL("ws://" ~ urlString["http://".length..$]);
+        } else if (urlString.startsWith("https://")) {
+            url = URL("wss://" ~ urlString["https://".length..$]);
+        } else if (urlString.startsWith("ws://") || urlString.startsWith("wss://")) {
+            url = URL(urlString);
+        } else {
+            url = URL("wss://" ~ urlString);
+        }
+
         spawn((Tid parentTid, URL url) {
             runTask({
                 while (true) {
@@ -537,7 +548,7 @@ abstract class Game(Config, State = NoState) : Plugin {
                         }
                     } catch (Exception e) { }
 
-                    try { sleep(1000.msecs); } catch (Exception e) { }
+                    try { sleep(5.seconds); } catch (Exception e) { break; }
                 }
             });
 

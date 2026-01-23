@@ -16,6 +16,7 @@ class Config {
     Character[] characters = [Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED];
     float[Block] blockWeights;
     bool saveStateBeforeEachPlayerTurn = false;
+    string bingoURL = "";
 
     this() {
         blockWeights = [

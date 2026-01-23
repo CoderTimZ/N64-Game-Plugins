@@ -133,6 +133,10 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
     override void onStart() {
         super.onStart();
 
+        if (!config.bingoURL.empty) {
+            connect(config.bingoURL);
+        }
+
         players.each!((i, p) {
             if (i >= config.characters.length) return;
             if (config.characters[i] == Character.UNDEFINED) return;

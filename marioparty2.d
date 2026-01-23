@@ -33,6 +33,7 @@ class Config {
     bool preventRepeatMiniGames = false;
     MiniGame[] blockedMiniGames;
     bool saveStateBeforeEachPlayerTurn = false;
+    string bingoURL = "";
 
     this() {
         bonuses = [

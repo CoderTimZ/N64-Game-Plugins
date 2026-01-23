@@ -491,21 +491,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     override void onStart() {
         super.onStart();
 
-        if (config.bingoURL && config.bingoURL.length > 0) {
-            URL url;
-            if (config.bingoURL.startsWith("http://")) {
-                url = URL("ws://" ~ config.bingoURL["http://".length..$]);
-            } else if (config.bingoURL.startsWith("https://")) {
-                url = URL("wss://" ~ config.bingoURL["https://".length..$]);
-            } else if (config.bingoURL.startsWith("ws://") || config.bingoURL.startsWith("wss://")) {
-                url = URL(config.bingoURL);
-            } else {
-                url = URL("ws://" ~ config.bingoURL);
-            }
-
-            connect(url);
-        }
-
         /*
         bool[uint] seen;
         0x800843F0.onExec({
