@@ -85,9 +85,6 @@ class Config {
 
 class PlayerState {
     int luckySpaceCount = 0;
-    string name;
-    int bingoCount;
-    int squareCount;
 }
 
 class State {
@@ -103,6 +100,7 @@ class State {
     uint goldSpaceTexturePtr;
     string[] boardNames;
     float currentPlayerTurn = 0;
+    BingoCard[] bingoCards;
 }
 
 union Memory {
@@ -549,12 +547,21 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             }
 
             if (config.bingoPlayerNames) {
-                players.sort!((a, b) => a.data.character.to!string.length > b.data.character.to!string.length).each!((p) {
-                    auto index1 = p.state.name.countUntil("[");
-                    auto index2 = p.state.name.countUntil("(");
-                    if (index1 == -1) index1 = p.state.name.length;
-                    if (index2 == -1) index2 = p.state.name.length;
-                    gameText = gameText.replace(p.data.character.to!string, p.state.name[0..min(index1, index2)].strip());
+                [EnumMembers!Character].sort!((a, b) => a.to!string.length > b.to!string.length).each!((character) {
+                    if (!gameText.canFind(character.to!string)) return;
+                    
+                    auto card = state.bingoCards.find!(c => c.characters.canFind(character));
+                    if (card.empty) return;
+
+                    auto index1 = card.front.name.countUntil("[");
+                    auto index2 = card.front.name.countUntil("(");
+                    if (index1 == -1) index1 = card.front.name.length;
+                    if (index2 == -1) index2 = card.front.name.length;
+                    auto replacement = card.front.name[0..min(index1, index2)].strip();
+                    if (card.front.characters.length > 1) {
+                        replacement ~= " (" ~ character.to!string[0] ~ character.to!string[1..$].toLower() ~ ")"; 
+                    }
+                    gameText = gameText.replace(character.to!string, formatText(replacement));
                 });
             }
 
@@ -1297,16 +1304,22 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
             0x800EE9C0.onExec({
                 if (0x800EE9E0.val!uint != 0x0C03BB2C) return;
+
                 player = players[gpr.a0];
             });
             0x800EEA50.onExec({
                 if (0x800EE9E0.val!uint != 0x0C03BB2C) return;
+
+                auto card = state.bingoCards.find!(c => c.characters.canFind(player.data.character));
+
                 gpr.v0 = 0;
                 players.filter!(p => p != player).each!((p) {
-                    if (p.state.bingoCount > player.state.bingoCount) gpr.v0++;
-                    else if (p.state.bingoCount < player.state.bingoCount) { }
-                    else if (p.state.squareCount > player.state.squareCount) gpr.v0++;
-                    else if (p.state.squareCount < player.state.squareCount) { }
+                    auto c = state.bingoCards.find!(c => c.characters.canFind(p.data.character));
+
+                    if ((c.empty ? 0 : c.front.bingos) > (card.empty ? 0 : card.front.bingos)) gpr.v0++;
+                    else if ((c.empty ? 0 : c.front.bingos) < (card.empty ? 0 : card.front.bingos)) { }
+                    else if ((c.empty ? 0 : c.front.squares) > (card.empty ? 0 : card.front.squares)) gpr.v0++;
+                    else if ((c.empty ? 0 : c.front.squares) < (card.empty ? 0 : card.front.squares)) { }
                     else if (p.data.stars > player.data.stars) gpr.v0++;
                     else if (p.data.stars < player.data.stars) { }
                     else if (p.data.coins > player.data.coins) gpr.v0++;

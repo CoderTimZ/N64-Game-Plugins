@@ -65,9 +65,6 @@ class Config {
 class PlayerState {
     Item[] items;
     int luckySpaceCount = 0;
-    string name;
-    int bingoCount;
-    int squareCount;
 }
 
 class State {
@@ -82,6 +79,7 @@ class State {
     ShuffleQueue!Board duelGameQueue;
     CustomSpace[] spaces;
     float currentPlayerTurn = 0;
+    BingoCard[] bingoCards;
 }
 
 union Chain {
@@ -933,16 +931,22 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
 
             0x80059FD0.onExec({
                 if (0x8005A000.val!uint != 0x8484D2CE) return;
+                
                 player = players[gpr.a0];
             });
             0x8005A07C.onExec({
                 if (0x8005A000.val!uint != 0x8484D2CE) return;
+
+                auto card = state.bingoCards.find!(c => c.characters.canFind(player.data.character));
+
                 gpr.v0 = 0;
                 players.filter!(p => p != player).each!((p) {
-                    if (p.state.bingoCount > player.state.bingoCount) gpr.v0++;
-                    else if (p.state.bingoCount < player.state.bingoCount) { }
-                    else if (p.state.squareCount > player.state.squareCount) gpr.v0++;
-                    else if (p.state.squareCount < player.state.squareCount) { }
+                    auto c = state.bingoCards.find!(c => c.characters.canFind(p.data.character));
+
+                    if ((c.empty ? 0 : c.front.bingos) > (card.empty ? 0 : card.front.bingos)) gpr.v0++;
+                    else if ((c.empty ? 0 : c.front.bingos) < (card.empty ? 0 : card.front.bingos)) { }
+                    else if ((c.empty ? 0 : c.front.squares) > (card.empty ? 0 : card.front.squares)) gpr.v0++;
+                    else if ((c.empty ? 0 : c.front.squares) < (card.empty ? 0 : card.front.squares)) { }
                     else if (p.data.stars > player.data.stars) gpr.v0++;
                     else if (p.data.stars < player.data.stars) { }
                     else if (p.data.coins > player.data.coins) gpr.v0++;

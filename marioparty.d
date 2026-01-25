@@ -8,6 +8,7 @@ import std.json;
 import std.traits;
 import std.stdio;
 import std.conv;
+import std.uni;
 
 enum PanelColor : ubyte {
     CLEAR = 0,
@@ -46,6 +47,8 @@ string formatText(string text) pure {
                .replace("-",        "\x3D")
                .replace("×",        "\x3E")
                .replace("'",        "\x5C")
+               .replace("(",        "\x5D")
+               .replace(")",        "\x5E")
                .replace("/",        "\x5F")
                .replace(":",        "\x7B")
                .replace(",",        "\x82")
@@ -59,12 +62,21 @@ string unformatText(string text) pure {
     return text.replace("\x3D", "-")
                .replace("\x3E", "×")
                .replace("\x5C", "'")
+               .replace("\x5D", "(")
+               .replace("\x5E", ")")
                .replace("\x5F", "/")
                .replace("\x7B", ":")
                .replace("\x82", ",")
                .replace("\x85", ".")
                .replace("\xC2", "!")
                .replace("\xC3", "?");
+}
+
+struct BingoCard {
+    string name;
+    int bingos;
+    int squares;
+    Character[] characters;
 }
 
 class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
@@ -293,24 +305,17 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
         auto json = parseJSON(msg);
 
         if (json.object["type"].str == "cards") {
-            struct Message {
-                struct Card {
-                    int player;
-                    string card_name;
-                    int bingo_count;
-                    int square_count;
-                    int rank;
-                }
-                
-                Card[] cards;
-            }
-
-            json.fromJSON!Message().cards.each!((card) {
-                state.players[card.player - 1].name = card.card_name;
-                state.players[card.player - 1].bingoCount = card.bingo_count;
-                state.players[card.player - 1].squareCount = card.square_count;
+            struct Message { BingoCard[] cards; }
+            state.bingoCards = json.fromJSON!Message().cards;
+            state.bingoCards.each!((ref card) {
+                string name = card.name.toUpper();
+                [EnumMembers!Character].sort!((a, b) => a.to!string.length > b.to!string.length).each!((character) {
+                    if (name.canFind(character.to!string)) {
+                        name = name.replace(character.to!string, "");
+                        card.characters ~= character;
+                    }
+                });
             });
-
             saveState();
         }
     }
