@@ -52,6 +52,7 @@ class Config {
     bool saveStateBeforeEachPlayerTurn = false;
     string bingoURL = "";
     bool rankPlayersByBingoScore = false;
+    bool bingoPlayerNames = false;
 
     this() {
         bonuses = [
@@ -545,6 +546,16 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
             if (gameText == "\x0B\x27\x85\x85\x85Board\x00\x00" && isBoardScene()) {
                 gameText = formatText("<YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET><NUL><NUL>");
+            }
+
+            if (config.bingoPlayerNames) {
+                players.sort!((a, b) => a.data.character.to!string.length > b.data.character.to!string.length).each!((p) {
+                    auto index1 = p.state.name.countUntil("[");
+                    auto index2 = p.state.name.countUntil("(");
+                    if (index1 == -1) index1 = p.state.name.length;
+                    if (index2 == -1) index2 = p.state.name.length;
+                    gameText = gameText.replace(p.data.character.to!string, p.state.name[0..min(index1, index2)].strip());
+                });
             }
 
             if (config.randomBonus && data.currentScene == Scene.FINISH_BOARD && bonus.length >= 3) {
