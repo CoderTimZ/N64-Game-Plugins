@@ -547,22 +547,46 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             }
 
             if (config.bingoPlayerNames) {
-                [EnumMembers!Character].sort!((a, b) => a.to!string.length > b.to!string.length).each!((character) {
-                    if (!gameText.canFind(character.to!string)) return;
-                    
-                    auto card = state.bingoCards.find!(c => c.characters.canFind(character));
-                    if (card.empty) return;
+                string result;
 
-                    auto index1 = card.front.name.countUntil("[");
-                    auto index2 = card.front.name.countUntil("(");
-                    if (index1 == -1) index1 = card.front.name.length;
-                    if (index2 == -1) index2 = card.front.name.length;
-                    auto replacement = card.front.name[0..min(index1, index2)].strip();
-                    if (card.front.characters.length > 1) {
-                        replacement ~= " (" ~ character.to!string[0] ~ character.to!string[1..$].toLower() ~ ")"; 
+                while (!gameText.empty) {
+                    ptrdiff_t m = -1;
+                    string character;
+                    string name;
+                    bool multi;
+
+                    [EnumMembers!Character].each!((i, ref c) {
+                        if (!gameText.startsWith(c.to!string)) return;
+
+                        auto card = state.bingoCards.find!(card => card.characters.canFind(c));
+                        if (card.empty) return;
+
+                        if (m == -1 || c.to!string.length > character.length) {
+                            m = i;
+                            character = c.to!string;
+                            name = card.front.name;
+                            multi = (card.front.characters.length > 1);
+                        }
+                    });
+
+                    if (m == -1) {
+                        result ~= gameText[0];
+                        gameText = gameText[1..$];
+                    } else {
+                        auto index1 = name.countUntil("[");
+                        auto index2 = name.countUntil("(");
+                        if (index1 == -1) index1 = name.length;
+                        if (index2 == -1) index2 = name.length;
+                        auto replacement = name[0..min(index1, index2)].strip();
+                        if (multi) {
+                            replacement ~= " (" ~ character[0] ~ character[1..$].toLower() ~ ")"; 
+                        }
+                        result ~= formatText(replacement);
+                        gameText = gameText[character.length..$];
                     }
-                    gameText = gameText.replace(character.to!string, formatText(replacement));
-                });
+                }
+
+                gameText = result;
             }
 
             if (config.randomBonus && data.currentScene == Scene.FINISH_BOARD && bonus.length >= 3) {

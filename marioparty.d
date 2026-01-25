@@ -326,16 +326,28 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
         auto json = parseJSON(msg);
 
         if (json.object["type"].str == "cards") {
+            immutable CHARS = [EnumMembers!Character];
+            
             struct Message { BingoCard[] cards; }
+
             state.bingoCards = json.fromJSON!Message().cards;
             state.bingoCards.each!((ref card) {
                 string name = card.name.toUpper();
-                [EnumMembers!Character].sort!((a, b) => a.to!string.length > b.to!string.length).each!((character) {
-                    if (name.canFind(character.to!string)) {
-                        name = name.replace(character.to!string, "");
-                        card.characters ~= character;
+                while (!name.empty) {
+                    ptrdiff_t m = -1;
+                    CHARS.each!((i, c) {
+                        if (!name.startsWith(c.to!string)) return;
+                        if (m == -1 || c.to!string.length > CHARS[m].to!string.length) {
+                            m = i;
+                        }
+                    });
+                    if (m == -1) {
+                        name = name[1..$];
+                    } else {
+                        card.characters ~= CHARS[m];
+                        name = name[CHARS[m].to!string.length..$];
                     }
-                });
+                }
             });
             saveState();
         }
