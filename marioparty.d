@@ -6,6 +6,7 @@ import std.random;
 import std.range;
 import std.json;
 import std.traits;
+import std.typecons;
 import std.stdio;
 import std.conv;
 import std.uni;
@@ -29,47 +30,67 @@ enum Character : byte {
     DAISY     =  7
 }
 
+immutable Tuple!(int, "id", string, "text")[] FORMATTING = [
+    tuple(0x00, "<NUL>"),
+    tuple(0x01, "<BLACK>"),
+    tuple(0x02, "<BLUE>"),
+    tuple(0x03, "<RED>"),
+    tuple(0x04, "<PINK>"),
+    tuple(0x05, "<GREEN>"),
+    tuple(0x06, "<CYAN>"),
+    tuple(0x07, "<YELLOW>"),
+    tuple(0x0F, "<BOLD>"),
+    tuple(0x11, "<1>"),
+    tuple(0x12, "<2>"),
+    tuple(0x13, "<3>"),
+    tuple(0x16, "<NORMAL>"),
+    tuple(0x19, "<RESET>"),
+    tuple(0x3D, "-"),
+    tuple(0x3E, "×"),
+    tuple(0x5C, "'"),
+    tuple(0x5D, "("),
+    tuple(0x5E, ")"),
+    tuple(0x5F, "/"),
+    tuple(0x7B, ":"),
+    tuple(0x82, ","),
+    tuple(0x85, "."),
+    tuple(0xC2, "!"),
+    tuple(0xC3, "?"),
+    tuple(0xFF, "<END>")
+];
+
 string formatText(string text) pure {
-    return text.replace("<NUL>",    "\x00")
-               .replace("<BLACK>",  "\x01")
-               .replace("<BLUE>",   "\x02")
-               .replace("<RED>",    "\x03")
-               .replace("<PINK>",   "\x04")
-               .replace("<GREEN>",  "\x05")
-               .replace("<CYAN>",   "\x06")
-               .replace("<YELLOW>", "\x07")
-               .replace("<BOLD>",   "\x0F")
-               .replace("<1>",      "\x11")
-               .replace("<2>",      "\x12")
-               .replace("<3>",      "\x13")
-               .replace("<NORMAL>", "\x16")
-               .replace("<RESET>",  "\x19")
-               .replace("-",        "\x3D")
-               .replace("×",        "\x3E")
-               .replace("'",        "\x5C")
-               .replace("(",        "\x5D")
-               .replace(")",        "\x5E")
-               .replace("/",        "\x5F")
-               .replace(":",        "\x7B")
-               .replace(",",        "\x82")
-               .replace(".",        "\x85")
-               .replace("!",        "\xC2")
-               .replace("?",        "\xC3")
-               .replace("<END>",    "\xFF");
+    char[] result;
+
+    while (!text.empty) {
+        ptrdiff_t m = -1;
+        FORMATTING.each!((i, ref f) {
+            if (!text.startsWith(f.text)) return;
+            if (m == -1 || f.text.length > FORMATTING[m].text.length) {
+                m = i;
+            }
+        });
+        if (m == -1) {
+            result ~= text[0];
+            text = text[1..$];
+        } else {
+            result ~= FORMATTING[m].id;
+            text = text[FORMATTING[m].text.length..$];
+        }
+    }
+
+    return result;
 }
 
 string unformatText(string text) pure {
-    return text.replace("\x3D", "-")
-               .replace("\x3E", "×")
-               .replace("\x5C", "'")
-               .replace("\x5D", "(")
-               .replace("\x5E", ")")
-               .replace("\x5F", "/")
-               .replace("\x7B", ":")
-               .replace("\x82", ",")
-               .replace("\x85", ".")
-               .replace("\xC2", "!")
-               .replace("\xC3", "?");
+    char[] result;
+
+    text.each!((c) {
+        auto f = FORMATTING.find!((ref f) => f.id == c);
+        result ~= (f.empty ? c.to!string : f.front.text);
+    });
+    
+    return result;
 }
 
 struct BingoCard {
