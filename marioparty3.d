@@ -547,7 +547,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             }
 
             if (config.bingoPlayerNames) {
-                string result;
+                char[] result;
 
                 while (!gameText.empty) {
                     ptrdiff_t m = -1;
@@ -573,8 +573,8 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                         result ~= gameText[0];
                         gameText = gameText[1..$];
                     } else {
-                        auto index1 = name.countUntil("[");
-                        auto index2 = name.countUntil("(");
+                        auto index1 = name.indexOf("[");
+                        auto index2 = name.indexOf("(");
                         if (index1 == -1) index1 = name.length;
                         if (index2 == -1) index2 = name.length;
                         auto replacement = name[0..min(index1, index2)].strip();
@@ -586,7 +586,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     }
                 }
 
-                gameText = result;
+                gameText = result.to!string;
             }
 
             if (config.randomBonus && data.currentScene == Scene.FINISH_BOARD && bonus.length >= 3) {

@@ -10,6 +10,7 @@ import std.typecons;
 import std.stdio;
 import std.conv;
 import std.uni;
+import std.utf;
 
 enum PanelColor : ubyte {
     CLEAR = 0,
@@ -30,39 +31,130 @@ enum Character : byte {
     DAISY     =  7
 }
 
-immutable Tuple!(int, "id", string, "text")[] FORMATTING = [
-    tuple(0x00, "<NUL>"),
-    tuple(0x01, "<BLACK>"),
-    tuple(0x02, "<BLUE>"),
-    tuple(0x03, "<RED>"),
-    tuple(0x04, "<PINK>"),
-    tuple(0x05, "<GREEN>"),
-    tuple(0x06, "<CYAN>"),
-    tuple(0x07, "<YELLOW>"),
-    tuple(0x0F, "<BOLD>"),
-    tuple(0x11, "<1>"),
-    tuple(0x12, "<2>"),
-    tuple(0x13, "<3>"),
-    tuple(0x16, "<NORMAL>"),
-    tuple(0x19, "<RESET>"),
-    tuple(0x3D, "-"),
-    tuple(0x3E, "×"),
-    tuple(0x5C, "'"),
-    tuple(0x5D, "("),
-    tuple(0x5E, ")"),
-    tuple(0x5F, "/"),
-    tuple(0x7B, ":"),
-    tuple(0x82, ","),
-    tuple(0x85, "."),
-    tuple(0xC2, "!"),
-    tuple(0xC3, "?"),
-    tuple(0xFF, "<END>")
+immutable Tuple!(ubyte, "id", string, "text")[] FORMATTING = [
+    tuple(cast(ubyte)0x00, "<NUL>"),
+    tuple(cast(ubyte)0x01, "<BLACK>"),
+    tuple(cast(ubyte)0x02, "<BLUE>"),
+    tuple(cast(ubyte)0x03, "<RED>"),
+    tuple(cast(ubyte)0x04, "<PINK>"),
+    tuple(cast(ubyte)0x05, "<GREEN>"),
+    tuple(cast(ubyte)0x06, "<CYAN>"),
+    tuple(cast(ubyte)0x07, "<YELLOW>"),
+    tuple(cast(ubyte)0x08, "<WHITE>"),
+    tuple(cast(ubyte)0x0E, "<TAB>"),
+    tuple(cast(ubyte)0x0F, "<BOLD>"),
+    tuple(cast(ubyte)0x10, "<SMALL_TAB>"),
+    tuple(cast(ubyte)0x11, "<1>"),
+    tuple(cast(ubyte)0x12, "<2>"),
+    tuple(cast(ubyte)0x13, "<3>"),
+    tuple(cast(ubyte)0x14, "<4>"),
+    tuple(cast(ubyte)0x15, "<5>"),
+    tuple(cast(ubyte)0x16, "<NORMAL>"),
+    tuple(cast(ubyte)0x17, "<DELETE_LINE>"),
+    tuple(cast(ubyte)0x18, "<DELETE_CHAR>"),
+    tuple(cast(ubyte)0x19, "<RESET>"),
+    tuple(cast(ubyte)0x1A, "<TAB2>"),
+    tuple(cast(ubyte)0x21, "<A>"),
+    tuple(cast(ubyte)0x22, "<B>"),
+    tuple(cast(ubyte)0x23, "<C_UP>"),
+    tuple(cast(ubyte)0x24, "<C_RIGHT>"),
+    tuple(cast(ubyte)0x25, "<C_LEFT>"),
+    tuple(cast(ubyte)0x26, "<C_DOWN>"),
+    tuple(cast(ubyte)0x27, "<Z>"),
+    tuple(cast(ubyte)0x28, "<STICK>"),
+    tuple(cast(ubyte)0x29, "<COIN>"),
+    tuple(cast(ubyte)0x2A, "<STAR>"),
+    tuple(cast(ubyte)0x2B, "<START>"),
+    tuple(cast(ubyte)0x2C, "<R>"),
+    tuple(cast(ubyte)0x3A, "<COIN_OUTLINE>"),
+    tuple(cast(ubyte)0x3B, "<STAR_OUTLINE>"),
+    tuple(cast(ubyte)0x3C, "+"),
+    tuple(cast(ubyte)0x3D, "-"),
+    tuple(cast(ubyte)0x3E, "×"),
+    tuple(cast(ubyte)0x3F, "→"),
+    tuple(cast(ubyte)0x5B, "\""),
+    tuple(cast(ubyte)0x5C, "'"),
+    tuple(cast(ubyte)0x5D, "("),
+    tuple(cast(ubyte)0x5E, ")"),
+    tuple(cast(ubyte)0x5F, "/"),
+    tuple(cast(ubyte)0x7B, ":"),
+    tuple(cast(ubyte)0x7C, "÷"),
+    tuple(cast(ubyte)0x7D, "·"),
+    tuple(cast(ubyte)0x7E, "&"),
+    tuple(cast(ubyte)0x82, ","),
+    tuple(cast(ubyte)0x84, "<LINE>"),
+    tuple(cast(ubyte)0x85, "."),
+    tuple(cast(ubyte)0x86, "_"),
+    tuple(cast(ubyte)0x87, "<TAB3>"),
+    tuple(cast(ubyte)0x91, "Ä"),
+    tuple(cast(ubyte)0x92, "Ö"),
+    tuple(cast(ubyte)0x93, "Ü"),
+    tuple(cast(ubyte)0x94, "ß"),
+    tuple(cast(ubyte)0x95, "À"),
+    tuple(cast(ubyte)0x96, "Á"),
+    tuple(cast(ubyte)0x97, "È"),
+    tuple(cast(ubyte)0x98, "É"),
+    tuple(cast(ubyte)0x99, "Ì"),
+    tuple(cast(ubyte)0x9A, "Í"),
+    tuple(cast(ubyte)0x9B, "Ò"),
+    tuple(cast(ubyte)0x9C, "Ó"),
+    tuple(cast(ubyte)0x9D, "Ù"),
+    tuple(cast(ubyte)0x9E, "Ú"),
+    tuple(cast(ubyte)0x9F, "Ñ"),
+    tuple(cast(ubyte)0xA0, "<BIG_0>"),
+    tuple(cast(ubyte)0xA1, "<BIG_1>"),
+    tuple(cast(ubyte)0xA2, "<BIG_2>"),
+    tuple(cast(ubyte)0xA3, "<BIG_3>"),
+    tuple(cast(ubyte)0xA4, "<BIG_4>"),
+    tuple(cast(ubyte)0xA5, "<BIG_5>"),
+    tuple(cast(ubyte)0xA6, "<BIG_6>"),
+    tuple(cast(ubyte)0xA7, "<BIG_7>"),
+    tuple(cast(ubyte)0xA8, "<BIG_8>"),
+    tuple(cast(ubyte)0xA9, "<BIG_9>"),
+    tuple(cast(ubyte)0xC0, "<COPY_NEXT>"),
+    tuple(cast(ubyte)0xC1, "\""),
+    tuple(cast(ubyte)0xC2, "!"),
+    tuple(cast(ubyte)0xC3, "?"),
+    tuple(cast(ubyte)0xC4, "⁉"),
+    tuple(cast(ubyte)0xC5, "‼"),
+    tuple(cast(ubyte)0xC6, "¿"),
+    tuple(cast(ubyte)0xC7, "¡"),
+    tuple(cast(ubyte)0xD1, "à"),
+    tuple(cast(ubyte)0xD2, "â"),
+    tuple(cast(ubyte)0xD3, "ä"),
+    tuple(cast(ubyte)0xD4, "ç"),
+    tuple(cast(ubyte)0xD5, "è"),
+    tuple(cast(ubyte)0xD6, "é"),
+    tuple(cast(ubyte)0xD7, "ê"),
+    tuple(cast(ubyte)0xD8, "ë"),
+    tuple(cast(ubyte)0xD9, "î"),
+    tuple(cast(ubyte)0xDA, "ï"),
+    tuple(cast(ubyte)0xDB, "ô"),
+    tuple(cast(ubyte)0xDC, "ö"),
+    tuple(cast(ubyte)0xDD, "ù"),
+    tuple(cast(ubyte)0xDE, "û"),
+    tuple(cast(ubyte)0xDF, "ü"),
+    tuple(cast(ubyte)0xE0, "á"),
+    tuple(cast(ubyte)0xE1, "ì"),
+    tuple(cast(ubyte)0xE2, "í"),
+    tuple(cast(ubyte)0xE3, "ò"),
+    tuple(cast(ubyte)0xE4, "ó"),
+    tuple(cast(ubyte)0xE5, "ú"),
+    tuple(cast(ubyte)0xE6, "ñ"),
+    tuple(cast(ubyte)0xFE, "…"),
+    tuple(cast(ubyte)0xFF, "<END>")
 ];
 
 string formatText(string text) pure {
     char[] result;
 
     while (!text.empty) {
+        if (text.startsWith("\\x") && text.length >= 4) {
+            result ~= text[2..4].to!ubyte(16);
+            text = text[4..$];
+            continue;
+        }
+        
         ptrdiff_t m = -1;
         FORMATTING.each!((i, ref f) {
             if (!text.startsWith(f.text)) return;
@@ -71,8 +163,7 @@ string formatText(string text) pure {
             }
         });
         if (m == -1) {
-            result ~= text[0];
-            text = text[1..$];
+            result ~= text.decodeFront;
         } else {
             result ~= FORMATTING[m].id;
             text = text[FORMATTING[m].text.length..$];
@@ -87,7 +178,7 @@ string unformatText(string text) pure {
 
     text.each!((c) {
         auto f = FORMATTING.find!((ref f) => f.id == c);
-        result ~= (f.empty ? c.to!string : f.front.text);
+        if (f.empty) result ~= c; else result ~= f.front.text;
     });
     
     return result;
@@ -342,7 +433,7 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
                         }
                     });
                     if (m == -1) {
-                        name = name[1..$];
+                        name.decodeFront;
                     } else {
                         card.characters ~= CHARS[m];
                         name = name[CHARS[m].to!string.length..$];
