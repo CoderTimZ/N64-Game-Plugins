@@ -53,6 +53,7 @@ class Config {
     string bingoURL = "";
     bool rankPlayersByBingoScore = false;
     bool bingoPlayerNames = false;
+    double[] battleCoinDistribution = [0.7, 0.3, 0.0, 0.0];
 
     this() {
         bonuses = [
@@ -114,6 +115,7 @@ union Memory {
     mixin Field!(0x800ABF8A, Arr!(ubyte, 4), "controllerPresent");
     mixin Field!(0x800CC378, Arr!(short, 4), "finalPlayerRankOrder");
     mixin Field!(0x800CC4E4, ushort, "itemHiddenBlock");
+    mixin Field!(0x800CC698, ushort, "battleCoinTotal");
     mixin Field!(0x800CD059, ubyte, "currentBoard");
     mixin Field!(0x800CD05A, ubyte, "totalTurns");
     mixin Field!(0x800CD05B, ubyte, "currentTurn");
@@ -147,6 +149,7 @@ union Memory {
     mixin Field!(0x801084B4, Instruction, "loadBonusStat1b");
     mixin Field!(0x80108898, Instruction, "loadBonusStat2a");
     mixin Field!(0x801088DC, Instruction, "loadBonusStat2b");
+    mixin Field!(0x80108920, Arr!(float, 32), "battleCoinDistributionTable");
     mixin Field!(0x80108CC0, Instruction, "loadBonusStat3a");
     mixin Field!(0x80108D04, Instruction, "loadBonusStat3b");
     mixin Field!(0x80109568, BowserEventType, "bowserEventType");
@@ -369,6 +372,14 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         super(name, hash);
 
         players = iota(4).map!(i => new Player(i, data.players[i])).array;
+    }
+
+    override void loadConfig() {
+        super.loadConfig();
+
+        while (config.battleCoinDistribution.length < 4) {
+            config.battleCoinDistribution ~= 0.0;
+        }
     }
 
     override bool lockTeamScores() const {
@@ -1348,6 +1359,34 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     else if (p.data.stars < player.data.stars) { }
                     else if (p.data.coins > player.data.coins) gpr.v0++;
                 });
+            });
+        }
+
+        if (config.battleCoinDistribution[0] != 0.7 || config.battleCoinDistribution[1] != 0.3) {
+            0x80072B18.onExecDone({
+                if (data.currentScene != Scene.BATTLE_GAME_RESULTS) return;
+
+                const d1    = config.battleCoinDistribution[0];
+                const d2    = config.battleCoinDistribution[1];
+                const d3    = config.battleCoinDistribution[2];
+                const d4    = config.battleCoinDistribution[3];
+                const d12   = (d1 + d2)           / 2;
+                const d23   = (d2 + d3)           / 2;
+                const d34   = (d2 + d3)           / 2;
+                const d123  = (d1 + d2 + d3)      / 3;
+                const d234  = (d2 + d3 + d4)      / 3;
+                const d1234 = (d1 + d2 + d3 + d4) / 4;
+
+                [
+                    d1, d2, d3, d4, // 1 2 3 4
+                    d12, 0, d3, d4, // 1 1 3 4
+                    d12, 0, d34, 0, // 1 1 3 3
+                    d123, 0, 0, d4, // 1 1 1 4
+                    d1, d23, 0, d4, // 1 2 2 4
+                    d1, d234, 0, 0, // 1 2 2 2
+                    d1, d2, d34, 0, // 1 2 3 3
+                    d1234, 0, 0, 0  // 1 1 1 1
+                ].each!((i, e) => data.battleCoinDistributionTable[i] = cast(float)e);
             });
         }
     }
