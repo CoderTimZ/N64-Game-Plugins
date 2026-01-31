@@ -31,6 +31,20 @@ enum Character : byte {
     DAISY     =  7
 }
 
+string shortName(Character character) {
+    final switch (character) {
+        case Character.UNDEFINED: return "?";
+        case Character.MARIO:     return "M";
+        case Character.LUIGI:     return "L";
+        case Character.PEACH:     return "P";
+        case Character.YOSHI:     return "Y";
+        case Character.WARIO:     return "WR";
+        case Character.DK:        return "DK";
+        case Character.WALUIGI:   return "WL";
+        case Character.DAISY:     return "DS";
+    }
+}
+
 immutable Tuple!(ubyte, "id", string, "text")[] FORMATTING = [
     tuple(cast(ubyte)0x00, "<NUL>"),
     tuple(cast(ubyte)0x01, "<BLACK>"),
@@ -41,6 +55,7 @@ immutable Tuple!(ubyte, "id", string, "text")[] FORMATTING = [
     tuple(cast(ubyte)0x06, "<CYAN>"),
     tuple(cast(ubyte)0x07, "<YELLOW>"),
     tuple(cast(ubyte)0x08, "<WHITE>"),
+    tuple(cast(ubyte)0x0B, "<BEGIN>"),
     tuple(cast(ubyte)0x0E, "<TAB>"),
     tuple(cast(ubyte)0x0F, "<BOLD>"),
     tuple(cast(ubyte)0x10, "<SMALL_TAB>"),
@@ -149,12 +164,6 @@ string formatText(string text) pure {
     char[] result;
 
     while (!text.empty) {
-        if (text.startsWith("\\x") && text.length >= 4) {
-            result ~= text[2..4].to!ubyte(16);
-            text = text[4..$];
-            continue;
-        }
-        
         ptrdiff_t m = -1;
         FORMATTING.each!((i, ref f) {
             if (!text.startsWith(f.text)) return;

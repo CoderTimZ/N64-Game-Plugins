@@ -546,15 +546,29 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             saveState();
         });
 
+        Address[5] msgArgs;
+        0x800EC750.onExec({ msgArgs = [gpr.s1, gpr.s2, gpr.s3, gpr.s4, gpr.s5]; });
+        0x800EC8E4.onExec({ msgArgs = 0; });
+
         data.textLength.addr.onExec({
             auto c = Ptr!char(gpr.s0 + 2);
+            
             gameText = "";
-            foreach (i; 0..gpr.s1) {
-                gameText ~= *(c++);
-            }
+            foreach (i; 0..gpr.s1) gameText ~= *(c++);
 
-            if (gameText == "\x0B\x27\x85\x85\x85Board\x00\x00" && isBoardScene()) {
-                gameText = formatText("<YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET><NUL><NUL>");
+            msgArgs.each!((i, addr) {
+                auto c = Ptr!char(addr);
+                auto p = cast(char)(0x11 + i);
+                if (!c || !gameText.canFind(p)) return;
+
+                string arg = "";
+                while (*c) arg ~= *(c++);
+
+                gameText = gameText.replace(p, arg);
+            });
+
+            if (gameText == formatText("<BEGIN><Z>...Board<NUL><NUL>") && isBoardScene()) {
+                gameText = formatText("<BEGIN><YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET><NUL><NUL>");
             }
 
             if (config.bingoPlayerNames) {
@@ -562,7 +576,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
                 while (!gameText.empty) {
                     ptrdiff_t m = -1;
-                    string character;
+                    Character character;
                     string name;
                     bool multi;
 
@@ -572,9 +586,9 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                         auto card = state.bingoCards.find!(card => card.characters.canFind(c));
                         if (card.empty) return;
 
-                        if (m == -1 || c.to!string.length > character.length) {
+                        if (m == -1 || c.to!string.length > character.to!string.length) {
                             m = i;
-                            character = c.to!string;
+                            character = c;
                             name = card.front.name;
                             multi = (card.front.characters.length > 1);
                         }
@@ -590,10 +604,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                         if (index2 == -1) index2 = name.length;
                         auto replacement = name[0..min(index1, index2)].strip();
                         if (multi) {
-                            replacement ~= " (" ~ character[0] ~ character[1..$].toLower() ~ ")"; 
+                            replacement ~= " (" ~ character.shortName ~ ")"; 
                         }
                         result ~= formatText(replacement);
-                        gameText = gameText[character.length..$];
+                        gameText = gameText[character.to!string.length..$];
                     }
                 }
 
