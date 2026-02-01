@@ -581,17 +581,19 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     bool multi;
 
                     [EnumMembers!Character].each!((i, ref c) {
-                        if (!gameText.startsWith(c.to!string)) return;
+                        [c.to!string, c.to!string[0] ~ c.to!string[1..$].toLower()].each!((charName) {
+                            if (!gameText.startsWith(charName)) return;
 
-                        auto card = state.bingoCards.find!(card => card.characters.canFind(c));
-                        if (card.empty) return;
+                            auto card = state.bingoCards.find!(card => card.characters.canFind(c));
+                            if (card.empty) return;
 
-                        if (m == -1 || c.to!string.length > character.to!string.length) {
-                            m = i;
-                            character = c;
-                            name = card.front.name;
-                            multi = (card.front.characters.length > 1);
-                        }
+                            if (m == -1 || charName.length > character.to!string.length) {
+                                m = i;
+                                character = c;
+                                name = card.front.name;
+                                multi = (card.front.characters.length > 1);
+                            }
+                        });
                     });
 
                     if (m == -1) {
