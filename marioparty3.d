@@ -1042,7 +1042,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 if (data.currentTurn % INTERVAL != 0) return;
 
                 showGlobalMessage("          Bonus Mini-Game!\n\n" ~
-                                  "               <BOLD><YELLOW>Coins × 2<RESET><NORMAL>", 0x15);
+                                  "                 <YELLOW><COIN_OUTLINE> × 2<RESET>", 0x15);
             });
         }
 
