@@ -33,15 +33,15 @@ enum Character : byte {
 
 string shortName(Character character) {
     final switch (character) {
-        case Character.UNDEFINED: return "?";
-        case Character.MARIO:     return "M";
-        case Character.LUIGI:     return "L";
-        case Character.PEACH:     return "P";
-        case Character.YOSHI:     return "Y";
-        case Character.WARIO:     return "WR";
+        case Character.UNDEFINED: return "???";
+        case Character.MARIO:     return "Mar";
+        case Character.LUIGI:     return "Lui";
+        case Character.PEACH:     return "Pea";
+        case Character.YOSHI:     return "Yos";
+        case Character.WARIO:     return "War";
         case Character.DK:        return "DK";
-        case Character.WALUIGI:   return "WL";
-        case Character.DAISY:     return "DS";
+        case Character.WALUIGI:   return "Wlg";
+        case Character.DAISY:     return "Dsy";
     }
 }
 
