@@ -262,7 +262,7 @@ enum CustomSpace : byte {
 
 union PlayerPanel {
     ubyte[0x6C] _data;
-    mixin Field!(0x04, ubyte, "color");
+    mixin Field!(0x04, PanelColor, "color");
 }
 
 immutable BONUS_TEXT = [
@@ -1405,6 +1405,113 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 ].each!((i, e) => data.battleCoinDistributionTable[i] = cast(float)e);
             });
         }
+
+        // Keep this at the bottom
+        data.currentScene.onWrite((ref Scene scene) {
+            if (!isScoreScene(scene)) return;
+
+            struct PlayerInfo {
+                Character character;
+                int stars;
+                int coins;
+                Item[] items;
+                PanelColor color;
+            }
+
+            struct PlayersMessage {
+                immutable type = "players";
+                PlayerInfo[] players;
+            }
+
+            PlayersMessage msg;
+            players.each!((i, p) {
+                PlayerInfo info;
+                info.character = p.data.character;
+                info.stars = p.data.stars;
+                info.coins = p.data.coins;
+                iota(3).filter!(i => p.data.items[i] != Item.NONE).each!(i => info.items ~= p.data.items[i]);
+                info.color = data.playerPanels[i].color;
+                msg.players ~= info;
+            });
+            
+            sendMessage(msg.toJSON());
+        });
+
+        players.each!((i, p) {
+            p.data.stars.onWrite((ref typeof(p.data.stars) stars) {
+                if (!isScoreScene(data.currentScene)) return;
+                if (stars == p.data.stars) return;
+
+                struct InfoMessage {
+                    immutable type = "player_info";
+                    int player;
+                    int stars;
+                }
+
+                InfoMessage msg;
+                msg.player = cast(int)i + 1;
+                msg.stars = stars;
+
+                sendMessage(msg.toJSON());
+            });
+
+            p.data.coins.onWrite((ref ushort coins) {
+                if (!isScoreScene(data.currentScene)) return;
+                if (coins == p.data.coins) return;
+
+                struct InfoMessage {
+                    immutable type = "player_info";
+                    int player;
+                    int coins;
+                }
+
+                InfoMessage msg;
+                msg.player = cast(int)i + 1;
+                msg.coins = coins;
+
+                sendMessage(msg.toJSON());
+            });
+
+            iota(3).each!((j) {
+                p.data.items[j].onWrite((ref Item item) {
+                    if (!isScoreScene(data.currentScene)) return;
+                    if (item == p.data.items[j]) return;
+
+                    struct InfoMessage {
+                        immutable type = "player_info";
+                        int player;
+                        Item[] items;
+                    }
+
+                    InfoMessage msg;
+                    msg.player = cast(int)i + 1;
+                    iota(3).each!((k) {
+                        Item e = (k == j ? item : p.data.items[k]);
+                        if (e != Item.NONE) msg.items ~= e;
+                    });
+
+                    sendMessage(msg.toJSON());
+                });
+            });
+
+            data.playerPanels[i].color.onWrite((ref PanelColor color) {
+                if (!isScoreScene(data.currentScene)) return;
+                if (color == data.playerPanels[i].color) return;
+                if (color > PanelColor.max) return;
+
+                struct InfoMessage {
+                    immutable type = "player_info";
+                    int player;
+                    PanelColor color;
+                }
+
+                InfoMessage msg;
+                msg.player = cast(int)i + 1;
+                msg.color = color;
+
+                sendMessage(msg.toJSON());
+            });
+        });
     }
 }
 

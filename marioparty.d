@@ -13,7 +13,7 @@ import std.uni;
 import std.utf;
 
 enum PanelColor : ubyte {
-    CLEAR = 0,
+    NONE  = 0,
     BLUE  = 1,
     RED   = 2,
     GREEN = 4
