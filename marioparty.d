@@ -477,7 +477,7 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
         if (!isBoardScene(data.currentScene)) return;
 
         float currentPlayerTurn = data.currentTurn + data.currentPlayerIndex / 4.0f;
-        if (currentPlayerTurn <= state.currentPlayerTurn) return;
+        if (currentPlayerTurn == state.currentPlayerTurn) return;
 
         state.currentPlayerTurn = currentPlayerTurn;
         saveState();
