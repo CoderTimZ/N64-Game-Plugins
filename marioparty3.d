@@ -556,22 +556,20 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             gameText = "";
             foreach (i; 0..gpr.s1) gameText ~= *(c++);
 
-            msgArgs.each!((i, addr) {
-                auto c = Ptr!char(addr);
-                auto p = cast(char)(0x11 + i);
-                if (!c || !gameText.canFind(p)) return;
-
-                string arg = "";
-                while (*c) arg ~= *(c++);
-
-                gameText = gameText.replace(p, arg);
-            });
-
-            if (gameText == formatText("<BEGIN><Z>...Board<NUL><NUL>") && isBoardScene()) {
-                gameText = formatText("<BEGIN><YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET><NUL><NUL>");
-            }
-
             if (config.bingoPlayerNames) {
+                msgArgs.each!((i, addr) {
+                    auto c = Ptr!char(addr);
+                    auto p = cast(char)(0x11 + i);
+                    if (!c || !gameText.canFind(p)) return;
+
+                    string arg = "";
+                    while (*c) arg ~= *(c++);
+
+                    if ([EnumMembers!Character].any!(c => arg.canFind(c.to!string) || arg.canFind(c.fullName))) {
+                        gameText = gameText.replace(p, arg);
+                    }
+                });
+
                 char[] result;
 
                 while (!gameText.empty) {
@@ -581,7 +579,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     bool multi;
 
                     [EnumMembers!Character].each!((i, ref c) {
-                        [c.to!string, c.to!string[0] ~ c.to!string[1..$].toLower()].each!((charName) {
+                        [c.to!string, c.fullName].each!((charName) {
                             if (!gameText.startsWith(charName)) return;
 
                             auto card = state.bingoCards.find!(card => card.characters.canFind(c));
@@ -614,6 +612,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 }
 
                 gameText = result.to!string;
+            }
+
+            if (gameText == formatText("<BEGIN><Z>...Board<NUL><NUL>") && isBoardScene()) {
+                gameText = formatText("<BEGIN><YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET><NUL><NUL>");
             }
 
             if (config.randomBonus && data.currentScene == Scene.FINISH_BOARD && bonus.length >= 3) {
