@@ -1413,6 +1413,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             if (!isScoreScene(scene)) return;
 
             struct PlayerInfo {
+                int player;
                 Character character;
                 int stars;
                 int coins;
@@ -1429,6 +1430,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             PlayersMessage msg;
             players.each!((i, p) {
                 PlayerInfo info;
+                info.player = cast(int)i + 1;
                 info.character = p.data.character;
                 info.stars = p.data.stars;
                 info.coins = p.data.coins;
