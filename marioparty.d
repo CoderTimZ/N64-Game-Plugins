@@ -59,6 +59,10 @@ string shortName(Character character) pure {
     }
 }
 
+bool isCPU(ubyte flags) pure {
+    return flags & 0b00000001;
+}
+
 immutable Tuple!(char, "id", string, "text")[] FORMATTING = [
     tuple('\x00', "<NUL>"),
     tuple('\x01', "<BLACK>"),

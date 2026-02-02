@@ -351,7 +351,7 @@ class Player {
     }
 
     @property bool isCPU() const {
-        return data.flags & 0b00000001;
+        return data.flags.isCPU;
     }
 
     bool isAheadOf(const Player o) const {
@@ -1418,6 +1418,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 int coins;
                 Item[] items;
                 PanelColor color;
+                bool cpu;
             }
 
             struct PlayersMessage {
@@ -1433,6 +1434,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 info.coins = p.data.coins;
                 iota(3).filter!(i => p.data.items[i] != Item.NONE).each!(i => info.items ~= p.data.items[i]);
                 info.color = data.playerPanels[i].color;
+                info.cpu = p.isCPU;
                 msg.players ~= info;
             });
             
@@ -1510,6 +1512,23 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 InfoMessage msg;
                 msg.player = cast(int)i + 1;
                 msg.color = color;
+
+                sendMessage(msg.toJSON());
+            });
+
+            p.data.flags.onWrite((ref ubyte flags) {
+                if (!isScoreScene(data.currentScene)) return;
+                if (flags.isCPU == p.data.flags.isCPU) return;
+
+                struct InfoMessage {
+                    immutable type = "player_info";
+                    int player;
+                    bool cpu;
+                }
+
+                InfoMessage msg;
+                msg.player = cast(int)i + 1;
+                msg.cpu = flags.isCPU;
 
                 sendMessage(msg.toJSON());
             });

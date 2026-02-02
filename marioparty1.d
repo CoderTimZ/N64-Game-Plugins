@@ -94,7 +94,7 @@ class Player {
     }
 
     @property bool isCPU() const {
-        return data.flags & 0b00000001;
+        return data.flags.isCPU;
     }
 
     bool isAheadOf(const Player o) const {
