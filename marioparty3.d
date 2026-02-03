@@ -1390,7 +1390,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 const d4    = config.battleCoinDistribution[3];
                 const d12   = (d1 + d2)           / 2;
                 const d23   = (d2 + d3)           / 2;
-                const d34   = (d2 + d3)           / 2;
+                const d34   = (d3 + d4)           / 2;
                 const d123  = (d1 + d2 + d3)      / 3;
                 const d234  = (d2 + d3 + d4)      / 3;
                 const d1234 = (d1 + d2 + d3 + d4) / 4;
