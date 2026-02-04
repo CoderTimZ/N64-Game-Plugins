@@ -15,6 +15,8 @@ import std.json;
 import std.container.array;
 import vibe.vibe;
 
+immutable DEFAULT_BATTLE_DIST = [0.7, 0.3, 0.0, 0.0];
+
 class Config {
     Character[] characters = [Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED];
     bool alwaysDuel = false;
@@ -53,7 +55,7 @@ class Config {
     string bingoURL = "";
     bool rankPlayersByBingoScore = false;
     bool bingoPlayerNames = false;
-    double[] battleCoinDistribution = [0.7, 0.3, 0.0, 0.0];
+    double[] battleCoinDistribution = DEFAULT_BATTLE_DIST;
 
     this() {
         bonuses = [
@@ -152,6 +154,7 @@ union Memory {
     mixin Field!(0x80108920, Arr!(float, 32), "battleCoinDistributionTable");
     mixin Field!(0x80108CC0, Instruction, "loadBonusStat3a");
     mixin Field!(0x80108D04, Instruction, "loadBonusStat3b");
+    mixin Field!(0x80108F70, uint, "battlePityCoins");
     mixin Field!(0x80109568, BowserEventType, "bowserEventType");
     mixin Field!(0x8010C9E8, Arr!(uint, 4), "mpiqNoJump");
     mixin Field!(0x800A11D0, Arr!(short, 5), "itemMiniGameItems");
@@ -169,7 +172,9 @@ union PlayerData {
     mixin Field!(0x03, Character, "character");
     mixin Field!(0x04, ubyte, "flags");
     mixin Field!(0x06, ushort, "gameCoinsExtra");
+    mixin Field!(0x06, ushort, "battleCoins");
     mixin Field!(0x08, ushort, "gameCoinsMain");
+    mixin Field!(0x08, ushort, "battleRank");
     mixin Field!(0x0A, ushort, "coins");
     mixin Field!(0x0E, ubyte, "stars");
     mixin Field!(0x17, ubyte, "directionFlags");
@@ -377,8 +382,16 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     override void loadConfig() {
         super.loadConfig();
 
-        while (config.battleCoinDistribution.length < 4) {
-            config.battleCoinDistribution ~= 0.0;
+        if (config.battleCoinDistribution.length != 4) {
+            while (config.battleCoinDistribution.length < 4) {
+                config.battleCoinDistribution ~= 0.0;
+            }
+            config.battleCoinDistribution = config.battleCoinDistribution[0..4];
+        }
+
+        if (fixRoundingError(config.battleCoinDistribution.sum) > 1.0) {
+            config.battleCoinDistribution = DEFAULT_BATTLE_DIST.dup;
+            throw new Exception("battleCoinDistribution.sum > 1.0");
         }
     }
 
@@ -1380,31 +1393,28 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             });
         }
 
-        if (config.battleCoinDistribution[0] != 0.7 || config.battleCoinDistribution[1] != 0.3) {
-            0x80072B18.onExecDone({
+        if (config.battleCoinDistribution != DEFAULT_BATTLE_DIST) {
+            0x80105BCC.onExec({
                 if (data.currentScene != Scene.BATTLE_GAME_RESULTS) return;
 
-                const d1    = config.battleCoinDistribution[0];
-                const d2    = config.battleCoinDistribution[1];
-                const d3    = config.battleCoinDistribution[2];
-                const d4    = config.battleCoinDistribution[3];
-                const d12   = (d1 + d2)           / 2;
-                const d23   = (d2 + d3)           / 2;
-                const d34   = (d3 + d4)           / 2;
-                const d123  = (d1 + d2 + d3)      / 3;
-                const d234  = (d2 + d3 + d4)      / 3;
-                const d1234 = (d1 + d2 + d3 + d4) / 4;
+                auto rankCounts = [0, 0, 0, 0];
+                players.each!(p => rankCounts[p.data.battleRank]++);
 
-                [
-                    d1, d2, d3, d4, // 1 2 3 4
-                    d12, 0, d3, d4, // 1 1 3 4
-                    d12, 0, d34, 0, // 1 1 3 3
-                    d123, 0, 0, d4, // 1 1 1 4
-                    d1, d23, 0, d4, // 1 2 2 4
-                    d1, d234, 0, 0, // 1 2 2 2
-                    d1, d2, d34, 0, // 1 2 3 3
-                    d1234, 0, 0, 0  // 1 1 1 1
-                ].each!((i, e) => data.battleCoinDistributionTable[i] = cast(float)e);
+                auto rankDist = [0.0, 0.0, 0.0, 0.0];
+                size_t r = 0;
+                config.battleCoinDistribution.each!((i, e) {
+                    if (rankCounts[i]) r = i;
+                    rankDist[r] += e;
+                });
+
+                rankDist.each!((i, ref e) {
+                    if (rankCounts[i]) e /= rankCounts[i];
+                });
+
+                auto dist = players.map!(p => rankDist[p.data.battleRank]).array;
+                auto coins = apportion(data.battleCoinTotal, dist);
+                coins.each!((i, c) => players[i].data.battleCoins = cast(ushort)c);
+                data.battlePityCoins = data.battleCoinTotal - cast(ushort)coins.sum;
             });
         }
 

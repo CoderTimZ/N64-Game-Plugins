@@ -28,6 +28,11 @@ ulong flip(ulong value) pure nothrow @nogc @safe {
     return ror(value, 32);
 }
 
+double fixRoundingError(double x) pure nothrow @nogc @safe {
+    auto f = cast(float)x;
+    return f == cast(long)f ? f : x;
+}
+
 size_t swapAddrEndian(T)(size_t address) pure nothrow @nogc @safe {
     static if (T.sizeof == 1) {
         return address ^ 0b11;
@@ -558,8 +563,21 @@ abstract class Game(Config, State = NoState) : Plugin {
     }
 
     void onStart() {
-        loadConfig();
-        loadState();
+        try {
+            loadConfig();
+        } catch (Exception e) {
+            auto msg = e.classinfo.name ~ ": " ~ e.message;
+            error(msg);
+            MessageBoxA(window, msg.toStringz, "loadConfig()", MB_ICONEXCLAMATION);
+        }
+
+        try {
+            loadState();
+        } catch (Exception e) {
+            auto msg = e.classinfo.name ~ ": " ~ e.message;
+            error(msg);
+            MessageBoxA(window, msg.toStringz, "loadState()", MB_ICONEXCLAMATION);
+        }
     }
     void onInput(int, InputData*) { }
     void onMessage(string msg) { }

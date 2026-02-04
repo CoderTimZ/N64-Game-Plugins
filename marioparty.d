@@ -11,6 +11,37 @@ import std.stdio;
 import std.conv;
 import std.uni;
 import std.utf;
+import std.math;
+
+ulong[] apportion(ulong total, const(double)[] dist) pure {
+    if (dist.any!(e => e < 0.0)) throw new Exception("dist.any!(e => e < 0.0)");
+    if (fixRoundingError(dist.sum) > 1.0) throw new Exception("dist.sum > 1.0");
+
+    dist = (dist ~ [1.0 - fixRoundingError(dist.sum)]);
+    auto unrounded = dist.map!(e => fixRoundingError(total * e)).array;
+    auto unique = dist.dup.sort().uniq().array;
+    ulong[] result;
+    auto remaining = ulong.max;
+    auto error = double.infinity;
+    iota(1UL << unique.length).each!((combo) {
+        auto rounded = unrounded.enumerate.map!((e) {
+            bool c = (combo >> unique.countUntil(dist[e.index])) & 0b1;
+            return cast(ulong)(c ? ceil(e.value) : floor(e.value));
+        }).array;
+        if (rounded.sum > total) return;
+
+        auto r = total - rounded.sum;
+        auto e = rounded.enumerate.map!(e => abs(e.value - unrounded[e.index])).sum;
+        
+        if (r < remaining || (r == remaining && e < error)) {
+            result = rounded[0..$-1];
+            remaining = r;
+            error = e;
+        }
+    });
+
+    return result;
+}
 
 enum PanelColor : ubyte {
     NONE  = 0,
