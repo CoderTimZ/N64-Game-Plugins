@@ -502,6 +502,10 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
         }
     }
 
+    void onTurn(float turn) {
+
+    }
+
     override void onFrame(ulong frame) {
         super.onFrame(frame);
 
@@ -517,6 +521,8 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
             setSaveStateSlot(data.currentPlayerIndex + 1);
             saveGameState();
         }
+
+        onTurn(currentPlayerTurn);
 
         struct TurnMessage {
             immutable type = "turn";

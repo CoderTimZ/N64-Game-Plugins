@@ -348,11 +348,13 @@ void showGlobalMessage(string message, byte character = -1) {
 class Player {
     const uint index;
     PlayerData* data;
+    PlayerPanel* panel;
     PlayerState state;
 
-    this(uint index, ref PlayerData data) {
+    this(uint index, ref PlayerData data, ref PlayerPanel panel) {
         this.index = index;
         this.data = &data;
+        this.panel = &panel;
     }
 
     @property bool isCPU() const {
@@ -376,7 +378,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     this(string name, string hash) {
         super(name, hash);
 
-        players = iota(4).map!(i => new Player(i, data.players[i])).array;
+        players = iota(4).map!(i => new Player(i, data.players[i], data.playerPanels[i])).array;
     }
 
     override void loadConfig() {
@@ -1419,41 +1421,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         }
 
         // Keep this at the bottom
-        data.currentScene.onWrite((ref Scene scene) {
-            if (!isScoreScene(scene)) return;
-
-            struct PlayerInfo {
-                int player;
-                Character character;
-                int stars;
-                int coins;
-                Item[] items;
-                PanelColor color;
-                bool cpu;
-            }
-
-            struct PlayersMessage {
-                immutable type = "players";
-                PlayerInfo[] players;
-            }
-
-            PlayersMessage msg;
-            players.each!((i, p) {
-                PlayerInfo info;
-                info.player = cast(int)i + 1;
-                info.character = p.data.character;
-                info.stars = p.data.stars;
-                info.coins = p.data.coins;
-                iota(3).filter!(i => p.data.items[i] != Item.NONE).each!(i => info.items ~= p.data.items[i]);
-                info.color = data.playerPanels[i].color;
-                info.cpu = p.isCPU;
-                msg.players ~= info;
-            });
-            
-            sendMessage(msg.toJSON());
-        });
-
-        players.each!((i, p) {
+        players.each!((p) {
             p.data.stars.onWrite((ref typeof(p.data.stars) stars) {
                 if (!isScoreScene(data.currentScene)) return;
                 if (stars == p.data.stars) return;
@@ -1465,7 +1433,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 }
 
                 InfoMessage msg;
-                msg.player = cast(int)i + 1;
+                msg.player = p.index + 1;
                 msg.stars = stars;
 
                 sendMessage(msg.toJSON());
@@ -1482,7 +1450,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 }
 
                 InfoMessage msg;
-                msg.player = cast(int)i + 1;
+                msg.player = p.index + 1;
                 msg.coins = coins;
 
                 sendMessage(msg.toJSON());
@@ -1500,7 +1468,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     }
 
                     InfoMessage msg;
-                    msg.player = cast(int)i + 1;
+                    msg.player = p.index + 1;
                     iota(3).each!((k) {
                         Item e = (k == j ? item : p.data.items[k]);
                         if (e != Item.NONE) msg.items ~= e;
@@ -1510,11 +1478,11 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 });
             });
 
-            data.playerPanels[i].color.onWrite((ref PanelColor color) {
+            p.panel.color.onWrite((ref PanelColor color) {
                 if (!isScoreScene(data.currentScene)) return;
-                if (color == data.playerPanels[i].color) return;
+                if (color == p.panel.color) return;
                 if (color > PanelColor.max) return;
-
+                
                 struct InfoMessage {
                     immutable type = "player_info";
                     int player;
@@ -1522,7 +1490,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 }
 
                 InfoMessage msg;
-                msg.player = cast(int)i + 1;
+                msg.player = p.index + 1;
                 msg.color = color;
 
                 sendMessage(msg.toJSON());
@@ -1539,12 +1507,46 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 }
 
                 InfoMessage msg;
-                msg.player = cast(int)i + 1;
+                msg.player = p.index + 1;
                 msg.cpu = flags.isCPU;
 
                 sendMessage(msg.toJSON());
             });
         });
+    }
+
+    override void onTurn(float turn) {
+        super.onTurn(turn);
+
+        struct PlayerInfo {
+            int player;
+            Character character;
+            int stars;
+            int coins;
+            Item[] items;
+            PanelColor color;
+            bool cpu;
+        }
+
+        struct PlayersMessage {
+            immutable type = "players";
+            PlayerInfo[] players;
+        }
+
+        PlayersMessage msg;
+        players.each!((p) {
+            PlayerInfo info;
+            info.player = p.index + 1;
+            info.character = p.data.character;
+            info.stars = p.data.stars;
+            info.coins = p.data.coins;
+            iota(3).filter!(i => p.data.items[i] != Item.NONE).each!(i => info.items ~= p.data.items[i]);
+            info.color = p.panel.color;
+            info.cpu = p.isCPU;
+            msg.players ~= info;
+        });
+        
+        sendMessage(msg.toJSON());
     }
 }
 
