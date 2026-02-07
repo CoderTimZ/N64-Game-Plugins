@@ -349,12 +349,14 @@ class Player {
     const uint index;
     PlayerData* data;
     PlayerPanel* panel;
+    PanelColor cachedColor;
     PlayerState state;
 
     this(uint index, ref PlayerData data, ref PlayerPanel panel) {
         this.index = index;
         this.data = &data;
         this.panel = &panel;
+        this.cachedColor = PanelColor.NONE;
     }
 
     @property bool isCPU() const {
@@ -1425,35 +1427,19 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             p.data.stars.onWrite((ref typeof(p.data.stars) stars) {
                 if (!isScoreScene(data.currentScene)) return;
                 if (stars == p.data.stars) return;
+                
+                p.data.stars = stars;
 
-                struct InfoMessage {
-                    immutable type = "player_info";
-                    int player;
-                    int stars;
-                }
-
-                InfoMessage msg;
-                msg.player = p.index + 1;
-                msg.stars = stars;
-
-                sendMessage(msg.toJSON());
+                sendPlayerInfo(p);
             });
 
             p.data.coins.onWrite((ref ushort coins) {
                 if (!isScoreScene(data.currentScene)) return;
                 if (coins == p.data.coins) return;
 
-                struct InfoMessage {
-                    immutable type = "player_info";
-                    int player;
-                    int coins;
-                }
+                p.data.coins = coins;
 
-                InfoMessage msg;
-                msg.player = p.index + 1;
-                msg.coins = coins;
-
-                sendMessage(msg.toJSON());
+                sendPlayerInfo(p);
             });
 
             iota(3).each!((j) {
@@ -1461,20 +1447,9 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     if (!isScoreScene(data.currentScene)) return;
                     if (item == p.data.items[j]) return;
 
-                    struct InfoMessage {
-                        immutable type = "player_info";
-                        int player;
-                        Item[] items;
-                    }
+                    p.data.items[j] = item;
 
-                    InfoMessage msg;
-                    msg.player = p.index + 1;
-                    iota(3).each!((k) {
-                        Item e = (k == j ? item : p.data.items[k]);
-                        if (e != Item.NONE) msg.items ~= e;
-                    });
-
-                    sendMessage(msg.toJSON());
+                    sendPlayerInfo(p);
                 });
             });
 
@@ -1483,62 +1458,41 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 if (color == p.panel.color) return;
                 if (color > PanelColor.max) return;
                 
-                struct InfoMessage {
-                    immutable type = "player_info";
-                    int player;
-                    PanelColor color;
-                }
+                p.cachedColor = color;
 
-                InfoMessage msg;
-                msg.player = p.index + 1;
-                msg.color = color;
-
-                sendMessage(msg.toJSON());
+                sendPlayerInfo(p);
             });
 
             p.data.flags.onWrite((ref ubyte flags) {
                 if (!isScoreScene(data.currentScene)) return;
                 if (flags.isCPU == p.data.flags.isCPU) return;
 
-                struct InfoMessage {
-                    immutable type = "player_info";
-                    int player;
-                    bool cpu;
-                }
+                p.data.flags = flags;
 
-                InfoMessage msg;
-                msg.player = p.index + 1;
-                msg.cpu = flags.isCPU;
-
-                sendMessage(msg.toJSON());
+                sendPlayerInfo(p);
             });
         });
 
         data.currentScene.onWrite((ref Scene scene) {
             if (scene != Scene.FINISH_BOARD) return;
 
-            players.each!((p) {
-                struct InfoMessage {
-                    immutable type = "player_info";
-                    int player;
-                    PanelColor color;
-                }
-
-                InfoMessage msg;
-                msg.player = p.index + 1;
-                msg.color = PanelColor.NONE;
-
-                sendMessage(msg.toJSON());
-            });
+            players.each!(p => p.cachedColor = PanelColor.NONE);
+            players.each!(p => sendPlayerInfo(p));
         });
     }
 
     override void onTurn(float turn) {
         super.onTurn(turn);
 
+        players.each!(p => p.cachedColor = p.panel.color);
+        players.each!(p => sendPlayerInfo(p));
+    }
+
+    void sendPlayerInfo(Player player) {
         struct PlayerInfo {
+            immutable type = "party-player";
             int player;
-            Character character;
+            Character chr;
             int stars;
             int coins;
             Item[] items;
@@ -1546,23 +1500,14 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             bool cpu;
         }
 
-        struct PlayersMessage {
-            immutable type = "players";
-            PlayerInfo[] players;
-        }
-
-        PlayersMessage msg;
-        players.each!((p) {
-            PlayerInfo info;
-            info.player = p.index + 1;
-            info.character = p.data.character;
-            info.stars = p.data.stars;
-            info.coins = p.data.coins;
-            iota(3).filter!(i => p.data.items[i] != Item.NONE).each!(i => info.items ~= p.data.items[i]);
-            info.color = p.panel.color;
-            info.cpu = p.isCPU;
-            msg.players ~= info;
-        });
+        PlayerInfo msg;
+        msg.player = player.index + 1;
+        msg.chr = player.data.character;
+        msg.stars = player.data.stars;
+        msg.coins = player.data.coins;
+        iota(3).filter!(i => player.data.items[i] != Item.NONE).each!(i => msg.items ~= player.data.items[i]);
+        msg.color = player.cachedColor;
+        msg.cpu = player.isCPU;
         
         sendMessage(msg.toJSON());
     }
