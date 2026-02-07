@@ -1513,6 +1513,24 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 sendMessage(msg.toJSON());
             });
         });
+
+        data.currentScene.onWrite((ref Scene scene) {
+            if (scene != Scene.FINISH_BOARD) return;
+
+            players.each!((p) {
+                struct InfoMessage {
+                    immutable type = "player_info";
+                    int player;
+                    PanelColor color;
+                }
+
+                InfoMessage msg;
+                msg.player = p.index + 1;
+                msg.color = PanelColor.NONE;
+
+                sendMessage(msg.toJSON());
+            });
+        });
     }
 
     override void onTurn(float turn) {
