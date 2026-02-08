@@ -416,20 +416,19 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
             }
         }
 
-        static if (is(typeof(config.teamMiniGames)) && is(typeof(data.playerPanels)) && is(typeof(data.determineTeams))) {
+        static if (is(typeof(config.teamMiniGames)) && is(typeof(Player.panel)) && is(typeof(data.determineTeams))) {
             if (config.teamMiniGames) {
                 data.determineTeams.addr.onExec({
                     if (!isBoardScene()) return;
 
-                    auto allTeamsSplit = players.all!(p => teammates(p).any!(t =>
-                        data.playerPanels[t.index].color != data.playerPanels[p.index].color)
-                    );
-                    
+                    auto allBlueOrRed = players.all!(p => p.panel.color == PanelColor.BLUE || p.panel.color == PanelColor.RED);
+                    if (!allBlueOrRed) return;
+
+                    auto allTeamsSplit = players.all!(p => teammates(p).any!(t => t.panel.color != p.panel.color));
                     if (!allTeamsSplit) return;
                     
-                    players.each!((i, p) {
-                        data.playerPanels[i].color = (team(p) == team(players[0]) ? PanelColor.BLUE : PanelColor.RED);
-                    });
+                    players.each!(p => p.panel.color = (team(p) == team(players[0]) ? PanelColor.BLUE : PanelColor.RED));
+                    players.each!(p => p.cachedColor = p.panel.color);
                 });
             }
         }

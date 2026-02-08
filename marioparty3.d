@@ -1459,7 +1459,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
             p.panel.color.onWrite((ref PanelColor color) {
                 if (!isScoreScene(data.currentScene)) return;
-                if (color == p.cachedColor) return;
+                if (color == p.panel.color || color == p.cachedColor) return;
                 if (color > PanelColor.max) return;
                 
                 p.cachedColor = color;
@@ -1478,27 +1478,14 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         });
 
         data.currentScene.onWrite((ref Scene scene) {
-            if (scene == Scene.FINISH_BOARD) {
+            if (data.currentScene == Scene.MINI_GAME_RESULTS) {
                 players.each!(p => p.cachedColor = PanelColor.NONE);
-                players.each!(p => sendPlayerInfo(p));
-            } else if (scene == Scene.MINI_GAME_RULES || isMiniGameScene(scene)) {
+            }
+            
+            if (isBoardScene(scene) || isMiniGameScene(scene) || scene == Scene.MINI_GAME_RULES) {
                 players.each!(p => sendPlayerInfo(p));
             }
         });
-
-        if (config.teamMiniGames) {
-            data.determineTeams.addr.onExec({
-                if (!isBoardScene()) return;
-                players.each!(p => p.cachedColor = p.panel.color);
-            });
-        }
-    }
-
-    override void onTurn(float turn) {
-        super.onTurn(turn);
-
-        players.each!(p => p.cachedColor = p.panel.color);
-        players.each!(p => sendPlayerInfo(p));
     }
 
     void sendPlayerInfo(Player player) {
