@@ -459,6 +459,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         }
     }
 
+    bool isMiniGameScene(Scene scene) const {
+        return Scene.HAND_LINE_AND_SINKER <= scene && scene <= Scene.SWING_N_SWIPE;
+    }
+
     override bool isScoreScene(Scene scene) const {
         switch (scene) {
             case Scene.FINISH_BOARD:
@@ -1455,7 +1459,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
             p.panel.color.onWrite((ref PanelColor color) {
                 if (!isScoreScene(data.currentScene)) return;
-                if (color == p.panel.color) return;
+                if (color == p.cachedColor) return;
                 if (color > PanelColor.max) return;
                 
                 p.cachedColor = color;
@@ -1474,11 +1478,20 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         });
 
         data.currentScene.onWrite((ref Scene scene) {
-            if (scene != Scene.FINISH_BOARD) return;
-
-            players.each!(p => p.cachedColor = PanelColor.NONE);
-            players.each!(p => sendPlayerInfo(p));
+            if (scene == Scene.FINISH_BOARD) {
+                players.each!(p => p.cachedColor = PanelColor.NONE);
+                players.each!(p => sendPlayerInfo(p));
+            } else if (scene == Scene.MINI_GAME_RULES || isMiniGameScene(scene)) {
+                players.each!(p => sendPlayerInfo(p));
+            }
         });
+
+        if (config.teamMiniGames) {
+            data.determineTeams.addr.onExec({
+                if (!isBoardScene()) return;
+                players.each!(p => p.cachedColor = p.panel.color);
+            });
+        }
     }
 
     override void onTurn(float turn) {
