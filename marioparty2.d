@@ -189,6 +189,7 @@ union Memory {
     ubyte[0x800000] ram;
     mixin Field!(0x80018B28, Instruction, "randomByteRoutine");
     mixin Field!(0x8004DE7C, Instruction, "openItemMenuRoutine");
+    mixin Field!(0x80060A1C, Instruction, "determineTeams");
     mixin Field!(0x80064200, Instruction, "duelRoutine");
     mixin Field!(0x80064478, Instruction, "duelCancelRoutine");
     mixin Field!(0x800C99B4, uint, "randomState");
@@ -212,6 +213,12 @@ union Memory {
     mixin Field!(0x800F93C6, ushort, "currentPlayerIndex");
     mixin Field!(0x800FA63C, Scene, "currentScene");
     mixin Field!(0x800FD2C0, Arr!(PlayerData, 4), "players");
+    mixin Field!(0x80101510, Arr!(PlayerPanel, 4), "playerPanels");
+}
+
+union PlayerPanel {
+    ubyte[0x48] _data;
+    mixin Field!(0x04, PanelColor, "color");
 }
 
 void mallocPerm(size_t size, void delegate(uint ptr) callback) {
@@ -233,11 +240,15 @@ void freeTemp(uint ptr, void delegate() callback) {
 class Player {
     const uint index;
     PlayerData* data;
+    PlayerPanel* panel;
+    PanelColor cachedColor;
     PlayerState state;
 
-    this(uint index, ref PlayerData data) {
+    this(uint index, ref PlayerData data, ref PlayerPanel panel) {
         this.index = index;
         this.data = &data;
+        this.panel = &panel;
+        this.cachedColor = PanelColor.NONE;
     }
 
     @property bool isCPU() const {
@@ -261,7 +272,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
     this(string name, string hash) {
         super(name, hash);
 
-        players = iota(4).map!(i => new Player(i, data.players[i])).array;
+        players = iota(4).map!(i => new Player(i, data.players[i], data.playerPanels[i])).array;
     }
 
     override bool lockTeamScores() const {
@@ -306,6 +317,10 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
             default:
                 return isBoardScene(scene);
         }
+    }
+
+    bool isMiniGameScene(Scene scene) const {
+        return Scene.BOWSER_SLOTS <= scene && scene <= Scene.DEEP_SEA_SALVAGE;
     }
 
     short getSpaceIndex(Player p) {
@@ -426,6 +441,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                     }
 
                     saveState();
+                    sendPlayerInfo(p);
 
                     item = item.NONE;
                 });
@@ -477,6 +493,8 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
 
                         p.state.items ~= p.state.items.front;
                         p.state.items.popFront();
+
+                        sendPlayerInfo(p);
                     });
                 }
 
@@ -504,6 +522,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                     while ((i = p.state.items.countUntil(Item.BOWSER_BOMB)) >= 0) {
                         p.state.items = p.state.items.remove(i);
                         saveState();
+                        sendPlayerInfo(p);
 
                         if (found) continue;
                         p.data.item = Item.BOWSER_BOMB;
@@ -953,6 +972,91 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                 });
             });
         }
+
+        // Keep this at the bottom
+        players.each!((p) {
+            p.data.stars.onWrite((ref typeof(p.data.stars) stars) {
+                if (!isScoreScene(data.currentScene)) return;
+                if (stars == p.data.stars) return;
+                
+                p.data.stars = stars;
+
+                sendPlayerInfo(p);
+            });
+
+            p.data.coins.onWrite((ref ushort coins) {
+                if (!isScoreScene(data.currentScene)) return;
+                if (coins == p.data.coins) return;
+
+                p.data.coins = coins;
+
+                sendPlayerInfo(p);
+            });
+
+            if (!config.carryThreeItems) {
+                p.data.item.onWrite((ref Item item) {
+                    if (!isScoreScene(data.currentScene)) return;
+                    if (item == p.data.item) return;
+
+                    p.data.item = item;
+
+                    sendPlayerInfo(p);
+                });
+            }
+
+            p.panel.color.onWrite((ref PanelColor color) {
+                if (!isScoreScene(data.currentScene)) return;
+                if (color == p.panel.color || color == p.cachedColor) return;
+                if (color > PanelColor.max) return;
+                
+                p.cachedColor = color;
+
+                sendPlayerInfo(p);
+            });
+
+            p.data.flags.onWrite((ref ubyte flags) {
+                if (!isScoreScene(data.currentScene)) return;
+                if (flags.isCPU == p.data.flags.isCPU) return;
+
+                p.data.flags = flags;
+
+                sendPlayerInfo(p);
+            });
+        });
+
+        data.currentScene.onWrite((ref Scene scene) {
+            if (data.currentScene == Scene.MINI_GAME_RESULTS) {
+                players.each!(p => p.cachedColor = PanelColor.NONE);
+            }
+            
+            if (isBoardScene(scene) || isMiniGameScene(scene) || scene == Scene.MINI_GAME_RULES) {
+                players.each!(p => sendPlayerInfo(p));
+            }
+        });
+    }
+
+    void sendPlayerInfo(Player player) {
+        struct PlayerInfo {
+            immutable type = "party-player";
+            int player;
+            Character chr;
+            int stars;
+            int coins;
+            Item[] items;
+            PanelColor color;
+            bool cpu;
+        }
+
+        PlayerInfo msg;
+        msg.player = player.index + 1;
+        msg.chr = player.data.character;
+        msg.stars = player.data.stars;
+        msg.coins = player.data.coins;
+        msg.items = (config.carryThreeItems ? player.state.items : [player.data.item]);
+        msg.color = player.cachedColor;
+        msg.cpu = player.isCPU;
+        
+        sendMessage(msg.toJSON());
     }
 }
 
