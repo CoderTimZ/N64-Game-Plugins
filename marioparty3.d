@@ -1458,7 +1458,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             });
 
             p.panel.color.onWrite((ref PanelColor color) {
-                if (!isScoreScene(data.currentScene)) return;
+                if (!isBoardScene(data.currentScene)) return;
                 if (color == p.panel.color || color == p.cachedColor) return;
                 if (color > PanelColor.max) return;
                 
@@ -1468,7 +1468,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             });
 
             p.data.flags.onWrite((ref ubyte flags) {
-                if (!isScoreScene(data.currentScene)) return;
+                if (!isBoardScene(data.currentScene)) return;
                 if (flags.isCPU == p.data.flags.isCPU) return;
 
                 p.data.flags = flags;
@@ -1490,7 +1490,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
     void sendPlayerInfo(Player player) {
         struct PlayerInfo {
-            immutable type = "party-player";
+            immutable type = "player";
             int player;
             Character chr;
             int stars;
