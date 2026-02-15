@@ -1482,7 +1482,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 players.each!(p => p.cachedColor = PanelColor.NONE);
             }
             
-            if (isBoardScene(scene) || isMiniGameScene(scene) || scene == Scene.MINI_GAME_RULES) {
+            if (data.currentScene == Scene.MINI_GAME_RESULTS || isMiniGameScene(scene) || scene == Scene.MINI_GAME_RULES) {
                 players.each!(p => sendPlayerInfo(p));
             }
         });
