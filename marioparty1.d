@@ -81,6 +81,9 @@ union Memory {
     mixin Field!(0x800ED5DC, ushort, "currentPlayerIndex");
     mixin Field!(0x800F09F4, Scene, "currentScene");
     mixin Field!(0x800F32B0, Arr!(PlayerData, 4), "players");
+    mixin Field!(0x801012E0, ubyte, "chancePlayer1");
+    mixin Field!(0x801012E1, ubyte, "chancePlayer2");
+    mixin Field!(0x801012E2, ubyte, "chanceOutcome");
 }
 
 class Player {
@@ -187,6 +190,23 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
                 });
             });
         }
+
+        // Chance Time duplicate character fix
+        0x800FC830.onExec({
+            if (data.currentScene != Scene.CHANCE_TIME) return;
+
+            gpr.a0 = players.filter!(p => p.data.character == data.chancePlayer1)
+                            .array.choice(random).index;
+        });
+
+        // Chance Time duplicate character fix
+        0x800FE1A0.onExec({
+            if (data.currentScene != Scene.CHANCE_TIME) return;
+
+            gpr.a0 = players.filter!(p => p.data.character == data.chancePlayer2)
+                            .filter!(p => p.index != data.chancePlayer1)
+                            .array.choice(random).index;
+        });
     }
 }
 
@@ -213,6 +233,7 @@ enum Block : ubyte {
 
 enum Scene : uint {
     BOOT                   =   0,
+    CHANCE_TIME            =   1,
     DKS_JUNGLE_ADVENTURE   =  54,
     PEACHS_BIRTHDAY_CAKE   =  55,
     YOSHIS_TROPICAL_ISLAND =  56,
