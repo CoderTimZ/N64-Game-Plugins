@@ -134,7 +134,19 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
     alias isScoreScene = typeof(super).isScoreScene;
 
     override bool isBoardScene(Scene scene) const {
-        return false;
+        switch (scene) {
+            case Scene.DKS_JUNGLE_ADVENTURE:
+            case Scene.PEACHS_BIRTHDAY_CAKE:
+            case Scene.YOSHIS_TROPICAL_ISLAND:
+            case Scene.WARIOS_BATTLE_CANYON:
+            case Scene.LUIGIS_ENGINE_ROOM:
+            case Scene.MARIOS_RAINBOW_CASTLE:
+            case Scene.BOWSERS_MAGMA_MOUNTAIN:
+            case Scene.ETERNAL_STAR:
+                return true;
+            default:
+                return false;
+        }
     }
 
     override bool isScoreScene(Scene scene) const {
@@ -200,7 +212,17 @@ enum Block : ubyte {
 }
 
 enum Scene : uint {
-    BOOT          =   0,
-    FINAL_RESULTS =  64,
-    GAME_SETUP    = 106
+    BOOT                   =   0,
+    DKS_JUNGLE_ADVENTURE   =  54,
+    PEACHS_BIRTHDAY_CAKE   =  55,
+    YOSHIS_TROPICAL_ISLAND =  56,
+    WARIOS_BATTLE_CANYON   =  57,
+    LUIGIS_ENGINE_ROOM     =  58,
+    MARIOS_RAINBOW_CASTLE  =  59,
+    BOWSERS_MAGMA_MOUNTAIN =  60,
+    ETERNAL_STAR           =  61,
+    FINAL_RESULTS          =  64,
+    MUSHROOM_VILLAGE       = 105,
+    GAME_SETUP             = 106,
+    TITLE_SCREEN           = 129
 }
