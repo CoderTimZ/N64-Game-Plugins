@@ -76,6 +76,7 @@ union Memory {
     ubyte[0x800000] ram;
     mixin Field!(0x800175B8, Instruction, "randomByteRoutine");
     mixin Field!(0x800C2FF4, uint, "randomState");
+    mixin Field!(0x800D83A8, Arr!(PlayerPanel, 4), "playerPanels");
     mixin Field!(0x800ED5C7, ubyte, "totalTurns");
     mixin Field!(0x800ED5C9, ubyte, "currentTurn");
     mixin Field!(0x800ED5DC, ushort, "currentPlayerIndex");
@@ -89,11 +90,15 @@ union Memory {
 class Player {
     const uint index;
     PlayerData* data;
+    PlayerPanel* panel;
+    PanelColor cachedColor;
     PlayerState state;
 
-    this(uint index, ref PlayerData data) {
+    this(uint index, ref PlayerData data, ref PlayerPanel panel) {
         this.index = index;
         this.data = &data;
+        this.panel = &panel;
+        this.cachedColor = PanelColor.NONE;
     }
 
     @property bool isCPU() const {
@@ -109,11 +114,16 @@ class Player {
     }
 }
 
+union PlayerPanel {
+    ubyte[0x40] _data;
+    mixin Field!(0x03, PanelColor, "color");
+}
+
 class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
     this(string name, string hash) {
         super(name, hash);
 
-        players = iota(4).map!(i => new Player(i, data.players[i])).array;
+        players = iota(4).map!(i => new Player(i, data.players[i], data.playerPanels[i])).array;
     }
 
     override void loadConfig() {
@@ -130,7 +140,7 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
 
     override bool disableTeamControl() const {
         return data.currentScene == Scene.GAME_SETUP
-            || data.currentScene == Scene.FINAL_RESULTS;
+            || data.currentScene == Scene.FINAL_RESULTS_2;
     }
 
     alias isBoardScene = typeof(super).isBoardScene;
@@ -152,8 +162,26 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
         }
     }
 
+    bool isMiniGameScene(Scene scene) const {
+        return Scene.SLOT_MACHINE <= scene && scene <= Scene.BUMPER_BALL_MAZE;
+    }
+
     override bool isScoreScene(Scene scene) const {
-        return false;
+        switch (scene) {
+            case Scene.FINISH_BOARD:
+            case Scene.TOAD:
+            case Scene.BOWSER:
+            case Scene.BOB_OMB:
+            case Scene.SHY_GUY:
+            case Scene.KOOPA:
+            case Scene.BOO:
+            case Scene.START_BOARD:
+            case Scene.CHANCE_TIME:
+            case Scene.MINI_GAME_RESULTS:
+                return true;
+            default:
+                return isBoardScene(scene);
+        }
     }
 
     override void onStart() {
@@ -207,6 +235,78 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
                             .filter!(p => p.index != data.chancePlayer1)
                             .array.choice(random).index;
         });
+
+        // Keep this at the bottom
+        players.each!((p) {
+            p.data.stars.onWrite((ref typeof(p.data.stars) stars) {
+                if (!isScoreScene(data.currentScene)) return;
+                if (stars == p.data.stars) return;
+                
+                p.data.stars = stars;
+
+                sendPlayerInfo(p);
+            });
+
+            p.data.coins.onWrite((ref ushort coins) {
+                if (!isScoreScene(data.currentScene)) return;
+                if (coins == p.data.coins) return;
+
+                p.data.coins = coins;
+
+                sendPlayerInfo(p);
+            });
+
+            p.panel.color.onWrite((ref PanelColor color) {
+                if (!isBoardScene(data.currentScene)) return;
+                if (color == p.panel.color || color == p.cachedColor) return;
+                if (color > PanelColor.max) return;
+                
+                p.cachedColor = color;
+
+                sendPlayerInfo(p);
+            });
+
+            p.data.flags.onWrite((ref ubyte flags) {
+                if (!isBoardScene(data.currentScene)) return;
+                if (flags.isCPU == p.data.flags.isCPU) return;
+
+                p.data.flags = flags;
+
+                sendPlayerInfo(p);
+            });
+        });
+
+        data.currentScene.onWrite((ref Scene scene) {
+            if (data.currentScene == Scene.MINI_GAME_RESULTS) {
+                players.each!(p => p.cachedColor = PanelColor.NONE);
+            }
+            
+            if (data.currentScene == Scene.MINI_GAME_RESULTS || isMiniGameScene(scene) || scene == Scene.MINI_GAME_RULES) {
+                players.each!(p => sendPlayerInfo(p));
+            }
+        });
+    }
+
+    void sendPlayerInfo(Player player) {
+        struct PlayerInfo {
+            immutable type = "player";
+            int player;
+            Character chr;
+            int stars;
+            int coins;
+            PanelColor color;
+            bool cpu;
+        }
+
+        PlayerInfo msg;
+        msg.player = player.index + 1;
+        msg.chr = player.data.character;
+        msg.stars = player.data.stars;
+        msg.coins = player.data.coins;
+        msg.color = player.cachedColor;
+        msg.cpu = player.isCPU;
+        
+        sendMessage(msg.toJSON());
     }
 }
 
@@ -234,6 +334,12 @@ enum Block : ubyte {
 enum Scene : uint {
     BOOT                   =   0,
     CHANCE_TIME            =   1,
+    SLOT_MACHINE           =   2,
+    COIN_BLOCK_BLITZ       =  20,
+    PIRANHAS_PURSUIT       =  49,
+    TUG_O_WAR              =  50,
+    PADDLE_BATTLE          =  51,
+    BUMPER_BALL_MAZE       =  52,
     DKS_JUNGLE_ADVENTURE   =  54,
     PEACHS_BIRTHDAY_CAKE   =  55,
     YOSHIS_TROPICAL_ISLAND =  56,
@@ -242,8 +348,21 @@ enum Scene : uint {
     MARIOS_RAINBOW_CASTLE  =  59,
     BOWSERS_MAGMA_MOUNTAIN =  60,
     ETERNAL_STAR           =  61,
-    FINAL_RESULTS          =  64,
+    LAST_FIVE_TURNS        =  63,
+    FINAL_RESULTS_2        =  64,
+    BOARD_WINNER           =  65,
+    FINISH_BOARD           =  66,
+    TOAD                   =  68,
+    BOWSER                 =  70,
+    BOB_OMB                =  81,
+    SHY_GUY                =  82,
+    KOOPA                  =  95,
+    START_BOARD            =  98,
+    FINAL_RESULTS          = 100,
+    BOO                    = 101,
     MUSHROOM_VILLAGE       = 105,
     GAME_SETUP             = 106,
+    MINI_GAME_RULES        = 111,
+    MINI_GAME_RESULTS      = 124,
     TITLE_SCREEN           = 129
 }
