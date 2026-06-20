@@ -1426,6 +1426,36 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             });
         }
 
+        // Chance Time duplicate character fix
+        0x8010E308.onExec({
+            if (data.currentScene != Scene.CHANCE_TIME) return;
+
+            if (gpr.a1 == 0) {
+                data.chancePlayer1 = players.filter!(p => p.data.character == gpr.v0)
+                                            .array.choice(random).index;
+            } else {
+                data.chancePlayer2 = players.filter!(p => p.data.character == gpr.v0)
+                                            .filter!(p => p.index != data.chancePlayer1)
+                                            .array.choice(random).index;
+            }
+
+            gpr.a0 = (gpr.a1 == 0 ? data.chancePlayer1 : data.chancePlayer2);
+        });
+
+        // Chance Time duplicate character fix
+        0x8010F9DC.onExec({
+            if (data.currentScene != Scene.CHANCE_TIME) return;
+
+            gpr.a0 = (gpr.a2 == 0 ? data.chancePlayer1 : data.chancePlayer2);
+        });
+
+        // Chance Time duplicate character fix
+        0x8010E568.onExec({
+            if (data.currentScene != Scene.CHANCE_TIME) return;
+
+            gpr.a0 = (gpr.s2 == 0 ? data.chancePlayer1 : data.chancePlayer2);
+        });
+
         // Keep this at the bottom
         players.each!((p) {
             p.data.stars.onWrite((ref typeof(p.data.stars) stars) {
