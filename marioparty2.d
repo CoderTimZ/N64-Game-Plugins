@@ -214,6 +214,9 @@ union Memory {
     mixin Field!(0x800FA63C, Scene, "currentScene");
     mixin Field!(0x800FD2C0, Arr!(PlayerData, 4), "players");
     mixin Field!(0x80101510, Arr!(PlayerPanel, 4), "playerPanels");
+    mixin Field!(0x80110180, ubyte, "chancePlayer1");
+    mixin Field!(0x80110181, ubyte, "chancePlayer2");
+    mixin Field!(0x80110182, ubyte, "chancePrize");
 }
 
 union PlayerPanel {
@@ -972,6 +975,24 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                 });
             });
         }
+
+        // Chance Time duplicate character fix
+        0x8010D6F0.onExec({
+            if (data.currentScene != Scene.CHANCE_TIME) return;
+
+            gpr.a0 = players.filter!(p => p.data.character == data.chancePlayer1)
+                            .filter!(p => p.index != data.chancePlayer2)
+                            .array.choice(random).index;
+        });
+
+        // Chance Time duplicate character fix
+        0x8010D924.onExec({
+            if (data.currentScene != Scene.CHANCE_TIME) return;
+
+            gpr.a0 = players.filter!(p => p.data.character == data.chancePlayer2)
+                            .filter!(p => p.index != data.chancePlayer1)
+                            .array.choice(random).index;
+        });
 
         // Keep this at the bottom
         players.each!((p) {

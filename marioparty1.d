@@ -224,6 +224,7 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
             if (data.currentScene != Scene.CHANCE_TIME) return;
 
             gpr.a0 = players.filter!(p => p.data.character == data.chancePlayer1)
+                            .filter!(p => p.index != data.chancePlayer2)
                             .array.choice(random).index;
         });
 

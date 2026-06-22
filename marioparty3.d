@@ -1432,6 +1432,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
             if (gpr.a1 == 0) {
                 data.chancePlayer1 = players.filter!(p => p.data.character == gpr.v0)
+                                            .filter!(p => p.index != data.chancePlayer2)
                                             .array.choice(random).index;
             } else {
                 data.chancePlayer2 = players.filter!(p => p.data.character == gpr.v0)
