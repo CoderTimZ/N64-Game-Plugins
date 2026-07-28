@@ -625,7 +625,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                         if (index2 == -1) index2 = name.length;
                         auto replacement = name[0..min(index1, index2)].strip();
                         if (multi) {
-                            replacement ~= " (" ~ character.shortName ~ ")"; 
+                            replacement ~= " <BOLD>" ~ character.shortName ~ "<NORMAL>"; 
                         }
                         result ~= formatText(replacement);
                         gameText = gameText[character.to!string.length..$];

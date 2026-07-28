@@ -78,15 +78,15 @@ string fullName(Character character) pure {
 
 string shortName(Character character) pure {
     final switch (character) {
-        case Character.UNDEFINED: return "UNDEFINED_CHARACTER";
-        case Character.MARIO:     return "Mar";
-        case Character.LUIGI:     return "Lui";
-        case Character.PEACH:     return "Pea";
-        case Character.YOSHI:     return "Yos";
-        case Character.WARIO:     return "War";
-        case Character.DK:        return "DK";
-        case Character.WALUIGI:   return "Wlg";
-        case Character.DAISY:     return "Dsy";
+        case Character.UNDEFINED: return "<WHITE>(?)<RESET>";
+        case Character.MARIO:     return "<RED>(M)<RESET>";
+        case Character.LUIGI:     return "<GREEN>(L)<RESET>";
+        case Character.PEACH:     return "<PINK>(P)<RESET>";
+        case Character.YOSHI:     return "<GREEN>(Y)<RESET>";
+        case Character.WARIO:     return "<YELLOW>(W)<RESET>";
+        case Character.DK:        return "<RED>(D)<RESET>";
+        case Character.WALUIGI:   return "<BLUE>(W)<RESET>";
+        case Character.DAISY:     return "<YELLOW>(D)<RESET>";
     }
 }
 
