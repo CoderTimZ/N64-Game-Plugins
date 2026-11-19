@@ -465,6 +465,12 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         }
     }
 
+    // Party mode boards, which run the shared board code (mini-game roulette, messages, etc.) at 0x800D6B70+.
+    // Duel mode boards load a different overlay there.
+    bool isPartyBoardScene() const {
+        return isBattleRoyaleBoardScene(data.currentScene);
+    }
+
     bool isBattleRoyaleBoardScene(Scene scene) const {
         switch (scene) {
             case Scene.CHILLY_WATERS_BOARD:
@@ -791,7 +797,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             });
             // Populate mini-game roulette
             0x800DFE90.onExec({
-                if (!isBoardScene()) return;
+                if (!isPartyBoardScene()) return;
                 0x800DFED4.val!Instruction = NOP;
                 0x800DFF40.val!Instruction = NOP;
                 0x800DFF64.val!Instruction = NOP;
@@ -813,7 +819,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 gpr.v0 = data.miniGameRoulette[gpr.s0];
             });
             // Prevent the mini-game roulette from jumping backward
-            0x800DF3C0.onExec({ if (isBoardScene()) gpr.v0 = 1; });
+            0x800DF3C0.onExec({ if (isPartyBoardScene()) gpr.v0 = 1; });
         }
 
         if (superstarsEnabled) {
@@ -827,19 +833,19 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             // MBMgCallListCreate: Allocate a buffer on the board's temp heap for this roulette's names.
             // Allocating per roulette (instead of when the board loads) also works right after loading a save state.
             0x800DFBA8.onExecDone({
-                if (!isBoardScene()) return;
+                if (!isPartyBoardScene()) return;
                 allocateSuperstarsNameBuffer();
             });
 
             // GWMgUnlockCheck: Show every roulette slot, even if the placeholder MP3 mini-game is still locked
             0x80035BD8.onExec({
-                if (ssRoulette.empty || !isBoardScene()) return;
+                if (ssRoulette.empty || !isPartyBoardScene()) return;
                 gpr.ra.onExecOnce({ gpr.v0 = 1; });
             });
 
             // func_8005B43C (set window message): Swap the MP3 mini-game name for the Superstars name
             0x8005B43C.onExec({
-                if (ssRoulette.empty || !isBoardScene() || !ssNameBuffer) return;
+                if (ssRoulette.empty || !isPartyBoardScene() || !ssNameBuffer) return;
                 if (gpr.a1 < 0x4700 || gpr.a1 >= 0x4748) return; // Mini-game name messages
                 auto game = cast(MiniGame)(gpr.a1 - 0x4700 + 1);
                 if (game !in ssRoulette) return;
@@ -853,13 +859,13 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
             // func_800E11C0 (duel roulette): Remember who is dueling
             0x800E11C0.onExec({
-                if (!isBoardScene()) return;
+                if (!isPartyBoardScene()) return;
                 ssDuelists = [cast(uint)gpr.a0, cast(uint)gpr.a1];
             });
 
             // GWMgNoSet: The roulette has landed on a mini-game
             0x80035AA8.onExec({
-                if (ssRoulette.empty || !isBoardScene()) return;
+                if (ssRoulette.empty || !isPartyBoardScene()) return;
                 auto game = cast(MiniGame)cast(byte)gpr.a0;
                 if (auto selected = game in ssRoulette) {
                     ssGame = *selected;
@@ -876,7 +882,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             // Show the "play on Superstars" message from that process, which keeps the board waiting on it.
             // (It can't wait for the wipe to Tumble instead: the wipe is drawn over the message.)
             0x800F5644.onExecDone({
-                if (ssPhase != SuperstarsPhase.SELECTED || !isBoardScene()) return;
+                if (ssPhase != SuperstarsPhase.SELECTED || !isPartyBoardScene()) return;
                 showSuperstarsMessage();
             });
 
@@ -884,7 +890,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             // While waiting for results, report the players as human to this function so it waits for A instead.
             players.each!((p) {
                 p.data.flags.onRead((ref ubyte flags, Address pc) {
-                    if (ssPhase != SuperstarsPhase.WAITING) return;
+                    if (ssPhase != SuperstarsPhase.WAITING || !isPartyBoardScene()) return;
                     if (pc < 0x800EE2DC || pc >= 0x800EE614) return;
                     if (!players.all!(o => o.isCPU)) return;
                     flags &= ~0b1;
