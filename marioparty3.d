@@ -874,6 +874,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
             // MBVsSprKill: Called by the roulette process (regular, battle and duel) after the roulette closes.
             // Show the "play on Superstars" message from that process, which keeps the board waiting on it.
+            // (It can't wait for the wipe to Tumble instead: the wipe is drawn over the message.)
             0x800F5644.onExecDone({
                 if (ssPhase != SuperstarsPhase.SELECTED || !isBoardScene()) return;
                 showSuperstarsMessage();
@@ -1692,18 +1693,21 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     void showSuperstarsMessage() {
         ssPhase = SuperstarsPhase.WAITING;
 
-        showGlobalMessage("Let's play <YELLOW>" ~ ssGame.fullName ~ "<RESET>\n" ~
-                          "in Mario Party Superstars!\n\n" ~
-                          "When you're done, enter\n" ~
-                          "the results on the Bingo page.", -1, true, {
-            if (ssPhase != SuperstarsPhase.WAITING) return;
-            if (ssResults) {
-                ssPhase = SuperstarsPhase.READY;
-            } else {
-                // Input is blocked until results arrive, so this should not happen
-                warning("The Superstars message closed without results; playing the MP3 mini-game instead");
-                resetSuperstars();
-            }
+        // HuAudSeqFadeOut: Fade out the board music so it doesn't play during the Superstars mini-game
+        0x8004A994.jal(60, {
+            showGlobalMessage("Let's play <YELLOW>" ~ ssGame.fullName ~ "<RESET>\n" ~
+                              "in Mario Party Superstars!\n\n" ~
+                              "When you're done, enter\n" ~
+                              "the results on the Bingo page.", -1, true, {
+                if (ssPhase != SuperstarsPhase.WAITING) return;
+                if (ssResults) {
+                    ssPhase = SuperstarsPhase.READY;
+                } else {
+                    // Input is blocked until results arrive, so this should not happen
+                    warning("The Superstars message closed without results; playing the MP3 mini-game instead");
+                    resetSuperstars();
+                }
+            });
         });
     }
 
