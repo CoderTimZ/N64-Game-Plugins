@@ -56,6 +56,8 @@ class Config {
     bool rankPlayersByBingoScore = false;
     bool bingoPlayerNames = false;
     double[] battleCoinDistribution = DEFAULT_BATTLE_DIST;
+    bool superstarsMiniGames = false;
+    string[] blockedSuperstarsMiniGames;
 
     this() {
         bonuses = [
@@ -98,6 +100,7 @@ class State {
         new PlayerState()
     ];
     ShuffleQueue!MiniGame[MiniGameType] miniGameQueue;
+    ShuffleQueue!string[MiniGameType] superstarsQueue;
     CustomSpace[] spaces;
     uint luckySpaceTexturePtr;
     uint goldSpaceTexturePtr;
@@ -327,7 +330,7 @@ void showPlayerMessage(string message, byte character = -1) {
     });
 }
 
-void showGlobalMessage(string message, byte character = -1) {
+void showGlobalMessage(string message, byte character = -1, bool waitForInput = false, void delegate() done = null) {
     message = formatText(message ~ "<END><NUL>");
     gpr.sp -= cast(uint)(message.length + 0b111) & ~0b111;
     message.each!((i, c) { Ptr!char(gpr.sp)[i] = c; });
@@ -335,14 +338,20 @@ void showGlobalMessage(string message, byte character = -1) {
     (gpr.sp + 16).val!uint = 0;
     (gpr.sp + 20).val!uint = 0;
     (gpr.sp + 24).val!uint = 0;
-    0x800EC92C.jal(character, gpr.sp + 32, 0, 0, { // ShowGlobalMessage
-        //0x800ECA38.jal({
-            0x800EC6C8.jal({                       // CloseMessage
-                0x800EC6EC.jal({
-                    gpr.sp += 32 + (cast(uint)(message.length + 0b111) & ~0b111);
-                });
+    auto close = {
+        0x800EC6C8.jal({                           // MBDlgWinClose
+            0x800EC6EC.jal({                       // MBDlgWinKill
+                gpr.sp += 32 + (cast(uint)(message.length + 0b111) & ~0b111);
+                if (done) done();
             });
-        //});
+        });
+    };
+    0x800EC92C.jal(character, gpr.sp + 32, 0, 0, { // ShowGlobalMessage
+        if (waitForInput) {
+            0x800ECA38.jal(close);                 // Wait for any player to press A
+        } else {
+            close();
+        }
     });
 }
 
@@ -377,6 +386,16 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     string gameText;
     BonusType[] bonus;
     int lastFiveTurnsBonus = 20;
+
+    // Superstars mini-game mode
+    enum SuperstarsPhase { NONE, SELECTED, WAITING, READY }
+    SuperstarsPhase ssPhase = SuperstarsPhase.NONE;
+    string[MiniGame] ssRoulette;     // Placeholder MP3 mini-game -> Superstars mini-game shown in its roulette slot
+    string ssGame;                   // Selected Superstars mini-game
+    MiniGameType ssType;             // MP3 roulette category of the selected mini-game
+    uint[] ssDuelists;               // Player indices taking part in a duel
+    SuperstarsResults* ssResults;    // Results entered on the Bingo page
+    Address ssNameBuffer;            // Board temp heap buffer holding the roulette names
 
     this(string name, string hash) {
         super(name, hash);
@@ -756,10 +775,17 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             });
         }
 
-        if (config.preventRepeatMiniGames || config.blockedMiniGames.length > 0) {
+        bool superstarsEnabled = config.superstarsMiniGames;
+        if (superstarsEnabled && config.bingoURL.empty) {
+            warning("superstarsMiniGames requires bingoURL to be set; Superstars mini-games are disabled");
+            superstarsEnabled = false;
+        }
+
+        if (config.preventRepeatMiniGames || config.blockedMiniGames.length > 0 || superstarsEnabled) {
             data.currentScene.onWrite((ref Scene scene) {
                 if (scene == Scene.START_BOARD) {
                     state.miniGameQueue.clear();
+                    state.superstarsQueue.clear();
                     saveState();
                 }
             });
@@ -772,19 +798,101 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 0x800DFF78.val!Instruction = NOP;
                 if (gpr.s0 == 0) {
                     auto type = (cast(MiniGame)gpr.v0).type;
-                    auto games = [EnumMembers!MiniGame].filter!(g => g.type == type).array;
-                    auto choices = games.filter!(g => !config.blockedMiniGames.canFind(g));
-                    auto game = state.miniGameQueue.require(type, ShuffleQueue!MiniGame(choices, random)).next(random);
-                    auto altCount = (0x80100E18 + gpr.s2).val!ubyte - 1;
-                    auto roulette = game ~ games.filter!(g => g != game).array.randomShuffle(random).take(altCount);
-                    roulette.randomShuffle(random).each!((i, e) => data.miniGameRoulette[i] = e);
-                    0x800DF120.onExecOnce({ gpr.v0 = cast(uint)roulette.countUntil(game); });
+                    auto count = (0x80100E18 + gpr.s2).val!ubyte;
+                    ssRoulette.clear();
+                    if (!superstarsEnabled || !populateSuperstarsRoulette(type, count)) {
+                        auto games = [EnumMembers!MiniGame].filter!(g => g.type == type).array;
+                        auto choices = games.filter!(g => !config.blockedMiniGames.canFind(g));
+                        auto game = state.miniGameQueue.require(type, ShuffleQueue!MiniGame(choices, random)).next(random);
+                        auto roulette = game ~ games.filter!(g => g != game).array.randomShuffle(random).take(count - 1);
+                        roulette.randomShuffle(random).each!((i, e) => data.miniGameRoulette[i] = e);
+                        0x800DF120.onExecOnce({ gpr.v0 = cast(uint)roulette.countUntil(game); });
+                    }
                     saveState();
                 }
                 gpr.v0 = data.miniGameRoulette[gpr.s0];
             });
             // Prevent the mini-game roulette from jumping backward
             0x800DF3C0.onExec({ if (isBoardScene()) gpr.v0 = 1; });
+        }
+
+        if (superstarsEnabled) {
+            data.currentScene.onWrite((ref Scene scene) {
+                if (scene == data.currentScene) return;
+                if (scene == Scene.START_BOARD || scene == Scene.CASTLE_GROUNDS || scene == Scene.TITLE_SCREEN) {
+                    resetSuperstars();
+                }
+            });
+
+            // Allocate a buffer on the board's temp heap for the roulette names
+            // (chained after the lucky space textures when those are enabled)
+            if (!usesLuckySpaceTextures()) {
+                0x8003592C.onExecDone({ // Finish making temp heap
+                    if (!isBoardScene()) return;
+                    allocateSuperstarsNameBuffer();
+                });
+            }
+
+            // GWMgUnlockCheck: Show every roulette slot, even if the placeholder MP3 mini-game is still locked
+            0x80035BD8.onExec({
+                if (ssRoulette.empty || !isBoardScene()) return;
+                gpr.ra.onExecOnce({ gpr.v0 = 1; });
+            });
+
+            // func_8005B43C (set window message): Swap the MP3 mini-game name for the Superstars name
+            0x8005B43C.onExec({
+                if (ssRoulette.empty || !isBoardScene() || !ssNameBuffer) return;
+                if (gpr.a1 < 0x4700 || gpr.a1 >= 0x4748) return; // Mini-game name messages
+                auto game = cast(MiniGame)(gpr.a1 - 0x4700 + 1);
+                if (game !in ssRoulette) return;
+                foreach (i; 0..data.miniGameRoulette.length) {
+                    if (data.miniGameRoulette[i] == game) {
+                        gpr.a1 = ssNameBuffer + cast(uint)(i * SUPERSTARS_NAME_SLOT_SIZE);
+                        return;
+                    }
+                }
+            });
+
+            // func_800E11C0 (duel roulette): Remember who is dueling
+            0x800E11C0.onExec({
+                if (!isBoardScene()) return;
+                ssDuelists = [cast(uint)gpr.a0, cast(uint)gpr.a1];
+            });
+
+            // GWMgNoSet: The roulette has landed on a mini-game
+            0x80035AA8.onExec({
+                if (ssRoulette.empty || !isBoardScene()) return;
+                auto game = cast(MiniGame)cast(byte)gpr.a0;
+                if (auto name = game in ssRoulette) {
+                    ssGame = *name;
+                    ssResults = null;
+                    ssPhase = SuperstarsPhase.SELECTED;
+                    info("Superstars mini-game: ", ssGame, " (", ssType, ")");
+                    sendSuperstarsInfo();
+                }
+                ssRoulette.clear();
+            });
+
+            // MBVsSprKill: Called by the roulette process (regular, battle and duel) after the roulette closes.
+            // Show the "play on Superstars" message from that process, which keeps the board waiting on it.
+            0x800F5644.onExecDone({
+                if (ssPhase != SuperstarsPhase.SELECTED || !isBoardScene()) return;
+                showSuperstarsMessage();
+            });
+
+            // omOvlCallEx: Skip the rules screen and mini-game, going straight to the results
+            0x80048128.onExec({
+                if (gpr.a0 != Scene.MINI_GAME_RULES) return;
+                if (ssPhase == SuperstarsPhase.NONE) return;
+
+                if (ssPhase == SuperstarsPhase.READY && ssResults) {
+                    gpr.a0 = applySuperstarsResults();
+                } else {
+                    warning("No Superstars results were entered for ", ssGame, "; playing the MP3 mini-game instead");
+                }
+
+                resetSuperstars();
+            });
         }
 
         if (config.enhancedTaunts) {
@@ -831,7 +939,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             });
         }
 
-        if (config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 || config.standardSpaceRatio.values.any!(v => v > 0.0)) {
+        if (usesLuckySpaceTextures()) {
             bool lumasPlaygroundHiddenIndex(ushort index) {
                 if (getCurrentBoardName() != "Luma's Playground") return false;
                 
@@ -871,14 +979,16 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
                     if (config.revealHiddenBlocksOnRemainingTurns <= 0) {
                         saveState();
+                        if (superstarsEnabled) allocateSuperstarsNameBuffer();
                         return;
                     }
 
                     mallocTemp(GOLD_SPACE_TEXTURE.length + 0x10, (ptr) {
                         GOLD_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
                         state.goldSpaceTexturePtr = ptr;
-                        
+
                         saveState();
+                        if (superstarsEnabled) allocateSuperstarsNameBuffer();
                     });
                 });
             });
@@ -1515,6 +1625,210 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         });
     }
 
+    bool usesLuckySpaceTextures() {
+        return config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 || config.standardSpaceRatio.values.any!(v => v > 0.0);
+    }
+
+    void allocateSuperstarsNameBuffer() {
+        ssNameBuffer = 0;
+        mallocTemp(SUPERSTARS_NAME_SLOT_SIZE * data.miniGameRoulette.length, (ptr) {
+            ssNameBuffer = ptr;
+        });
+    }
+
+    // Fills the roulette with Superstars mini-games, using MP3 mini-games of the same type as placeholders.
+    // Returns false if the roulette should be populated normally instead.
+    bool populateSuperstarsRoulette(MiniGameType type, uint count) {
+        auto all = superstarsMiniGames(type);
+        if (all.empty || count == 0 || count > data.miniGameRoulette.length) return false;
+
+        auto placeholders = [EnumMembers!MiniGame].filter!(g => g.type == type).take(count).array;
+        if (placeholders.length < count) return false;
+
+        auto choices = all.filter!(g => !config.blockedSuperstarsMiniGames.canFind!((a, b) => icmp(a, b) == 0)(g)).array;
+        if (choices.empty) choices = all;
+
+        auto game = state.superstarsQueue.require(superstarsQueueKey(type), ShuffleQueue!string(choices, random)).next(random);
+        auto alternatives = choices.filter!(g => g != game).array.randomShuffle(random)
+                          ~ all.filter!(g => g != game && !choices.canFind(g)).array.randomShuffle(random);
+        auto names = game ~ alternatives.take(count - 1).array;
+        for (size_t i = 0; names.length < count; i++) {
+            names ~= names[i];
+        }
+        names.randomShuffle(random);
+
+        foreach (i, name; names) {
+            data.miniGameRoulette[i] = placeholders[i];
+            ssRoulette[placeholders[i]] = name;
+        }
+
+        if (ssNameBuffer) {
+            foreach (i, name; names) {
+                auto text = formatText(name ~ "<END><NUL>");
+                if (text.length > SUPERSTARS_NAME_SLOT_SIZE) {
+                    text = text[0..SUPERSTARS_NAME_SLOT_SIZE - 2] ~ formatText("<END><NUL>");
+                }
+                auto slot = Ptr!char(ssNameBuffer + cast(uint)(i * SUPERSTARS_NAME_SLOT_SIZE));
+                foreach (j, char c; text) slot[j] = c;
+            }
+        } else {
+            warning("No buffer for Superstars mini-game names; the roulette will show MP3 mini-game names");
+        }
+
+        auto target = names.countUntil(game);
+        0x800DF120.onExecOnce({ gpr.v0 = cast(uint)target; });
+
+        ssType = type;
+        if (type != MiniGameType.DUEL) ssDuelists = null;
+
+        return true;
+    }
+
+    void showSuperstarsMessage() {
+        ssPhase = SuperstarsPhase.WAITING;
+
+        showGlobalMessage("Let's play <YELLOW>" ~ ssGame ~ "<RESET>\n" ~
+                          "in Mario Party Superstars!\n\n" ~
+                          "When you're done, enter\n" ~
+                          "the results on the Bingo page.", -1, true, {
+            if (ssPhase != SuperstarsPhase.WAITING) return;
+            if (ssResults) {
+                ssPhase = SuperstarsPhase.READY;
+            } else {
+                // The message can only close early if nobody can press A (e.g. all CPUs)
+                warning("The Superstars message closed without results; playing the MP3 mini-game instead");
+                resetSuperstars();
+            }
+        });
+    }
+
+    // Writes the entered results where the mini-game would have and returns the results screen to show
+    uint applySuperstarsResults() {
+        auto r = ssResults;
+        info("Superstars results for ", ssGame, ": coins=", r.coins, " ranks=", r.ranks, " winner=", r.winner);
+
+        final switch (ssType) {
+            case MiniGameType.BATTLE:
+                players.each!((p) {
+                    p.data.battleCoins = 0;
+                    p.data.battleRank = cast(ushort)clamp(r.ranks[p.index] - 1, 0, 3);
+                });
+                return Scene.BATTLE_GAME_RESULTS;
+
+            case MiniGameType.DUEL:
+                players.each!((p) {
+                    p.data.gameCoinsExtra = 0;
+                    p.data.gameCoinsMain = (r.winner == p.index + 1 ? 10 : 0);
+                });
+                return Scene.DUEL_GAME_RESULTS;
+
+            case MiniGameType.ONE_V_THREE:
+            case MiniGameType.TWO_V_TWO:
+            case MiniGameType.FOUR_PLAYER:
+                players.each!((p) {
+                    p.data.gameCoinsExtra = 0;
+                    p.data.gameCoinsMain = cast(ushort)clamp(r.coins[p.index], 0, 999);
+                });
+                return Scene.MINI_GAME_RESULTS;
+
+            case MiniGameType.ITEM:
+            case MiniGameType.GAMBLE:
+            case MiniGameType.SPECIAL:
+                assert(0, "Superstars mini-games are not used for " ~ ssType.to!string);
+        }
+    }
+
+    void resetSuperstars() {
+        bool wasActive = (ssPhase != SuperstarsPhase.NONE);
+        ssPhase = SuperstarsPhase.NONE;
+        ssRoulette.clear();
+        ssGame = null;
+        ssResults = null;
+        ssDuelists = null;
+        if (wasActive) sendSuperstarsInfo();
+    }
+
+    void sendSuperstarsInfo() {
+        struct SuperstarsPlayer {
+            int player;
+            Character chr;
+            PanelColor color;
+            bool cpu;
+            bool participant;
+        }
+
+        struct SuperstarsInfo {
+            immutable type = "superstars";
+            string game;
+            MiniGameType category;
+            SuperstarsPlayer[] players;
+            bool submitted;
+        }
+
+        SuperstarsInfo msg;
+        if (ssPhase != SuperstarsPhase.NONE) {
+            msg.game = ssGame;
+            msg.category = ssType;
+            msg.submitted = (ssResults !is null);
+            players.each!((p) {
+                SuperstarsPlayer sp;
+                sp.player = p.index + 1;
+                sp.chr = p.data.character;
+                sp.color = (p.panel.color <= PanelColor.max ? p.panel.color : PanelColor.NONE);
+                sp.cpu = p.isCPU;
+                sp.participant = (ssType != MiniGameType.DUEL || ssDuelists.canFind(p.index));
+                msg.players ~= sp;
+            });
+        }
+
+        sendMessage(msg.toJSON());
+    }
+
+    override void onMessage(string msg) {
+        super.onMessage(msg);
+
+        if (ssPhase == SuperstarsPhase.NONE && !config.superstarsMiniGames) return;
+
+        auto json = parseJSON(msg);
+
+        switch (json.object["type"].str) {
+            case "cards": // Sent when (re)connecting, so make sure the Bingo page knows about the current mini-game
+                if (ssPhase != SuperstarsPhase.NONE) sendSuperstarsInfo();
+                break;
+
+            case "superstars-results":
+                auto results = json.fromJSON!SuperstarsResults();
+                if (ssPhase == SuperstarsPhase.NONE || results.game != ssGame) {
+                    warning("Ignoring Superstars results for ", results.game, " (current mini-game: ", ssGame, ")");
+                    return;
+                }
+                if (!results.isValid(ssType, ssDuelists)) {
+                    warning("Ignoring invalid Superstars results: ", msg);
+                    return;
+                }
+                ssResults = new SuperstarsResults;
+                *ssResults = results;
+                info("Received Superstars results for ", ssGame);
+                sendSuperstarsInfo();
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    override void onInput(int port, InputData* input) {
+        super.onInput(port, input);
+
+        if (ssPhase != SuperstarsPhase.WAITING) return;
+
+        // Nobody can close the message until results are entered, then press A to close it
+        input.value = 0;
+        if (ssResults && (frame / 4) % 2 == 0) {
+            input.buttons = 0x0080; // A
+        }
+    }
+
     void sendPlayerInfo(Player player) {
         struct PlayerInfo {
             immutable type = "player";
@@ -1693,6 +2007,7 @@ enum Scene : uint {
     MINI_GAME_RULES          = 112,
     MINI_GAME_RESULTS        = 113,
     GAMBLE_GAME_RESULTS      = 114,
+    DUEL_GAME_RESULTS        = 115,
     BATTLE_GAME_RESULTS      = 116,
     CASTLE_GROUNDS           = 119,
     GAME_SETUP               = 120,
@@ -1857,6 +2172,75 @@ MiniGameType type(MiniGame game) {
         case 59: .. case 64: return MiniGameType.ITEM;
         case 67: .. case 70: return MiniGameType.GAMBLE;
         default:             return MiniGameType.SPECIAL;
+    }
+}
+
+enum SUPERSTARS_NAME_SLOT_SIZE = 64;
+
+struct SuperstarsResults {
+    string game;
+    int[] coins;      // Per player (1-vs-3, 2-vs-2 and 4-player mini-games)
+    int[] ranks;      // Per player, 1-4 (battle mini-games)
+    int winner = -1;  // Player number 1-4, or 0 for a tie (duel mini-games)
+
+    bool isValid(MiniGameType type, const uint[] duelists) const {
+        switch (type) {
+            case MiniGameType.BATTLE:
+                return ranks.length == 4 && ranks.all!(r => 1 <= r && r <= 4);
+            case MiniGameType.DUEL:
+                return winner == 0 || duelists.canFind(winner - 1) || (duelists.empty && 1 <= winner && winner <= 4);
+            case MiniGameType.ONE_V_THREE:
+            case MiniGameType.TWO_V_TWO:
+            case MiniGameType.FOUR_PLAYER:
+                return coins.length == 4 && coins.all!(c => 0 <= c && c <= 999);
+            default:
+                return false;
+        }
+    }
+}
+
+// Mario Party Superstars combines battle mini-games into its 4-player list
+MiniGameType superstarsQueueKey(MiniGameType type) {
+    return type == MiniGameType.BATTLE ? MiniGameType.FOUR_PLAYER : type;
+}
+
+immutable string[] SUPERSTARS_4_PLAYER = [
+    "Mushroom Mix-Up", "Bombs Away", "Shy Guy Says", "Crazy Cutters", "Tipsy Tourney", "Face-Lift",
+    "Hammer Drop", "Cast Aways", "Dizzy Dancing", "Bumper Balls", "Hot Rope Jump", "Tread Carefully",
+    "Bumper Balloon Cars", "Sneak 'n' Snore", "Mecha Marathon", "Slot-Car Derby", "Bowser's Big Blast",
+    "Roll Call", "Honeycomb Havoc", "Snowball Summit", "Ice-Rink Risk", "Bounce 'n' Trounce",
+    "Storm Chasers", "Mush Pit", "Cheep Cheep Chase", "Chip-Shot Challenge", "Rockin' Raceway",
+    "Messy Memory", "Parasol Plummet", "Trace Race", "Booksquirm", "Paths of Peril", "Dinger Derby",
+    "Leaf Leap", "Pushy Penguins", "Coney Island", "Bill Blasters", "Night-Light Fright", "Later Skater",
+    "Catch You Letter", "Trap Ease Artist", "What Goes Up...", "Snow Whirled", "Dark 'n' Crispy",
+    "Pit Boss", "X-Ray Payday", "Monty's Revenge", "The Final Countdown", "Pokey Pummel",
+    "Manor of Escape", "Goomba Spotting", "Flash Forward", "Rapid River Race"
+];
+
+immutable string[] SUPERSTARS_1_VS_3 = [
+    "Piranha's Pursuit", "Tug o' War", "Archer-ival", "Look Away", "Quicksand Cache", "Tidal Toss",
+    "Boulder Ball", "Coconut Conk", "Spotlight Swim", "Hide-and-Sneak", "River Raiders", "GOOOOOOOAL!!",
+    "Money Belts", "Squared Away", "Tube It or Lose It", "Pogo-a-Go-Go", "Tackle Takedown", "Skewer Scurry"
+];
+
+immutable string[] SUPERSTARS_2_VS_2 = [
+    "Bobsled Run", "Handcar Havoc", "Dungeon Dash", "Speed Hockey", "Balloon Burst", "Cake Factory",
+    "Sky Pilots", "Etch 'n' Catch", "Picking Panic", "Eatsa Pizza", "Puddle Paddle", "Dungeon Duos",
+    "Revers-a-Bomb", "Burnstile", "Rocky Road", "Cashapult", "Paint Misbehavin'", "Winner or Dinner"
+];
+
+immutable string[] SUPERSTARS_DUEL = [
+    "Ticktock Hop", "Vine with Me", "Motor Rooter", "Mass Meteor", "Spin Doctor"
+];
+
+string[] superstarsMiniGames(MiniGameType type) {
+    switch (type) {
+        case MiniGameType.ONE_V_THREE: return SUPERSTARS_1_VS_3.dup;
+        case MiniGameType.TWO_V_TWO:   return SUPERSTARS_2_VS_2.dup;
+        case MiniGameType.FOUR_PLAYER: return SUPERSTARS_4_PLAYER.dup;
+        case MiniGameType.BATTLE:      return SUPERSTARS_4_PLAYER.dup;
+        case MiniGameType.DUEL:        return SUPERSTARS_DUEL.dup;
+        default:                       return [];
     }
 }
 
