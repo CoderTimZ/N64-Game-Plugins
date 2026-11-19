@@ -824,14 +824,12 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 }
             });
 
-            // Allocate a buffer on the board's temp heap for the roulette names
-            // (chained after the lucky space textures when those are enabled)
-            if (!usesLuckySpaceTextures()) {
-                0x8003592C.onExecDone({ // Finish making temp heap
-                    if (!isBoardScene()) return;
-                    allocateSuperstarsNameBuffer();
-                });
-            }
+            // MBMgCallListCreate: Allocate a buffer on the board's temp heap for this roulette's names.
+            // Allocating per roulette (instead of when the board loads) also works right after loading a save state.
+            0x800DFBA8.onExecDone({
+                if (!isBoardScene()) return;
+                allocateSuperstarsNameBuffer();
+            });
 
             // GWMgUnlockCheck: Show every roulette slot, even if the placeholder MP3 mini-game is still locked
             0x80035BD8.onExec({
@@ -871,6 +869,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     sendSuperstarsInfo();
                 }
                 ssRoulette.clear();
+                ssNameBuffer = 0; // Only valid for this roulette
             });
 
             // MBVsSprKill: Called by the roulette process (regular, battle and duel) after the roulette closes.
@@ -950,7 +949,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             });
         }
 
-        if (usesLuckySpaceTextures()) {
+        if (config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 || config.standardSpaceRatio.values.any!(v => v > 0.0)) {
             bool lumasPlaygroundHiddenIndex(ushort index) {
                 if (getCurrentBoardName() != "Luma's Playground") return false;
                 
@@ -990,7 +989,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
                     if (config.revealHiddenBlocksOnRemainingTurns <= 0) {
                         saveState();
-                        if (superstarsEnabled) allocateSuperstarsNameBuffer();
                         return;
                     }
 
@@ -999,7 +997,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                         state.goldSpaceTexturePtr = ptr;
 
                         saveState();
-                        if (superstarsEnabled) allocateSuperstarsNameBuffer();
                     });
                 });
             });
@@ -1634,10 +1631,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 players.each!(p => sendPlayerInfo(p));
             }
         });
-    }
-
-    bool usesLuckySpaceTextures() {
-        return config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 || config.standardSpaceRatio.values.any!(v => v > 0.0);
     }
 
     void allocateSuperstarsNameBuffer() {
