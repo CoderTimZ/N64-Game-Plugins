@@ -57,7 +57,7 @@ class Config {
     bool bingoPlayerNames = false;
     double[] battleCoinDistribution = DEFAULT_BATTLE_DIST;
     bool superstarsMiniGames = false;
-    string[] blockedSuperstarsMiniGames;
+    SuperstarsMiniGame[] blockedSuperstarsMiniGames;
 
     this() {
         bonuses = [
@@ -100,7 +100,7 @@ class State {
         new PlayerState()
     ];
     ShuffleQueue!MiniGame[MiniGameType] miniGameQueue;
-    ShuffleQueue!string[MiniGameType] superstarsQueue;
+    ShuffleQueue!SuperstarsMiniGame[MiniGameType] superstarsMiniGameQueue;
     CustomSpace[] spaces;
     uint luckySpaceTexturePtr;
     uint goldSpaceTexturePtr;
@@ -390,8 +390,8 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     // Superstars mini-game mode
     enum SuperstarsPhase { NONE, SELECTED, WAITING, READY }
     SuperstarsPhase ssPhase = SuperstarsPhase.NONE;
-    string[MiniGame] ssRoulette;     // Placeholder MP3 mini-game -> Superstars mini-game shown in its roulette slot
-    string ssGame;                   // Selected Superstars mini-game
+    SuperstarsMiniGame[MiniGame] ssRoulette; // Placeholder MP3 mini-game -> Superstars mini-game shown in its roulette slot
+    SuperstarsMiniGame ssGame;               // Selected Superstars mini-game
     MiniGameType ssType;             // MP3 roulette category of the selected mini-game
     uint[] ssDuelists;               // Player indices taking part in a duel
     SuperstarsResults* ssResults;    // Results entered on the Bingo page
@@ -785,7 +785,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             data.currentScene.onWrite((ref Scene scene) {
                 if (scene == Scene.START_BOARD) {
                     state.miniGameQueue.clear();
-                    state.superstarsQueue.clear();
+                    state.superstarsMiniGameQueue.clear();
                     saveState();
                 }
             });
@@ -861,11 +861,11 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             0x80035AA8.onExec({
                 if (ssRoulette.empty || !isBoardScene()) return;
                 auto game = cast(MiniGame)cast(byte)gpr.a0;
-                if (auto name = game in ssRoulette) {
-                    ssGame = *name;
+                if (auto selected = game in ssRoulette) {
+                    ssGame = *selected;
                     ssResults = null;
                     ssPhase = SuperstarsPhase.SELECTED;
-                    info("Superstars mini-game: ", ssGame, " (", ssType, ")");
+                    info("Superstars mini-game: ", ssGame.fullName, " (", ssType, ")");
                     sendSuperstarsInfo();
                 }
                 ssRoulette.clear();
@@ -898,7 +898,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 if (ssPhase == SuperstarsPhase.READY && ssResults) {
                     gpr.a0 = applySuperstarsResults();
                 } else {
-                    warning("No Superstars results were entered for ", ssGame, "; playing the MP3 mini-game instead");
+                    warning("No Superstars results were entered for ", ssGame.fullName, "; playing the MP3 mini-game instead");
                 }
 
                 resetSuperstars();
@@ -1649,10 +1649,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         auto placeholders = [EnumMembers!MiniGame].filter!(g => g.type == type).take(count).array;
         if (placeholders.length < count) return false;
 
-        auto choices = all.filter!(g => !config.blockedSuperstarsMiniGames.canFind!((a, b) => icmp(a, b) == 0)(g)).array;
+        auto choices = all.filter!(g => !config.blockedSuperstarsMiniGames.canFind(g)).array;
         if (choices.empty) choices = all;
 
-        auto game = state.superstarsQueue.require(superstarsQueueKey(type), ShuffleQueue!string(choices, random)).next(random);
+        auto game = state.superstarsMiniGameQueue.require(superstarsQueueKey(type), ShuffleQueue!SuperstarsMiniGame(choices, random)).next(random);
         auto alternatives = choices.filter!(g => g != game).array.randomShuffle(random)
                           ~ all.filter!(g => g != game && !choices.canFind(g)).array.randomShuffle(random);
         auto names = game ~ alternatives.take(count - 1).array;
@@ -1661,15 +1661,15 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         }
         names.randomShuffle(random);
 
-        foreach (i, name; names) {
+        foreach (i, g; names) {
             data.miniGameRoulette[i] = placeholders[i];
-            ssRoulette[placeholders[i]] = name;
+            ssRoulette[placeholders[i]] = g;
         }
 
         if (ssNameBuffer) {
-            foreach (i, name; names) {
+            foreach (i, g; names) {
                 // Plain label: no <END>, which would make the window show a "press A" arrow
-                auto text = formatText(name ~ "<NUL><NUL>");
+                auto text = formatText(g.fullName ~ "<NUL><NUL>");
                 if (text.length > SUPERSTARS_NAME_SLOT_SIZE) {
                     text = text[0..SUPERSTARS_NAME_SLOT_SIZE - 2] ~ formatText("<NUL><NUL>");
                 }
@@ -1692,7 +1692,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     void showSuperstarsMessage() {
         ssPhase = SuperstarsPhase.WAITING;
 
-        showGlobalMessage("Let's play <YELLOW>" ~ ssGame ~ "<RESET>\n" ~
+        showGlobalMessage("Let's play <YELLOW>" ~ ssGame.fullName ~ "<RESET>\n" ~
                           "in Mario Party Superstars!\n\n" ~
                           "When you're done, enter\n" ~
                           "the results on the Bingo page.", -1, true, {
@@ -1710,7 +1710,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     // Writes the entered results where the mini-game would have and returns the results screen to show
     uint applySuperstarsResults() {
         auto r = ssResults;
-        info("Superstars results for ", ssGame, ": coins=", r.coins, " ranks=", r.ranks, " winner=", r.winner);
+        info("Superstars results for ", ssGame.fullName, ": coins=", r.coins, " ranks=", r.ranks, " winner=", r.winner);
 
         final switch (ssType) {
             case MiniGameType.BATTLE:
@@ -1747,7 +1747,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         bool wasActive = (ssPhase != SuperstarsPhase.NONE);
         ssPhase = SuperstarsPhase.NONE;
         ssRoulette.clear();
-        ssGame = null;
+        ssGame = SuperstarsMiniGame.init;
         ssResults = null;
         ssDuelists = null;
         if (wasActive) sendSuperstarsInfo();
@@ -1772,7 +1772,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
         SuperstarsInfo msg;
         if (ssPhase != SuperstarsPhase.NONE) {
-            msg.game = ssGame;
+            msg.game = ssGame.fullName;
             msg.category = ssType;
             msg.submitted = (ssResults !is null);
             players.each!((p) {
@@ -1803,8 +1803,8 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
             case "superstars-results":
                 auto results = json.fromJSON!SuperstarsResults();
-                if (ssPhase == SuperstarsPhase.NONE || results.game != ssGame) {
-                    warning("Ignoring Superstars results for ", results.game, " (current mini-game: ", ssGame, ")");
+                if (ssPhase == SuperstarsPhase.NONE || results.game != ssGame.fullName) {
+                    warning("Ignoring Superstars results for ", results.game, " (current mini-game: ", ssGame.fullName, ")");
                     return;
                 }
                 if (!results.isValid(ssType, ssDuelists)) {
@@ -1813,7 +1813,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 }
                 ssResults = new SuperstarsResults;
                 *ssResults = results;
-                info("Received Superstars results for ", ssGame);
+                info("Received Superstars results for ", ssGame.fullName);
                 sendSuperstarsInfo();
                 break;
 
@@ -2205,47 +2205,219 @@ struct SuperstarsResults {
 }
 
 // Mario Party Superstars combines battle mini-games into its 4-player list
+MiniGameType type(SuperstarsMiniGame game) {
+    switch (game) {
+        case  1: .. case 53: return MiniGameType.FOUR_PLAYER;
+        case 54: .. case 71: return MiniGameType.ONE_V_THREE;
+        case 72: .. case 89: return MiniGameType.TWO_V_TWO;
+        case 90: .. case 94: return MiniGameType.DUEL;
+        default:             assert(0, "Invalid Superstars mini-game");
+    }
+}
+
 MiniGameType superstarsQueueKey(MiniGameType type) {
     return type == MiniGameType.BATTLE ? MiniGameType.FOUR_PLAYER : type;
 }
 
-immutable string[] SUPERSTARS_4_PLAYER = [
-    "Mushroom Mix-Up", "Bombs Away", "Shy Guy Says", "Crazy Cutters", "Tipsy Tourney", "Face-Lift",
-    "Hammer Drop", "Cast Aways", "Dizzy Dancing", "Bumper Balls", "Hot Rope Jump", "Tread Carefully",
-    "Bumper Balloon Cars", "Sneak 'n' Snore", "Mecha Marathon", "Slot-Car Derby", "Bowser's Big Blast",
-    "Roll Call", "Honeycomb Havoc", "Snowball Summit", "Ice-Rink Risk", "Bounce 'n' Trounce",
-    "Storm Chasers", "Mush Pit", "Cheep Cheep Chase", "Chip-Shot Challenge", "Rockin' Raceway",
-    "Messy Memory", "Parasol Plummet", "Trace Race", "Booksquirm", "Paths of Peril", "Dinger Derby",
-    "Leaf Leap", "Pushy Penguins", "Coney Island", "Bill Blasters", "Night-Light Fright", "Later Skater",
-    "Catch You Letter", "Trap Ease Artist", "What Goes Up...", "Snow Whirled", "Dark 'n' Crispy",
-    "Pit Boss", "X-Ray Payday", "Monty's Revenge", "The Final Countdown", "Pokey Pummel",
-    "Manor of Escape", "Goomba Spotting", "Flash Forward", "Rapid River Race"
-];
+SuperstarsMiniGame[] superstarsMiniGames(MiniGameType type) {
+    return [EnumMembers!SuperstarsMiniGame].filter!(g => g.type == superstarsQueueKey(type)).array;
+}
 
-immutable string[] SUPERSTARS_1_VS_3 = [
-    "Piranha's Pursuit", "Tug o' War", "Archer-ival", "Look Away", "Quicksand Cache", "Tidal Toss",
-    "Boulder Ball", "Coconut Conk", "Spotlight Swim", "Hide-and-Sneak", "River Raiders", "GOOOOOOOAL!!",
-    "Money Belts", "Squared Away", "Tube It or Lose It", "Pogo-a-Go-Go", "Tackle Takedown", "Skewer Scurry"
-];
+enum SuperstarsMiniGame : ubyte {
+    MUSHROOM_MIX_UP     =  1,
+    BOMBS_AWAY          =  2,
+    SHY_GUY_SAYS        =  3,
+    CRAZY_CUTTERS       =  4,
+    TIPSY_TOURNEY       =  5,
+    FACE_LIFT           =  6,
+    HAMMER_DROP         =  7,
+    CAST_AWAYS          =  8,
+    DIZZY_DANCING       =  9,
+    BUMPER_BALLS        = 10,
+    HOT_ROPE_JUMP       = 11,
+    TREAD_CAREFULLY     = 12,
+    BUMPER_BALLOON_CARS = 13,
+    SNEAK_N_SNORE       = 14,
+    MECHA_MARATHON      = 15,
+    SLOT_CAR_DERBY      = 16,
+    BOWSER_S_BIG_BLAST  = 17,
+    ROLL_CALL           = 18,
+    HONEYCOMB_HAVOC     = 19,
+    SNOWBALL_SUMMIT     = 20,
+    ICE_RINK_RISK       = 21,
+    BOUNCE_N_TROUNCE    = 22,
+    STORM_CHASERS       = 23,
+    MUSH_PIT            = 24,
+    CHEEP_CHEEP_CHASE   = 25,
+    CHIP_SHOT_CHALLENGE = 26,
+    ROCKIN_RACEWAY      = 27,
+    MESSY_MEMORY        = 28,
+    PARASOL_PLUMMET     = 29,
+    TRACE_RACE          = 30,
+    BOOKSQUIRM          = 31,
+    PATHS_OF_PERIL      = 32,
+    DINGER_DERBY        = 33,
+    LEAF_LEAP           = 34,
+    PUSHY_PENGUINS      = 35,
+    CONEY_ISLAND        = 36,
+    BILL_BLASTERS       = 37,
+    NIGHT_LIGHT_FRIGHT  = 38,
+    LATER_SKATER        = 39,
+    CATCH_YOU_LETTER    = 40,
+    TRAP_EASE_ARTIST    = 41,
+    WHAT_GOES_UP        = 42,
+    SNOW_WHIRLED        = 43,
+    DARK_N_CRISPY       = 44,
+    PIT_BOSS            = 45,
+    X_RAY_PAYDAY        = 46,
+    MONTY_S_REVENGE     = 47,
+    THE_FINAL_COUNTDOWN = 48,
+    POKEY_PUMMEL        = 49,
+    MANOR_OF_ESCAPE     = 50,
+    GOOMBA_SPOTTING     = 51,
+    FLASH_FORWARD       = 52,
+    RAPID_RIVER_RACE    = 53,
+    PIRANHA_S_PURSUIT   = 54,
+    TUG_O_WAR           = 55,
+    ARCHER_IVAL         = 56,
+    LOOK_AWAY           = 57,
+    QUICKSAND_CACHE     = 58,
+    TIDAL_TOSS          = 59,
+    BOULDER_BALL        = 60,
+    COCONUT_CONK        = 61,
+    SPOTLIGHT_SWIM      = 62,
+    HIDE_AND_SNEAK      = 63,
+    RIVER_RAIDERS       = 64,
+    GOOOOOOOAL          = 65,
+    MONEY_BELTS         = 66,
+    SQUARED_AWAY        = 67,
+    TUBE_IT_OR_LOSE_IT  = 68,
+    POGO_A_GO_GO        = 69,
+    TACKLE_TAKEDOWN     = 70,
+    SKEWER_SCURRY       = 71,
+    BOBSLED_RUN         = 72,
+    HANDCAR_HAVOC       = 73,
+    DUNGEON_DASH        = 74,
+    SPEED_HOCKEY        = 75,
+    BALLOON_BURST       = 76,
+    CAKE_FACTORY        = 77,
+    SKY_PILOTS          = 78,
+    ETCH_N_CATCH        = 79,
+    PICKING_PANIC       = 80,
+    EATSA_PIZZA         = 81,
+    PUDDLE_PADDLE       = 82,
+    DUNGEON_DUOS        = 83,
+    REVERS_A_BOMB       = 84,
+    BURNSTILE           = 85,
+    ROCKY_ROAD          = 86,
+    CASHAPULT           = 87,
+    PAINT_MISBEHAVIN    = 88,
+    WINNER_OR_DINNER    = 89,
+    TICKTOCK_HOP        = 90,
+    VINE_WITH_ME        = 91,
+    MOTOR_ROOTER        = 92,
+    MASS_METEOR         = 93,
+    SPIN_DOCTOR         = 94
+}
 
-immutable string[] SUPERSTARS_2_VS_2 = [
-    "Bobsled Run", "Handcar Havoc", "Dungeon Dash", "Speed Hockey", "Balloon Burst", "Cake Factory",
-    "Sky Pilots", "Etch 'n' Catch", "Picking Panic", "Eatsa Pizza", "Puddle Paddle", "Dungeon Duos",
-    "Revers-a-Bomb", "Burnstile", "Rocky Road", "Cashapult", "Paint Misbehavin'", "Winner or Dinner"
-];
+alias fullName = me.timz.n64.marioparty.fullName; // Keep fullName(Character) visible alongside this overload
 
-immutable string[] SUPERSTARS_DUEL = [
-    "Ticktock Hop", "Vine with Me", "Motor Rooter", "Mass Meteor", "Spin Doctor"
-];
-
-string[] superstarsMiniGames(MiniGameType type) {
-    switch (type) {
-        case MiniGameType.ONE_V_THREE: return SUPERSTARS_1_VS_3.dup;
-        case MiniGameType.TWO_V_TWO:   return SUPERSTARS_2_VS_2.dup;
-        case MiniGameType.FOUR_PLAYER: return SUPERSTARS_4_PLAYER.dup;
-        case MiniGameType.BATTLE:      return SUPERSTARS_4_PLAYER.dup;
-        case MiniGameType.DUEL:        return SUPERSTARS_DUEL.dup;
-        default:                       return [];
+string fullName(SuperstarsMiniGame game) pure {
+    final switch (game) {
+        case SuperstarsMiniGame.MUSHROOM_MIX_UP:     return "Mushroom Mix-Up";
+        case SuperstarsMiniGame.BOMBS_AWAY:          return "Bombs Away";
+        case SuperstarsMiniGame.SHY_GUY_SAYS:        return "Shy Guy Says";
+        case SuperstarsMiniGame.CRAZY_CUTTERS:       return "Crazy Cutters";
+        case SuperstarsMiniGame.TIPSY_TOURNEY:       return "Tipsy Tourney";
+        case SuperstarsMiniGame.FACE_LIFT:           return "Face-Lift";
+        case SuperstarsMiniGame.HAMMER_DROP:         return "Hammer Drop";
+        case SuperstarsMiniGame.CAST_AWAYS:          return "Cast Aways";
+        case SuperstarsMiniGame.DIZZY_DANCING:       return "Dizzy Dancing";
+        case SuperstarsMiniGame.BUMPER_BALLS:        return "Bumper Balls";
+        case SuperstarsMiniGame.HOT_ROPE_JUMP:       return "Hot Rope Jump";
+        case SuperstarsMiniGame.TREAD_CAREFULLY:     return "Tread Carefully";
+        case SuperstarsMiniGame.BUMPER_BALLOON_CARS: return "Bumper Balloon Cars";
+        case SuperstarsMiniGame.SNEAK_N_SNORE:       return "Sneak 'n' Snore";
+        case SuperstarsMiniGame.MECHA_MARATHON:      return "Mecha Marathon";
+        case SuperstarsMiniGame.SLOT_CAR_DERBY:      return "Slot-Car Derby";
+        case SuperstarsMiniGame.BOWSER_S_BIG_BLAST:  return "Bowser's Big Blast";
+        case SuperstarsMiniGame.ROLL_CALL:           return "Roll Call";
+        case SuperstarsMiniGame.HONEYCOMB_HAVOC:     return "Honeycomb Havoc";
+        case SuperstarsMiniGame.SNOWBALL_SUMMIT:     return "Snowball Summit";
+        case SuperstarsMiniGame.ICE_RINK_RISK:       return "Ice-Rink Risk";
+        case SuperstarsMiniGame.BOUNCE_N_TROUNCE:    return "Bounce 'n' Trounce";
+        case SuperstarsMiniGame.STORM_CHASERS:       return "Storm Chasers";
+        case SuperstarsMiniGame.MUSH_PIT:            return "Mush Pit";
+        case SuperstarsMiniGame.CHEEP_CHEEP_CHASE:   return "Cheep Cheep Chase";
+        case SuperstarsMiniGame.CHIP_SHOT_CHALLENGE: return "Chip-Shot Challenge";
+        case SuperstarsMiniGame.ROCKIN_RACEWAY:      return "Rockin' Raceway";
+        case SuperstarsMiniGame.MESSY_MEMORY:        return "Messy Memory";
+        case SuperstarsMiniGame.PARASOL_PLUMMET:     return "Parasol Plummet";
+        case SuperstarsMiniGame.TRACE_RACE:          return "Trace Race";
+        case SuperstarsMiniGame.BOOKSQUIRM:          return "Booksquirm";
+        case SuperstarsMiniGame.PATHS_OF_PERIL:      return "Paths of Peril";
+        case SuperstarsMiniGame.DINGER_DERBY:        return "Dinger Derby";
+        case SuperstarsMiniGame.LEAF_LEAP:           return "Leaf Leap";
+        case SuperstarsMiniGame.PUSHY_PENGUINS:      return "Pushy Penguins";
+        case SuperstarsMiniGame.CONEY_ISLAND:        return "Coney Island";
+        case SuperstarsMiniGame.BILL_BLASTERS:       return "Bill Blasters";
+        case SuperstarsMiniGame.NIGHT_LIGHT_FRIGHT:  return "Night-Light Fright";
+        case SuperstarsMiniGame.LATER_SKATER:        return "Later Skater";
+        case SuperstarsMiniGame.CATCH_YOU_LETTER:    return "Catch You Letter";
+        case SuperstarsMiniGame.TRAP_EASE_ARTIST:    return "Trap Ease Artist";
+        case SuperstarsMiniGame.WHAT_GOES_UP:        return "What Goes Up...";
+        case SuperstarsMiniGame.SNOW_WHIRLED:        return "Snow Whirled";
+        case SuperstarsMiniGame.DARK_N_CRISPY:       return "Dark 'n' Crispy";
+        case SuperstarsMiniGame.PIT_BOSS:            return "Pit Boss";
+        case SuperstarsMiniGame.X_RAY_PAYDAY:        return "X-Ray Payday";
+        case SuperstarsMiniGame.MONTY_S_REVENGE:     return "Monty's Revenge";
+        case SuperstarsMiniGame.THE_FINAL_COUNTDOWN: return "The Final Countdown";
+        case SuperstarsMiniGame.POKEY_PUMMEL:        return "Pokey Pummel";
+        case SuperstarsMiniGame.MANOR_OF_ESCAPE:     return "Manor of Escape";
+        case SuperstarsMiniGame.GOOMBA_SPOTTING:     return "Goomba Spotting";
+        case SuperstarsMiniGame.FLASH_FORWARD:       return "Flash Forward";
+        case SuperstarsMiniGame.RAPID_RIVER_RACE:    return "Rapid River Race";
+        case SuperstarsMiniGame.PIRANHA_S_PURSUIT:   return "Piranha's Pursuit";
+        case SuperstarsMiniGame.TUG_O_WAR:           return "Tug o' War";
+        case SuperstarsMiniGame.ARCHER_IVAL:         return "Archer-ival";
+        case SuperstarsMiniGame.LOOK_AWAY:           return "Look Away";
+        case SuperstarsMiniGame.QUICKSAND_CACHE:     return "Quicksand Cache";
+        case SuperstarsMiniGame.TIDAL_TOSS:          return "Tidal Toss";
+        case SuperstarsMiniGame.BOULDER_BALL:        return "Boulder Ball";
+        case SuperstarsMiniGame.COCONUT_CONK:        return "Coconut Conk";
+        case SuperstarsMiniGame.SPOTLIGHT_SWIM:      return "Spotlight Swim";
+        case SuperstarsMiniGame.HIDE_AND_SNEAK:      return "Hide-and-Sneak";
+        case SuperstarsMiniGame.RIVER_RAIDERS:       return "River Raiders";
+        case SuperstarsMiniGame.GOOOOOOOAL:          return "GOOOOOOOAL!!";
+        case SuperstarsMiniGame.MONEY_BELTS:         return "Money Belts";
+        case SuperstarsMiniGame.SQUARED_AWAY:        return "Squared Away";
+        case SuperstarsMiniGame.TUBE_IT_OR_LOSE_IT:  return "Tube It or Lose It";
+        case SuperstarsMiniGame.POGO_A_GO_GO:        return "Pogo-a-Go-Go";
+        case SuperstarsMiniGame.TACKLE_TAKEDOWN:     return "Tackle Takedown";
+        case SuperstarsMiniGame.SKEWER_SCURRY:       return "Skewer Scurry";
+        case SuperstarsMiniGame.BOBSLED_RUN:         return "Bobsled Run";
+        case SuperstarsMiniGame.HANDCAR_HAVOC:       return "Handcar Havoc";
+        case SuperstarsMiniGame.DUNGEON_DASH:        return "Dungeon Dash";
+        case SuperstarsMiniGame.SPEED_HOCKEY:        return "Speed Hockey";
+        case SuperstarsMiniGame.BALLOON_BURST:       return "Balloon Burst";
+        case SuperstarsMiniGame.CAKE_FACTORY:        return "Cake Factory";
+        case SuperstarsMiniGame.SKY_PILOTS:          return "Sky Pilots";
+        case SuperstarsMiniGame.ETCH_N_CATCH:        return "Etch 'n' Catch";
+        case SuperstarsMiniGame.PICKING_PANIC:       return "Picking Panic";
+        case SuperstarsMiniGame.EATSA_PIZZA:         return "Eatsa Pizza";
+        case SuperstarsMiniGame.PUDDLE_PADDLE:       return "Puddle Paddle";
+        case SuperstarsMiniGame.DUNGEON_DUOS:        return "Dungeon Duos";
+        case SuperstarsMiniGame.REVERS_A_BOMB:       return "Revers-a-Bomb";
+        case SuperstarsMiniGame.BURNSTILE:           return "Burnstile";
+        case SuperstarsMiniGame.ROCKY_ROAD:          return "Rocky Road";
+        case SuperstarsMiniGame.CASHAPULT:           return "Cashapult";
+        case SuperstarsMiniGame.PAINT_MISBEHAVIN:    return "Paint Misbehavin'";
+        case SuperstarsMiniGame.WINNER_OR_DINNER:    return "Winner or Dinner";
+        case SuperstarsMiniGame.TICKTOCK_HOP:        return "Ticktock Hop";
+        case SuperstarsMiniGame.VINE_WITH_ME:        return "Vine with Me";
+        case SuperstarsMiniGame.MOTOR_ROOTER:        return "Motor Rooter";
+        case SuperstarsMiniGame.MASS_METEOR:         return "Mass Meteor";
+        case SuperstarsMiniGame.SPIN_DOCTOR:         return "Spin Doctor";
     }
 }
 
