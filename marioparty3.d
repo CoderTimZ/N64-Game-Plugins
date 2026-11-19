@@ -880,6 +880,17 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 showSuperstarsMessage();
             });
 
+            // func_800EE2DC (message waits for any player): If every player is a CPU, the message advances itself.
+            // While waiting for results, report the players as human to this function so it waits for A instead.
+            players.each!((p) {
+                p.data.flags.onRead((ref ubyte flags, Address pc) {
+                    if (ssPhase != SuperstarsPhase.WAITING) return;
+                    if (pc < 0x800EE2DC || pc >= 0x800EE614) return;
+                    if (!players.all!(o => o.isCPU)) return;
+                    flags &= ~0b1;
+                });
+            });
+
             // omOvlCallEx: Skip the rules screen and mini-game, going straight to the results
             0x80048128.onExec({
                 if (gpr.a0 != Scene.MINI_GAME_RULES) return;
@@ -1664,9 +1675,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
         if (ssNameBuffer) {
             foreach (i, name; names) {
-                auto text = formatText(name ~ "<END><NUL>");
+                // Plain label: no <END>, which would make the window show a "press A" arrow
+                auto text = formatText(name ~ "<NUL><NUL>");
                 if (text.length > SUPERSTARS_NAME_SLOT_SIZE) {
-                    text = text[0..SUPERSTARS_NAME_SLOT_SIZE - 2] ~ formatText("<END><NUL>");
+                    text = text[0..SUPERSTARS_NAME_SLOT_SIZE - 2] ~ formatText("<NUL><NUL>");
                 }
                 auto slot = Ptr!char(ssNameBuffer + cast(uint)(i * SUPERSTARS_NAME_SLOT_SIZE));
                 foreach (j, char c; text) slot[j] = c;
@@ -1695,7 +1707,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             if (ssResults) {
                 ssPhase = SuperstarsPhase.READY;
             } else {
-                // The message can only close early if nobody can press A (e.g. all CPUs)
+                // Input is blocked until results arrive, so this should not happen
                 warning("The Superstars message closed without results; playing the MP3 mini-game instead");
                 resetSuperstars();
             }
