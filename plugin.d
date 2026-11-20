@@ -373,6 +373,58 @@ struct ShuffleQueue(T) {
     }
 }
 
+// Like ShuffleQueue, but next() can skip elements without losing them.
+//
+// It behaves as if it were an endless list of cycles, each a distance shuffle of the one before (the first is a
+// full shuffle), and next(pred) takes the earliest element in that list that hasn't been taken yet and satisfies
+// pred. Skipped elements stay where they are, to be taken later. Cycles are only generated once a draw reaches
+// them, which gives the same result as generating them all in advance.
+struct ShuffleStream(T) {
+    T[][] cycles;    // The cycles that still have elements left to take (always at least the latest one)
+    bool[][] taken;  // Which elements of each cycle have been taken
+
+    this(Range, RandomGen)(Range r, ref RandomGen gen) {
+        auto first = r.array.dup;
+        first.randomShuffle(gen);
+        cycles = [first];
+        taken = [new bool[first.length]];
+    }
+
+    bool empty() const {
+        return cycles.empty || cycles[0].empty;
+    }
+
+    T next(RandomGen)(ref RandomGen gen, scope bool delegate(T) pred = null) {
+        assert(!empty);
+
+        // Every cycle has the same elements, so if none satisfies pred, no cycle ever will
+        if (pred && !cycles[$-1].any!(e => pred(e))) pred = null;
+
+        for (size_t c = 0; ; c++) {
+            if (c == cycles.length) {
+                auto cycle = cycles[$-1].dup;
+                distanceShuffle(cycle, (cycle.length - 1) / 2, gen);
+                cycles ~= cycle;
+                taken ~= new bool[cycle.length];
+            }
+
+            foreach (i, e; cycles[c]) {
+                if (taken[c][i] || (pred && !pred(e))) continue;
+
+                taken[c][i] = true;
+
+                // Forget fully taken cycles, except the latest (the next cycle is made from it)
+                while (cycles.length > 1 && taken[0].all) {
+                    cycles = cycles[1..$];
+                    taken = taken[1..$];
+                }
+
+                return e;
+            }
+        }
+    }
+}
+
 union Register(T) if (T.sizeof == 4) {
     ulong v;
     struct { T l, h; }

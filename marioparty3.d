@@ -100,7 +100,7 @@ class State {
         new PlayerState()
     ];
     ShuffleQueue!MiniGame[MiniGameType] miniGameQueue;
-    ShuffleQueue!SuperstarsMiniGame[MiniGameType] superstarsMiniGameQueue;
+    ShuffleStream!SuperstarsMiniGame[MiniGameType] superstarsMiniGameQueue;
     CustomSpace[] spaces;
     uint luckySpaceTexturePtr;
     uint goldSpaceTexturePtr;
@@ -1667,9 +1667,18 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         auto choices = all.filter!(g => !config.blockedSuperstarsMiniGames.canFind(g)).array;
         if (choices.empty) choices = all;
 
-        auto game = state.superstarsMiniGameQueue.require(superstarsQueueKey(type), ShuffleQueue!SuperstarsMiniGame(choices, random)).next(random);
-        auto alternatives = choices.filter!(g => g != game).array.randomShuffle(random)
-                          ~ all.filter!(g => g != game && !choices.canFind(g)).array.randomShuffle(random);
+        // The queue holds every (unblocked) mini-game of the list. Battles skip its coin mini-games,
+        // which stay in the queue for regular 4-player roulettes.
+        auto key = superstarsQueueKey(type);
+        auto queue = key in state.superstarsMiniGameQueue;
+        if (!queue || queue.empty) {
+            state.superstarsMiniGameQueue[key] = ShuffleStream!SuperstarsMiniGame(choices, random);
+            queue = key in state.superstarsMiniGameQueue;
+        }
+        auto allowed = (SuperstarsMiniGame g) => isAllowedSuperstarsMiniGame(g, type);
+        auto game = queue.next(random, allowed);
+        auto alternatives = choices.filter!(g => g != game && allowed(g)).array.randomShuffle(random)
+                          ~ all.filter!(g => g != game && !choices.canFind(g) && allowed(g)).array.randomShuffle(random);
         auto names = game ~ alternatives.take(count - 1).array;
         for (size_t i = 0; names.length < count; i++) {
             names ~= names[i];
@@ -1683,8 +1692,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
 
         if (ssNameBuffer) {
             foreach (i, g; names) {
-                // Plain label: no <END>, which would make the window show a "press A" arrow
-                auto text = formatText(g.fullName ~ "<NUL><NUL>");
+                // Plain label: no <END>, which would make the window show a "press A" arrow.
+                // Coin mini-games are yellow.
+                auto name = g.isCoinMiniGame ? "<YELLOW>" ~ g.fullName ~ "<RESET>" : g.fullName;
+                auto text = formatText(name ~ "<NUL><NUL>");
                 if (text.length > SUPERSTARS_NAME_SLOT_SIZE) {
                     text = text[0..SUPERSTARS_NAME_SLOT_SIZE - 2] ~ formatText("<NUL><NUL>");
                 }
@@ -2267,6 +2278,30 @@ MiniGameType superstarsQueueKey(MiniGameType type) {
 
 SuperstarsMiniGame[] superstarsMiniGames(MiniGameType type) {
     return [EnumMembers!SuperstarsMiniGame].filter!(g => g.type == superstarsQueueKey(type)).array;
+}
+
+// Mini-games where players collect coins
+bool isCoinMiniGame(SuperstarsMiniGame game) {
+    switch (game) {
+        case SuperstarsMiniGame.HAMMER_DROP:
+        case SuperstarsMiniGame.CAST_AWAYS:
+        case SuperstarsMiniGame.PARASOL_PLUMMET:
+        case SuperstarsMiniGame.X_RAY_PAYDAY:
+        case SuperstarsMiniGame.QUICKSAND_CACHE:
+        case SuperstarsMiniGame.RIVER_RAIDERS:
+        case SuperstarsMiniGame.MONEY_BELTS:
+        case SuperstarsMiniGame.PUDDLE_PADDLE:
+        case SuperstarsMiniGame.CASHAPULT:
+        case SuperstarsMiniGame.WINNER_OR_DINNER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Coin mini-games make no sense as battles, so battles skip the 4-player coin mini-games
+bool isAllowedSuperstarsMiniGame(SuperstarsMiniGame game, MiniGameType type) {
+    return type != MiniGameType.BATTLE || !game.isCoinMiniGame;
 }
 
 enum SuperstarsMiniGame : ubyte {
