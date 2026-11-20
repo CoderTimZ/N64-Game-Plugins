@@ -811,7 +811,8 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     ssRoulette.clear();
                     if (!superstarsEnabled || !populateSuperstarsRoulette(type, count)) {
                         auto games = [EnumMembers!MiniGame].filter!(g => g.type == type).array;
-                        auto choices = games.filter!(g => !config.blockedMiniGames.canFind(g));
+                        auto choices = games.filter!(g => !config.blockedMiniGames.canFind(g)).array;
+                        if (choices.empty) choices = games; // Every mini-game of this type is blocked
                         auto queue = &state.miniGameQueue.require(type);
                         if (queue.empty) queue.initialize(choices, random);
                         auto game = queue.next(random);
