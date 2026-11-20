@@ -903,7 +903,15 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 if (ssPhase == SuperstarsPhase.NONE) return;
 
                 if (ssPhase == SuperstarsPhase.READY && ssResults) {
-                    gpr.a0 = applySuperstarsResults();
+                    auto next = applySuperstarsResults();
+                    gpr.a0 = next;
+                    if (isBoardScene(cast(Scene)next)) {
+                        // Duels have no results screen: the board pays out the winner itself (MBKettouResultExec).
+                        // Go straight back to the board, as MBOvlCallExec does once a mini-game returns.
+                        gpr.a1 = 2;
+                        gpr.a2 = 0x192;
+                        0x800D4196.val!short = 0; // D_800D4190_main.stat
+                    }
                 } else {
                     warning("No Superstars results were entered for ", ssGame.fullName, "; playing the MP3 mini-game instead");
                 }
@@ -1696,11 +1704,39 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         return true;
     }
 
+    // Fades out the music the same way the board does before a mini-game (func_800F93A4), so it doesn't play
+    // during the Superstars mini-game. Battles and duels play their music on a second track (D_800C9930).
+    void fadeOutBoardMusic(void delegate() done) {
+        enum FRAMES = 60;
+        auto stopSeq = (void delegate() next) {
+            0x8004A950.jal(next);                                  // Stop the main track
+        };
+        auto checkFlag = {
+            if (0x800CE206.val!short != 0) {
+                0x800CE206.val!short = 0;
+                stopSeq(done);
+            } else {
+                done();
+            }
+        };
+        auto fadeExtraTrack = {
+            auto track = 0x800C9930.val!short;
+            if (track != -1) {
+                0x800C9930.val!short = -1;
+                0x800039A4.jal(cast(uint)cast(int)track, FRAMES, { // Fade the battle/duel track
+                    stopSeq(checkFlag);
+                });
+            } else {
+                checkFlag();
+            }
+        };
+        0x8004A994.jal(FRAMES, fadeExtraTrack);                     // HuAudSeqFadeOut: fade the main track
+    }
+
     void showSuperstarsMessage() {
         ssPhase = SuperstarsPhase.WAITING;
 
-        // HuAudSeqFadeOut: Fade out the board music so it doesn't play during the Superstars mini-game
-        0x8004A994.jal(60, {
+        fadeOutBoardMusic({
             showGlobalMessage("Let's play <YELLOW>" ~ ssGame.fullName ~ "<RESET>\n" ~
                               "in Mario Party Superstars!\n\n" ~
                               "When you're done, enter\n" ~
@@ -1717,7 +1753,8 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         });
     }
 
-    // Writes the entered results where the mini-game would have and returns the results screen to show
+    // Writes the entered results where the mini-game would have and returns the overlay to go to next
+    // (the results screen, or the board for duels)
     uint applySuperstarsResults() {
         auto r = ssResults;
         info("Superstars results for ", ssGame.fullName, ": coins=", r.coins, " ranks=", r.ranks, " winner=", r.winner);
@@ -1733,9 +1770,9 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             case MiniGameType.DUEL:
                 players.each!((p) {
                     p.data.gameCoinsExtra = 0;
-                    p.data.gameCoinsMain = (r.winner == p.index + 1 ? 10 : 0);
+                    p.data.gameCoinsMain = (r.winner == p.index + 1 ? 10 : 0); // Any non-zero value wins
                 });
-                return Scene.DUEL_GAME_RESULTS;
+                return Scene.CHILLY_WATERS_BOARD + data.currentBoard;
 
             case MiniGameType.ONE_V_THREE:
             case MiniGameType.TWO_V_TWO:
@@ -2022,7 +2059,6 @@ enum Scene : uint {
     MINI_GAME_RULES          = 112,
     MINI_GAME_RESULTS        = 113,
     GAMBLE_GAME_RESULTS      = 114,
-    DUEL_GAME_RESULTS        = 115,
     BATTLE_GAME_RESULTS      = 116,
     CASTLE_GROUNDS           = 119,
     GAME_SETUP               = 120,
