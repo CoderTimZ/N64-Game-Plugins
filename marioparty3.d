@@ -99,7 +99,7 @@ class State {
         new PlayerState(),
         new PlayerState()
     ];
-    ShuffleQueue!MiniGame[MiniGameType] miniGameQueue;
+    ShuffleStream!MiniGame[MiniGameType] miniGameQueue;
     ShuffleStream!SuperstarsMiniGame[MiniGameType] superstarsMiniGameQueue;
     CustomSpace[] spaces;
     uint luckySpaceTexturePtr;
@@ -812,7 +812,9 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                     if (!superstarsEnabled || !populateSuperstarsRoulette(type, count)) {
                         auto games = [EnumMembers!MiniGame].filter!(g => g.type == type).array;
                         auto choices = games.filter!(g => !config.blockedMiniGames.canFind(g));
-                        auto game = state.miniGameQueue.require(type, ShuffleQueue!MiniGame(choices, random)).next(random);
+                        auto queue = &state.miniGameQueue.require(type);
+                        if (queue.empty) queue.initialize(choices, random);
+                        auto game = queue.next(random);
                         auto roulette = game ~ games.filter!(g => g != game).array.randomShuffle(random).take(count - 1);
                         roulette.randomShuffle(random).each!((i, e) => data.miniGameRoulette[i] = e);
                         0x800DF120.onExecOnce({ gpr.v0 = cast(uint)roulette.countUntil(game); });
@@ -1673,11 +1675,8 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         // The queue holds every (unblocked) mini-game of the list. Battles skip its coin mini-games,
         // which stay in the queue for regular 4-player roulettes.
         auto key = superstarsQueueKey(type);
-        auto queue = key in state.superstarsMiniGameQueue;
-        if (!queue || queue.empty) {
-            state.superstarsMiniGameQueue[key] = ShuffleStream!SuperstarsMiniGame(choices, random);
-            queue = key in state.superstarsMiniGameQueue;
-        }
+        auto queue = &state.superstarsMiniGameQueue.require(key);
+        if (queue.empty) queue.initialize(choices, random);
         auto allowed = (SuperstarsMiniGame g) => isAllowedSuperstarsMiniGame(g, type);
         auto game = queue.next(random, allowed);
         auto alternatives = choices.filter!(g => g != game && allowed(g)).array.randomShuffle(random)

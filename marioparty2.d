@@ -74,9 +74,9 @@ class State {
         new PlayerState(),
         new PlayerState()
     ];
-    ShuffleQueue!MiniGame[MiniGameType] miniGameQueue;
-    ShuffleQueue!Board itemGameQueue;
-    ShuffleQueue!Board duelGameQueue;
+    ShuffleStream!MiniGame[MiniGameType] miniGameQueue;
+    ShuffleStream!Board itemGameQueue;
+    ShuffleStream!Board duelGameQueue;
     CustomSpace[] spaces;
     float currentPlayerTurn = 0;
     BingoCard[] bingoCards;
@@ -388,7 +388,9 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                     auto type = (cast(MiniGame)gpr.v0).type;
                     auto games = [EnumMembers!MiniGame].filter!(g => g.type == type).array;
                     auto choices = games.filter!(g => !config.blockedMiniGames.canFind(g));
-                    auto game = state.miniGameQueue.require(type, ShuffleQueue!MiniGame(choices, random)).next(random);
+                    auto queue = &state.miniGameQueue.require(type);
+                    if (queue.empty) queue.initialize(choices, random);
+                    auto game = queue.next(random);
                     auto altCount = (0x800CBD10 + gpr.s2).val!ubyte - 1;
                     auto roulette = game ~ games.filter!(g => g != game).array.randomShuffle(random).take(altCount);
                     roulette.randomShuffle(random).each!((i, e) => data.miniGameRoulette[i] = e);

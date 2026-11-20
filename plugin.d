@@ -329,51 +329,7 @@ Range distanceShuffle(Range, RandomGen)(Range r, size_t d, ref RandomGen gen) if
     }
 }
 
-struct ShuffleQueue(T) {
-    T[] queue;
-    size_t index;
-
-    this(Range, RandomGen)(Range r, ref RandomGen gen) {
-        initialize(r, gen);
-    }
-
-    void initialize(Range, RandomGen)(Range r, ref RandomGen gen) {
-        clear();
-        r.each!((ref e) { queue ~= e; });
-        queue.randomShuffle(gen);
-    }
-
-    @property T front() const {
-        return queue[min(index, $-1)];
-    }
-
-    void popFront(RandomGen)(ref RandomGen gen) {
-        if (++index < queue.length) return;
-
-        if (!queue.empty) {
-            distanceShuffle(queue, (queue.length - 1) / 2, gen);
-        }
-
-        index = 0;
-    }
-
-    T next(RandomGen)(ref RandomGen gen) {
-        T f = front;
-        popFront(gen);
-        return f;
-    }
-
-    bool empty() const {
-        return queue.empty;
-    }
-
-    void clear() {
-        queue.length = 0;
-        index = 0;
-    }
-}
-
-// Like ShuffleQueue, but next() can skip elements without losing them.
+// An endless shuffled sequence of a set of elements, where next() can skip elements without losing them.
 //
 // It behaves as if it were an endless list of cycles, each a distance shuffle of the one before (the first is a
 // full shuffle), and next(pred) takes the earliest element in that list that hasn't been taken yet and satisfies
@@ -384,6 +340,10 @@ struct ShuffleStream(T) {
     bool[][] taken;  // Which elements of each cycle have been taken
 
     this(Range, RandomGen)(Range r, ref RandomGen gen) {
+        initialize(r, gen);
+    }
+
+    void initialize(Range, RandomGen)(Range r, ref RandomGen gen) {
         auto first = r.array.dup;
         first.randomShuffle(gen);
         cycles = [first];
@@ -392,6 +352,11 @@ struct ShuffleStream(T) {
 
     bool empty() const {
         return cycles.empty || cycles[0].empty;
+    }
+
+    void clear() {
+        cycles = null;
+        taken = null;
     }
 
     T next(RandomGen)(ref RandomGen gen, scope bool delegate(T) pred = null) {
