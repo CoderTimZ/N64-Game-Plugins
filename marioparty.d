@@ -271,8 +271,9 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
         }
     }
 
-    override void loadState() {
-        super.loadState();
+    // Also runs when a save state brings back a different State
+    override void stateLoaded() {
+        super.stateLoaded();
 
         players.each!(p => p.state = state.players[p.index]);
     }

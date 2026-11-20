@@ -124,6 +124,9 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
     this(string name, string hash) {
         super(name, hash);
 
+        // Keep the State on the permanent heap (D_800D6030, MakePermHeap, HuMemDirectMalloc, HuMemDirectFree, HuPrcVSleep)
+        permanentHeap = PermanentHeap(0x800D6030, 0x8003B680, 0x8003B6A4, 0x8003B6C8, 0x800635B4);
+
         players = iota(4).map!(i => new Player(i, data.players[i], data.playerPanels[i])).array;
     }
 

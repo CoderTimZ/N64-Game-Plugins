@@ -536,12 +536,80 @@ static void saveJson(T)(T json, string filename) {
     }
 }
 
+// A game's State as stored in the N64's memory: minified JSON, compressed with zlib (deflate).
+// It's still JSON underneath, so fields and enums are matched by name: a State saved by an older or newer version
+// of a plugin still loads, with missing fields keeping their defaults and unknown fields ignored.
+ubyte[] packState(T)(T state) {
+    import std.zlib : compress;
+    return cast(ubyte[])compress(state.toJSON().toString(JSONOptions.doNotEscapeSlashes).lossyFloats(), 9);
+}
+
+T unpackState(T)(const(ubyte)[] data) {
+    import std.zlib : uncompress;
+    return (cast(string)uncompress(data).idup).parseJSON().fromJSON!T();
+}
+
+// Where a game's permanent heap and its functions are, for keeping the plugin's State in the N64's memory.
+// The plugin allocates a block on the permanent heap, so it never collides with anything else using the memory
+// (such as PartyPlanner64 boards in the Expansion Pak), and save states include it automatically.
+struct PermanentHeap {
+    Address heapPointer;   // Variable holding the heap's first node (HeapNode*)
+    Address heapInit;      // Function that (re)creates the heap
+    Address alloc;         // void* alloc(u32 size)
+    Address free;          // void free(void* ptr)
+    Address processSleep;  // HuPrcVSleep: always runs inside a game process, where the heap functions are safe to call
+}
+
+// The plugin's folder for files that aren't settings (like the State backups):
+// %APPDATA%\N64-Game-Plugins on Windows, $XDG_STATE_HOME/N64-Game-Plugins (~/.local/state) elsewhere
+string dataDirectory() {
+    import std.process : environment;
+    import std.path : buildPath, expandTilde;
+
+    version (Windows) {
+        auto base = environment.get("APPDATA", "");
+    } else {
+        auto base = environment.get("XDG_STATE_HOME", expandTilde("~/.local/state"));
+    }
+    if (base.empty) return ".";
+
+    auto dir = buildPath(base, "N64-Game-Plugins");
+    try {
+        mkdirRecurse(dir);
+        return dir;
+    } catch (Exception e) {
+        warning("Can't create ", dir, ": ", e.message);
+        return ".";
+    }
+}
+
 abstract class Game(Config, State = NoState) : Plugin {
     string romName;
     string romHash;
     Config config;
     State state;
     bool stateError;
+
+    // State block in the N64's memory (see PermanentHeap). The header is 8 words: magic (2), format version,
+    // capacity, data length, data CRC32 and a write stamp (2) that changes on every write.
+    enum STATE_MAGIC_1 = 0x4E363450; // "N64P"
+    enum STATE_MAGIC_2 = 0x53544154; // "STAT"
+    enum STATE_FORMAT = 2;                // 2: zlib-compressed JSON (1 was a custom binary format)
+    enum STATE_HEADER_SIZE = 32;
+
+    // Room for the State to grow by half before it needs a bigger block, in steps of 1 KB
+    static uint stateBlockCapacity(size_t length) {
+        return cast(uint)((length + length / 2 + 1023) / 1024 * 1024);
+    }
+
+    PermanentHeap permanentHeap;   // Set by games that support it; otherwise the State is only kept in the backup file
+    bool stateInMemory;            // Whether permanentHeap is usable
+    Address stateBlock;            // The block's address, or 0 if there isn't one yet
+    uint stateCapacity;            // Data bytes the block can hold
+    ulong stateStamp;              // Last stamp written to (or read from) the block
+    uint stateCrc;                 // Last data CRC written to (or read from) the block
+    bool stateAllocating;          // An allocation is in progress
+    bool stateNeedsBiggerBlock;    // The State outgrew the block
 
     this(string romName, string romHash) {
         this.romName = romName;
@@ -553,22 +621,255 @@ abstract class Game(Config, State = NoState) : Plugin {
         if (!config) config = new Config;
     }
 
+    // The State's backup file, used when the State isn't in memory (e.g. when continuing a game from the game's
+    // own save file rather than a save state). It's named after the ROM's header name and the start of its MD5,
+    // so ROM hacks of the same game (which usually keep the header name) each get their own file.
+    string stateFile;
+    string stateBackupFile() {
+        if (!stateFile) {
+            import std.path : buildPath;
+            import std.uni : isAlphaNum, toUpper;
+
+            // Only characters that are safe in file names
+            auto safe = (string s) => s.map!(c => (c.isAlphaNum || c == '-' || c == '_' || c == ' ') ? c : '_').to!string;
+            auto name = safe(romName);
+            auto hash = safe(romHash.take(8).to!string.toUpper);
+            stateFile = buildPath(dataDirectory(), (hash.empty ? name : name ~ "-" ~ hash) ~ "-State.json");
+        }
+        return stateFile;
+    }
+
+    // Called whenever the State is (re)loaded, so games can update anything that refers into it
+    void stateLoaded() { }
+
     void loadState() {
         static if (!is(State == NoState)) {
-            state = loadJson!State(romName ~ "-State.json");
+            state = loadJson!State(stateBackupFile());
             if (state) {
                 stateError = false;
             } else {
                 state = new State;
                 stateError = true;
             }
+            stateLoaded();
         }
     }
 
     void saveState() {
         static if (!is(State == NoState)) {
-            state.saveJson(romName ~ "-State.json");
+            if (!writeStateBlock()) return; // A save state was loaded, so the State was reloaded instead
+            state.saveJson(stateBackupFile());
             stateError = false;
+        }
+    }
+
+    static if (!is(State == NoState)) {
+        bool inMemory(Address address, size_t size) {
+            return address >= 0x80000000 && address + size <= 0x80000000 + memory.length && address % 4 == 0;
+        }
+
+        bool isHeapNode(Address node) {
+            return inMemory(node, 16) && (node + 4).val!ubyte == 0xA5;
+        }
+
+        Address heapStart() {
+            Address start = permanentHeap.heapPointer.val!uint;
+            return isHeapNode(start) ? start : 0;
+        }
+
+        // Reads a State block, returning its data, or null if there's no valid block at the address
+        const(ubyte)[] readStateBlock(Address block, out uint capacity, out ulong stamp, out uint crc) {
+            import std.digest.crc : crc32Of;
+
+            if (!inMemory(block, STATE_HEADER_SIZE)) return null;
+            if (block.val!uint != STATE_MAGIC_1 || (block + 4).val!uint != STATE_MAGIC_2) return null;
+            if ((block + 8).val!uint != STATE_FORMAT) return null;
+            capacity = (block + 12).val!uint;
+            auto length = (block + 16).val!uint;
+            crc = (block + 20).val!uint;
+            stamp = (cast(ulong)(block + 24).val!uint << 32) | (block + 28).val!uint;
+            if (length == 0 || length > capacity || !inMemory(block, STATE_HEADER_SIZE + capacity)) return null;
+
+            auto data = new ubyte[length];
+            foreach (i, ref b; data) b = Ptr!ubyte(block + STATE_HEADER_SIZE + cast(uint)i)[0];
+            auto check = crc32Of(data);
+            if ((check[0] | check[1] << 8 | check[2] << 16 | check[3] << 24) != crc) return null;
+
+            return data;
+        }
+
+        // Whether the block no longer holds what the plugin last wrote (i.e. a save state was loaded)
+        bool stateBlockChanged() {
+            Address block = stateBlock;
+            return block.val!uint != STATE_MAGIC_1 || (block + 4).val!uint != STATE_MAGIC_2 ||
+                   (block + 20).val!uint != stateCrc ||
+                   (block + 24).val!uint != cast(uint)(stateStamp >> 32) || (block + 28).val!uint != cast(uint)stateStamp;
+        }
+
+        // Looks through the permanent heap's allocated blocks for a State block
+        Address findStateBlock() {
+            Address start = heapStart();
+            if (!start) return 0;
+
+            Address node = start;
+            foreach (i; 0..100_000) {
+                if (!isHeapNode(node)) return 0;
+                uint capacity, crc;
+                ulong stamp;
+                if ((node + 5).val!ubyte && readStateBlock(node + 16, capacity, stamp, crc)) {
+                    return node + 16;
+                }
+                node = (node + 12).val!uint;
+                if (node == start) break;
+            }
+            return 0;
+        }
+
+        void writeBlock(Address block, uint capacity, const(ubyte)[] data) {
+            import std.digest.crc : crc32Of;
+            import std.datetime.systime : Clock;
+
+            auto check = crc32Of(data);
+            uint crc = check[0] | check[1] << 8 | check[2] << 16 | check[3] << 24;
+            ulong stamp = max(cast(ulong)Clock.currStdTime, stateStamp + 1);
+
+            foreach (i, b; data) Ptr!ubyte(block + STATE_HEADER_SIZE + cast(uint)i)[0] = b;
+            (block +  0).val!uint = STATE_MAGIC_1;
+            (block +  4).val!uint = STATE_MAGIC_2;
+            (block +  8).val!uint = STATE_FORMAT;
+            (block + 12).val!uint = capacity;
+            (block + 16).val!uint = cast(uint)data.length;
+            (block + 20).val!uint = crc;
+            (block + 24).val!uint = cast(uint)(stamp >> 32);
+            (block + 28).val!uint = cast(uint)stamp;
+
+            stateCrc = crc;
+            stateStamp = stamp;
+        }
+
+        void wipeStateBlock(Address block) {
+            if (inMemory(block, 8)) block.val!uint = 0;
+        }
+
+        // Writes the State to its block. Returns false if a save state was loaded since the last write, in which
+        // case the State is reloaded from memory instead (overwriting it would undo the loaded save state).
+        bool writeStateBlock() {
+            if (!stateInMemory || !stateBlock || stateAllocating) return true;
+
+            if (stateBlockChanged()) {
+                reloadStateFromMemory();
+                return false;
+            }
+
+            auto data = packState(state);
+            if (data.length > stateCapacity) {
+                stateNeedsBiggerBlock = true; // A bigger block is made from the next game process
+                return true;
+            }
+
+            writeBlock(stateBlock, stateCapacity, data);
+            return true;
+        }
+
+        // Makes the State block at the address the plugin's State
+        void useStateBlock(Address block) {
+            uint capacity, crc;
+            ulong stamp;
+            auto data = readStateBlock(block, capacity, stamp, crc);
+            if (!data) return;
+
+            stateBlock = block;
+            stateCapacity = capacity;
+            stateStamp = stamp;
+            stateCrc = crc;
+            stateNeedsBiggerBlock = false;
+
+            try {
+                auto loaded = unpackState!State(data);
+                if (loaded) state = loaded;
+            } catch (Exception e) {
+                error("Can't read the State in memory: ", e.classinfo.name, ": ", e.message);
+            }
+
+            stateLoaded();
+            state.saveJson(stateBackupFile());
+            stateError = false;
+        }
+
+        // A save state was loaded: switch to the State saved with it
+        void reloadStateFromMemory() {
+            uint capacity, crc;
+            ulong stamp;
+            Address block = readStateBlock(stateBlock, capacity, stamp, crc) ? stateBlock : findStateBlock();
+            stateBlock = 0;
+
+            // A save state made before the State was kept in memory has no block: keep the current State,
+            // and a new block is made for it
+            if (block) useStateBlock(block);
+        }
+
+        // Runs inside a game process (from HuPrcVSleep): finds or makes the State block when there isn't one,
+        // and moves the State to a bigger block when it outgrows its block
+        void maintainStateBlock() {
+            if (!stateInMemory || stateAllocating) return;
+            if (stateBlock && !stateNeedsBiggerBlock) return;
+
+            // The hook is only safe if HuPrcVSleep starts with "addiu sp, sp, ..." (e.g. not on another ROM version)
+            if ((permanentHeap.processSleep.val!uint & 0xFFFF0000) != 0x27BD0000) {
+                warning("Unexpected code at ", permanentHeap.processSleep.to!string(16), "; the State is only kept in ", stateBackupFile());
+                stateInMemory = false;
+                return;
+            }
+
+            if (!heapStart()) return; // The heap isn't set up yet
+
+            if (!stateBlock) {
+                if (auto block = findStateBlock()) {
+                    useStateBlock(block);
+                    return;
+                }
+            }
+
+            Address oldBlock = stateBlock;
+            uint capacity = stateBlockCapacity(packState(state).length);
+
+            stateAllocating = true;
+            permanentHeap.alloc.jal(STATE_HEADER_SIZE + capacity, (ptr) {
+                stateAllocating = false;
+
+                if (!ptr || !inMemory(ptr, STATE_HEADER_SIZE + capacity)) {
+                    warning("Not enough memory for the State; it is only kept in ", stateBackupFile());
+                    stateInMemory = false;
+                    return;
+                }
+
+                stateBlock = ptr;
+                stateCapacity = capacity;
+                stateNeedsBiggerBlock = false;
+                writeBlock(ptr, capacity, packState(state));
+
+                if (oldBlock) {
+                    wipeStateBlock(oldBlock);
+                    if (permanentHeap.free) permanentHeap.free.jal(oldBlock);
+                }
+            });
+        }
+
+        void setUpStateInMemory() {
+            with (permanentHeap) {
+                if (!heapPointer || !heapInit || !alloc || !processSleep) return;
+
+                stateInMemory = true;
+
+                // The heap is being (re)created (boot or reset), so the block is gone: a new one is made later
+                heapInit.onExec({
+                    if (stateBlock) wipeStateBlock(stateBlock);
+                    stateBlock = 0;
+                    stateAllocating = false;
+                });
+
+                processSleep.onExecDone({ maintainStateBlock(); });
+            }
         }
     }
 
@@ -630,10 +931,21 @@ abstract class Game(Config, State = NoState) : Plugin {
             error(msg);
             MessageBoxA(window, msg.toStringz, "loadState()", MB_ICONEXCLAMATION);
         }
+
+        static if (!is(State == NoState)) {
+            setUpStateInMemory();
+        }
     }
     void onInput(int, InputData*) { }
     void onMessage(string msg) { }
-    void onFrame(ulong) { }
+    void onFrame(ulong) {
+        static if (!is(State == NoState)) {
+            // A save state was loaded since the plugin last wrote the State
+            if (stateInMemory && stateBlock && !stateAllocating && stateBlockChanged()) {
+                reloadStateFromMemory();
+            }
+        }
+    }
     void onFinish() {
         if (!stateError) {
             saveState();
