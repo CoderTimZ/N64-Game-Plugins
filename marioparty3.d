@@ -1824,6 +1824,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             immutable type = "superstars";
             string game;
             MiniGameType category;
+            bool coin;
             SuperstarsPlayer[] players;
             bool submitted;
         }
@@ -1832,6 +1833,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         if (ssPhase != SuperstarsPhase.NONE) {
             msg.game = ssGame.fullName;
             msg.category = ssType;
+            msg.coin = ssGame.isCoinMiniGame;
             msg.submitted = (ssResults !is null);
             players.each!((p) {
                 SuperstarsPlayer sp;
