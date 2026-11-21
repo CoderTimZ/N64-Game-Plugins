@@ -112,8 +112,6 @@ union Memory {
     ubyte[0x800000] ram;
     mixin Field!(0x80009A1C, Instruction, "storeButtonPress");
     mixin Field!(0x8000B198, Instruction, "randomByteRoutine");
-    mixin Field!(0x80036574, Instruction, "textLength");
-    mixin Field!(0x800365A8, Instruction, "textChar");
     mixin Field!(0x8004ACE0, Instruction, "playSFX");
     mixin Field!(0x80097650, uint, "randomState");
     mixin Field!(0x800ABF8A, Arr!(ubyte, 4), "controllerPresent");
@@ -272,26 +270,41 @@ union PlayerPanel {
     mixin Field!(0x04, PanelColor, "color");
 }
 
-immutable BONUS_TEXT = [
-    ["<BLUE><OUTLINE>Mini-Game Star<NO_OUTLINE><RESET>",  "<BLUE><OUTLINE>Mini-Game Stars<NO_OUTLINE><RESET>",  "has won the most coins\nin Mini-Games"],
-    ["<YELLOW><OUTLINE>Coin Star<NO_OUTLINE><RESET>",     "<YELLOW><OUTLINE>Coin Stars<NO_OUTLINE><RESET>",     "had the most\ncoins at any one time\nduring the game"],
-    ["<GREEN><OUTLINE>Happening Star<NO_OUTLINE><RESET>", "<GREEN><OUTLINE>Happening Stars<NO_OUTLINE><RESET>", "landed on the most\n<GREEN><OUTLINE>? Spaces<NO_OUTLINE><RESET>"]
-].map!(e => e.map!(formatText).array).array;
+// Text color of each bonus star's name
+string getColor(BonusType type) {
+    final switch (type) {
+        case BonusType.MINI_GAME: return "BLUE";
+        case BonusType.COIN:      return "YELLOW";
+        case BonusType.HAPPENING: return "GREEN";
+        case BonusType.RED:       return "RED";
+        case BonusType.BLUE:      return "BLUE";
+        case BonusType.CHANCE:    return "GREEN";
+        case BonusType.BOWSER:    return "RED";
+        case BonusType.BATTLE:    return "GREEN";
+        case BonusType.ITEM:      return "GREEN";
+        case BonusType.BANK:      return "GREEN";
+        case BonusType.GAME_GUY:  return "GREEN";
+        case BonusType.LUCKY:     return "BLUE";
+    }
+}
 
-immutable BONUS_TEXT_REPLACEMENT = [
-    ["<BLUE><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",   "<BLUE><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",   "has won the most coins\nin Mini-Games"],
-    ["<YELLOW><OUTLINE>$NAME Star<NO_OUTLINE><RESET>", "<YELLOW><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>", "had the most\ncoins at any one time\nduring the game"],
-    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>? Spaces<NO_OUTLINE><RESET>"],
-    ["<RED><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",    "<RED><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",    "landed on the most\n<RED><OUTLINE>Red Spaces<NO_OUTLINE><RESET>"],
-    ["<BLUE><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",   "<BLUE><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",   "landed on the most\n<BLUE><OUTLINE>Blue Spaces<NO_OUTLINE><RESET>"],
-    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>! Spaces<NO_OUTLINE><RESET>"],
-    ["<RED><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",    "<RED><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",    "landed on the most\n<RED><OUTLINE>Bowser Spaces<NO_OUTLINE><RESET>"],
-    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>Battle Spaces<NO_OUTLINE><RESET>"],
-    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>Item Spaces<NO_OUTLINE><RESET>"],
-    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>Bank Spaces<NO_OUTLINE><RESET>"],
-    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>Game Guy Spaces<NO_OUTLINE><RESET>"],
-    ["<BLUE><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",   "<BLUE><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",   "landed on the most\n<BLUE><OUTLINE>Lucky Spaces<NO_OUTLINE><RESET>"]
-].map!(e => e.map!(formatText).array).array;
+// What a player did to win each bonus star (completes "This award goes to the person who ...")
+string getDescription(BonusType type) {
+    final switch (type) {
+        case BonusType.MINI_GAME: return "has won the most coins in Mini-Games";
+        case BonusType.COIN:      return "had the most coins at any one time during the game";
+        case BonusType.HAPPENING: return "landed on the most <GREEN><OUTLINE>? Spaces<NO_OUTLINE><RESET>";
+        case BonusType.RED:       return "landed on the most <RED><OUTLINE>Red Spaces<NO_OUTLINE><RESET>";
+        case BonusType.BLUE:      return "landed on the most <BLUE><OUTLINE>Blue Spaces<NO_OUTLINE><RESET>";
+        case BonusType.CHANCE:    return "landed on the most <GREEN><OUTLINE>! Spaces<NO_OUTLINE><RESET>";
+        case BonusType.BOWSER:    return "landed on the most <RED><OUTLINE>Bowser Spaces<NO_OUTLINE><RESET>";
+        case BonusType.BATTLE:    return "landed on the most <GREEN><OUTLINE>Battle Spaces<NO_OUTLINE><RESET>";
+        case BonusType.ITEM:      return "landed on the most <GREEN><OUTLINE>Item Spaces<NO_OUTLINE><RESET>";
+        case BonusType.BANK:      return "landed on the most <GREEN><OUTLINE>Bank Spaces<NO_OUTLINE><RESET>";
+        case BonusType.GAME_GUY:  return "landed on the most <GREEN><OUTLINE>Game Guy Spaces<NO_OUTLINE><RESET>";
+        case BonusType.LUCKY:     return "landed on the most <BLUE><OUTLINE>Lucky Spaces<NO_OUTLINE><RESET>";
+    }
+}
 
 void mallocPerm(size_t size, void delegate(uint ptr) callback) {
     0x80035864.jal(cast(ushort)size, callback);
@@ -381,7 +394,8 @@ class Player {
 }
 
 class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
-    string gameText;
+    ushort messageId;            // Message being loaded by func_800364DC
+    string messageReplacement;   // Text (game bytes) to load instead, from replaceMessage()
     BonusType[] bonus;
     int lastFiveTurnsBonus = 20;
 
@@ -594,111 +608,24 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             saveState();
         });
 
-        Address[5] msgArgs;
-        0x800EC750.onExec({ msgArgs = [gpr.s1, gpr.s2, gpr.s3, gpr.s4, gpr.s5]; });
-        0x800EC8E4.onExec({ msgArgs = 0; });
-
-        data.textLength.addr.onExec({
+        // Every message is loaded by ID through func_800364DC(id), id = (directory << 8) | index. Window message
+        // arguments (<1>-<5>) can be message IDs too, which it also loads. It copies the message into a newly
+        // allocated buffer, so replacing text here needs no memory management: the game allocates the new length
+        // and frees the buffer itself.
+        0x800364DC.onExec({ messageId = cast(ushort)gpr.a0; });
+        0x80036574.onExec({ // s0 = message (length, then text), s1 = length; next, it allocates s1 bytes
+            string text;
             auto c = Ptr!char(gpr.s0 + 2);
-            
-            gameText = "";
-            foreach (i; 0..gpr.s1) gameText ~= *(c++);
-
-            if (config.bingoPlayerNames) {
-                msgArgs.each!((i, addr) {
-                    auto c = Ptr!char(addr);
-                    auto p = cast(char)(0x11 + i);
-                    if (!c || !gameText.canFind(p)) return;
-
-                    string arg = "";
-                    while (*c) arg ~= *(c++);
-
-                    if ([EnumMembers!Character].any!(c => arg.canFind(c.to!string) || arg.canFind(c.fullName))) {
-                        gameText = gameText.replace(p, arg);
-                    }
-                });
-
-                char[] result;
-
-                while (!gameText.empty) {
-                    ptrdiff_t m = -1;
-                    Character character;
-                    string name;
-                    bool multi;
-
-                    [EnumMembers!Character].each!((i, ref c) {
-                        [c.to!string, c.fullName].each!((charName) {
-                            if (!gameText.startsWith(charName)) return;
-
-                            auto n = (c in characterToName);
-                            if (!n) return;
-
-                            if (m == -1 || charName.length > character.to!string.length) {
-                                m = i;
-                                character = c;
-                                name = *n;
-                                multi = (characterToName.values.count(name) > 1);
-                            }
-                        });
-                    });
-
-                    if (m == -1) {
-                        result ~= gameText[0];
-                        gameText = gameText[1..$];
-                    } else {
-                        if (multi) {
-                            name ~= " <OUTLINE>" ~ character.shortName ~ "<NO_OUTLINE>"; 
-                        }
-                        result ~= formatText(name);
-                        gameText = gameText[character.to!string.length..$];
-                    }
-                }
-
-                gameText = result.to!string;
-            }
-
-            if (gameText == formatText("<CLEAR><Z>...Board<NUL><NUL>") && isBoardScene()) {
-                gameText = formatText("<CLEAR><YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET><NUL><NUL>");
-            }
-
-            if (config.randomBonus && data.currentScene == Scene.FINISH_BOARD && bonus.length >= 3) {
-                gameText = gameText.replace("one\nstar", "one star")
-                                   .replace(formatText("<BLUE><OUTLINE> Mini-Game Star<NO_OUTLINE><RESET>"), formatText(" <BLUE><OUTLINE>Mini-Game Star<NO_OUTLINE><RESET>"))
-                                   .replace(formatText("<BLUE><OUTLINE>Mini-Game Star<NO_OUTLINE> <RESET>"), formatText("<BLUE><OUTLINE>Mini-Game Star<NO_OUTLINE><RESET> "));
-
-                foreach (i, ref bt; BONUS_TEXT) {
-                    if (bt.any!(t => gameText.canFind(t))) {
-                        foreach (j, ref t; bt) {
-                            gameText = gameText.replace(t, BONUS_TEXT_REPLACEMENT[bonus[i]][j])
-                                               .replace(formatText("$NAME"), formatText(config.bonuses[bonus[i]]));
-                        }
-                        break;
-                    }
-                }
-            }
-
-            if (config.improveLastFiveTurnsBonus && data.currentScene == Scene.LAST_FIVE_TURNS) {
-                if (gameText.canFind("present of")) {
-                    gameText = gameText.replace("10", lastFiveTurnsBonus.to!string);
-                }
-            }
-
-            if (config.chanceSwapInsteadOfTransfer && data.currentScene == Scene.CHANCE_TIME) {
-                if (data.chancePrize == ChancePrize.COINS_ALL || data.chancePrize == ChancePrize.STARS_ALL) {
-                    if (gameText.canFind("all coins") || gameText.canFind("all stars")) {
-                        gameText = gameText.replace("all ", "").replace("gives\n", "swaps\n").replace("\nto", " with");
-                    }
-
-                    gameText = gameText.replace("\u0005\u0011\u0019 doesn\\t have\na \u0007\u000Fsingle\u0016\u0019 \u0007\u000Fstar",
-                                                "Both players have the\n\u0007\u000Fsame number\u0016\u0019 of stars")
-                                       .replace("\u0005\u0011\u0019 doesn\\t have\na \u0003\u000Fsingle coin\u0016\u0019",
-                                                "Both players have the\n\u0007\u000Fsame number\u0016\u0019 of coins");
-                }
-            }
-            
-            gpr.s1 = cast(ushort)gameText.length;
+            foreach (i; 0..cast(short)gpr.s1) text ~= c[i];
+            messageReplacement = replaceMessage(messageId, text);
+            if (messageReplacement !is null) gpr.s1 = cast(uint)messageReplacement.length;
         });
-        data.textChar.addr.onExec({ gpr.v0 = gameText[gpr.a0]; });
+
+        0x800365BC.onExec({ // s2 = the copy (0 if it couldn't be allocated)
+            if (messageReplacement is null) return;
+            if (gpr.s2) foreach (i, c; messageReplacement) Ptr!char(gpr.s2)[i] = c;
+            messageReplacement = null;
+        });
 
         if (config.teamScores) {
             data.duelRoutine.addr.onExec({
@@ -1762,6 +1689,88 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         0x8004A994.jal(FRAMES, fadeExtraTrack);                     // HuAudSeqFadeOut: fade the main track
     }
 
+    // The bingo card name for a character's player (null if none, or bingoPlayerNames is off). If several characters
+    // share the card, the character's icon is added after the name.
+    string bingoName(Character c) {
+        if (!config.bingoPlayerNames) return null;
+        auto n = c in characterToName;
+        if (!n) return null;
+        auto sharedCard = (characterToName.values.count(*n) > 1);
+        return *n ~ (sharedCard ? " <OUTLINE>" ~ c.shortName ~ "<NO_OUTLINE>" : "");
+    }
+
+    // Whether game text `shown` is the character name `name`. Some messages have names in capitals (0x1C00-0x1C5F,
+    // 0x5200-0x5207), so case is ignored; game text isn't always valid UTF-8, so bytes are compared.
+    static bool sameName(string shown, string name) {
+        auto upper = (ubyte b) => (b >= 'a' && b <= 'z') ? b - 32 : b;
+        return shown.length == name.length && iota(shown.length).all!(i => upper(shown[i]) == upper(name[i]));
+    }
+
+    // Text (game bytes) to load instead of message `id`, whose own text is `text`, or null to keep it
+    string replaceMessage(ushort id, string text) {
+        auto message = (string s) => formatText("<CLEAR>" ~ s ~ "<RESET><END><NUL>");
+
+        // A character's name by itself, possibly in a color. The game shows these alone and inserts them into other
+        // messages as <1>-<5>, so this covers player names everywhere without touching any other text.
+        if (config.bingoPlayerNames && text.length >= 2 && text[0] == '\x0B') {
+            size_t start = 1, end = text.length;
+            while (end > start && text[end - 1] == '\x00') end--;
+            if (end > start && text[end - 1] == '\x19') end--;                            // <RESET>
+            if (end > start && text[start] >= '\x01' && text[start] <= '\x08') start++; // Color
+            foreach (c; [EnumMembers!Character]) {
+                if (!sameName(text[start..end], c.fullName)) continue;
+                auto name = bingoName(c);
+                if (name) return text[0..start] ~ formatText(name) ~ text[end..$];
+            }
+        }
+
+        // The turn counter shown in place of "<Z>...Board" on the board
+        if ((id == 0x1D0B || id == 0x300B) && isBoardScene()) {
+            return formatText("<CLEAR><YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET><NUL><NUL>");
+        }
+
+        // Bonus stars: 0x1402 introduces them, then each has 5 messages (0x1403, 0x1408, 0x140D): the award, then the
+        // winner, or a 2-, 3- or 4-way tie
+        if (config.randomBonus && data.currentScene == Scene.FINISH_BOARD && bonus.length >= 3 && id >= 0x1402 && id <= 0x1411) {
+            if (id == 0x1402) return message("Now, here are the <YELLOW><OUTLINE>Bonus Star<NO_OUTLINE><RESET> results.\nEach winner will get one star.");
+
+            auto i = (id - 0x1403) / 5;
+            auto b = bonus[i];
+            auto star = "<" ~ getColor(b) ~ "><OUTLINE>" ~ config.bonuses[b] ~ " Star";
+            final switch ((id - 0x1403) % 5) {
+                case 0: return message(["Let's begin with the ", "Next, the ", "Finally, the "][i] ~ star ~ "<NO_OUTLINE><RESET>.\n" ~
+                                       wrapMessage("This award goes to the person who " ~ getDescription(b) ~ ".",
+                                                   messageTextWidth("This award goes to the person")));
+                case 1: return message("The " ~ star ~ "<NO_OUTLINE><RESET> award\ngoes to...<1>!");
+                case 2: return message("It's a tie! " ~ star ~ "<NO_OUTLINE><RESET>\nawards go to both\n<1> and <2>!");
+                case 3: return message("It's a three-way tie!\n" ~ star ~ "<NO_OUTLINE><RESET> awards\ngo to <1>,\n<2> and <3>!");
+                case 4: return message("It's a four-way tie!!!\nAll four players are\n" ~ star ~ "s<NO_OUTLINE><RESET>,\nso no stars will be awarded.");
+            }
+        }
+
+        // Last Five Turns: the present for the predicted winner
+        if (id == 0x4308 && config.improveLastFiveTurnsBonus && data.currentScene == Scene.LAST_FIVE_TURNS) {
+            return message("And to <1>, our predicted\nwinner, we award a\npresent of <YELLOW><OUTLINE>" ~ lastFiveTurnsBonus.to!string ~ " coins<NO_OUTLINE><RESET><YELLOW>!");
+        }
+
+        // Chance Time: swaps instead of "all coins/stars" transfers
+        if (config.chanceSwapInsteadOfTransfer && data.currentScene == Scene.CHANCE_TIME &&
+            (data.chancePrize == ChancePrize.COINS_ALL || data.chancePrize == ChancePrize.STARS_ALL)) {
+            enum SAME = "Both players have the\n<YELLOW><OUTLINE>same number<NO_OUTLINE><RESET> of ";
+            switch (id) {
+                case 0x1B0C: return message("The results are in!<RESET><END><CLEAR>Wow! <GREEN><1><RESET> swaps\n<YELLOW><OUTLINE>coins<NO_OUTLINE><RESET> with <GREEN><2><RESET>!");
+                case 0x1B0E: return message("The results are in!<RESET><END><CLEAR>Wow! <GREEN><1><RESET> swaps\n<YELLOW><OUTLINE>stars<NO_OUTLINE><RESET> with <GREEN><2><RESET>!" ~
+                                            "<RESET><END><CLEAR>This is amazing!\nA complete turnaround!\n");
+                case 0x1B0B: return message("...Whoa! Bad news!<RESET><END><CLEAR>" ~ SAME ~ "stars.\nWhat a pity.");
+                case 0x1B0D: return message("...Oh my goodness!<RESET><END><CLEAR>" ~ SAME ~ "coins.\nUnbelievable!");
+                case 0x1B0F: return message("...Whoa! Bad news!<RESET><END><CLEAR>" ~ SAME ~ "stars.\nHow disappointing.");
+                default:
+            }
+        }
+
+        return null;
+    }
+
     void showSuperstarsMessage() {
         ssPhase = SuperstarsPhase.WAITING;
 
@@ -1793,7 +1802,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     string[] superstarsTeamLines(int textWidth) {
         enum GAP = 16; // Between the two names of a pair
 
-        auto name = (Player p) => p.data.character.fullName;
+        auto name = (Player p) {
+            auto n = bingoName(p.data.character);
+            return n ? n : p.data.character.fullName;
+        };
         auto pair = (Player a, Player b) => name(a) ~ messageSpace(GAP) ~ name(b);
         auto blue = players.filter!(p => p.panel.color == PanelColor.BLUE).array;
         auto red  = players.filter!(p => p.panel.color == PanelColor.RED).array;
@@ -2367,6 +2379,35 @@ int messageTextWidth(string text) {
         width += (b == 0x1A ? 10 : (0x800A2194 + b).val!ubyte);
     }
     return width;
+}
+
+// Breaks lines at spaces so none is wider than maxWidth pixels (when possible); existing line breaks are kept.
+// Outlined phrases (like "<OUTLINE>Game Guy Spaces<NO_OUTLINE>") stay on one line, as in the game's own text.
+string wrapMessage(string text, int maxWidth) {
+    string kept;
+    bool outlined;
+    for (size_t i = 0; i < text.length; i++) {
+        if (text[i..$].startsWith("<OUTLINE>")) outlined = true;
+        if (text[i..$].startsWith("<NO_OUTLINE>")) outlined = false;
+        kept ~= (outlined && text[i] == ' ') ? "<SPACE>" : text[i..i + 1]; // <SPACE> looks the same, but isn't split
+    }
+    text = kept;
+
+    string[] lines;
+    foreach (paragraph; text.split("\n")) {
+        string line;
+        foreach (word; paragraph.split(" ")) {
+            auto longer = line.empty ? word : line ~ " " ~ word;
+            if (!line.empty && messageTextWidth(longer) > maxWidth) {
+                lines ~= line;
+                line = word;
+            } else {
+                line = longer;
+            }
+        }
+        lines ~= line;
+    }
+    return lines.join("\n");
 }
 
 // Blank space of (about) the given width, made of 4-pixel spaces and 10-pixel <WIDE_SPACE> spaces
