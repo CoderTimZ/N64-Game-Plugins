@@ -1768,10 +1768,12 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         fadeOutBoardMusic({
             // Coin mini-games are yellow and Bowser mini-games red, as on the roulette
             auto color = ssGame.isCoinMiniGame ? "<YELLOW>" : ssGame.isBowserMiniGame ? "<RED>" : "<CYAN>";
-            showGlobalMessage("Let's play " ~ color ~ ssGame.fullName ~ "<RESET>\n" ~
-                              "in Mario Party Superstars!\n\n" ~
-                              "When you're done, enter the\n" ~
-                              "results on the Bingo page.", -1, true, {
+            auto intro  = ["Let's play <OUTLINE>" ~ color ~ ssGame.fullName ~ "<NO_OUTLINE><RESET>",
+                           "in <OUTLINE><YELLOW>Mario Party Superstars<NO_OUTLINE><RESET>!"];
+            auto outro  = ["When you're done, enter the", "results on the Bingo page."];
+            auto teams  = superstarsTeamLines((intro ~ outro).map!messageTextWidth.maxElement);
+            showGlobalMessage((intro.join("\n") ~ "\n\n" ~ (teams.empty ? "" : teams.join("\n") ~ "\n\n") ~ outro.join("\n")),
+                              -1, true, {
                 if (ssPhase != SuperstarsPhase.WAITING) return;
                 if (ssResults) {
                     ssPhase = SuperstarsPhase.READY;
@@ -1782,6 +1784,38 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 }
             });
         });
+    }
+
+    // The players of the Superstars mini-game, laid out by team for the message window, each line centered:
+    //   4-player/battle: two pairs   2-vs-2: team / vs. / team   1-vs-3: solo / vs. / two of the team / third
+    //   duel: A / vs. / B
+    // Widths come from the game's font table; padding is made of 4- and 10-pixel spaces, so it is within 1-2 pixels.
+    string[] superstarsTeamLines(int textWidth) {
+        enum GAP = 16; // Between the two names of a pair
+
+        auto name = (Player p) => p.data.character.fullName;
+        auto pair = (Player a, Player b) => name(a) ~ messageSpace(GAP) ~ name(b);
+        auto blue = players.filter!(p => p.panel.color == PanelColor.BLUE).array;
+        auto red  = players.filter!(p => p.panel.color == PanelColor.RED).array;
+        auto split = (blue.length + red.length == 4);
+
+        string[] lines;
+        if (ssType == MiniGameType.DUEL && ssDuelists.length == 2) {
+            lines = [name(players[ssDuelists[0]]), "vs.", name(players[ssDuelists[1]])];
+        } else if (ssType == MiniGameType.TWO_V_TWO && split && blue.length == 2) {
+            auto first  = (blue[0].index < red[0].index ? blue : red);
+            auto second = (first is blue ? red : blue);
+            lines = [pair(first[0], first[1]), "vs.", pair(second[0], second[1])];
+        } else if (ssType == MiniGameType.ONE_V_THREE && split && (blue.length == 1 || red.length == 1)) {
+            auto solo = (blue.length == 1 ? blue : red);
+            auto team = (blue.length == 1 ? red : blue);
+            lines = [name(solo[0]), "vs.", pair(team[0], team[1]), name(team[2])];
+        } else {
+            lines = [pair(players[0], players[1]), pair(players[2], players[3])];
+        }
+
+        int width = max(textWidth, lines.map!messageTextWidth.maxElement);
+        return lines.map!(l => messageSpace((width - messageTextWidth(l)) / 2) ~ l).array;
     }
 
     // Writes the entered results where the mini-game would have and returns the overlay to go to next
@@ -2321,6 +2355,29 @@ bool isCoinMiniGame(SuperstarsMiniGame game) {
         default:
             return false;
     }
+}
+
+// Width in pixels of one line of message window text, the way the game sizes its windows (func_800605A4):
+// each character's advance comes from the font width table at 0x800A2194, except <WIDE_SPACE> (0x1A), a 10-pixel space.
+int messageTextWidth(string text) {
+    int width = 0;
+    auto t = formatText(text);
+    for (size_t i = 0; i < t.length; i++) {
+        auto b = cast(ubyte)t[i];
+        width += (b == 0x1A ? 10 : (0x800A2194 + b).val!ubyte);
+    }
+    return width;
+}
+
+// Blank space of (about) the given width, made of 4-pixel spaces and 10-pixel <WIDE_SPACE> spaces
+string messageSpace(int pixels) {
+    if (pixels < 2) return "";
+    pixels = (pixels + 1) / 2 * 2; // Every combination of the two is even
+    foreach_reverse (wide; 0..pixels / 10 + 1) {
+        auto rest = pixels - wide * 10;
+        if (rest % 4 == 0) return "<WIDE_SPACE>".replicate(wide) ~ " ".replicate(rest / 4);
+    }
+    return " ".replicate((pixels + 2) / 4); // 2 or 6: the closest is 4 or 8
 }
 
 // Mini-games played against Bowser
