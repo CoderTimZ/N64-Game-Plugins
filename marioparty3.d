@@ -1751,10 +1751,11 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         ssPhase = SuperstarsPhase.WAITING;
 
         fadeOutBoardMusic({
-            showGlobalMessage("Let's play <YELLOW>" ~ ssGame.fullName ~ "<RESET>\n" ~
+            auto color = ssGame.isCoinMiniGame ? "<YELLOW>" : "<CYAN>"; // Coin mini-games are yellow, as on the roulette
+            showGlobalMessage("Let's play " ~ color ~ ssGame.fullName ~ "<RESET>\n" ~
                               "in Mario Party Superstars!\n\n" ~
-                              "When you're done, enter\n" ~
-                              "the results on the Bingo page.", -1, true, {
+                              "When you're done, enter the\n" ~
+                              "results on the Bingo page.", -1, true, {
                 if (ssPhase != SuperstarsPhase.WAITING) return;
                 if (ssResults) {
                     ssPhase = SuperstarsPhase.READY;
