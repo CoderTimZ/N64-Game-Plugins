@@ -1265,7 +1265,7 @@ extern (C) {
         }
         
         if (auto handlers = (pc in executeDoneOnceHandlers)) {
-            executeOnceHandlers.remove(pc);
+            executeDoneOnceHandlers.remove(pc);
             (*handlers).each!((h) {
                 try { h(pc); }
                 catch (Exception e) { error(e); }
