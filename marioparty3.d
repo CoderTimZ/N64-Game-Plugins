@@ -393,9 +393,60 @@ class Player {
     }
 }
 
+// Colors the plugin adds to windows (RGBA5551): the character name colors, indexed by Character. Mario, Peach, Yoshi
+// and Wario use the text palette's own red, magenta, green and yellow; the others get colors of their own.
+immutable ushort[8] TEXT_COLORS = [
+    rgba5551(255,  66,  66),  // Mario: red
+    rgba5551( 24, 160,  40),  // Luigi: dark green
+    rgba5551(255,   0, 255),  // Peach: magenta
+    rgba5551(  0, 255,   0),  // Yoshi: green
+    rgba5551(255, 255,   0),  // Wario: yellow
+    rgba5551(176,  96,  32),  // DK: brown
+    rgba5551(160,  64, 232),  // Waluigi: purple
+    rgba5551(255, 144,   0),  // Daisy: orange
+];
+
+// Text that colors what follows in one of TEXT_COLORS. It's <SKIP_NEXT> and the color's digit, which the window skips;
+// setting the message turns it into a color code for that window (see colorize()).
+string textColor(int n) {
+    return "<SKIP_NEXT>" ~ cast(char)('0' + n);
+}
+
+ushort rgba5551(ubyte r, ubyte g, ubyte b) {
+    return cast(ushort)((r >> 3) << 11 | (g >> 3) << 6 | (b >> 3) << 1 | 1);
+}
+
+// Text that colors what follows in a character's color
+string characterColor(Character c) {
+    return textColor(c);
+}
+
+// A window's text palette, and which of its colors (codes 0x02-0x07) are in use by its current text. Text has only
+// 4 bits per pixel, so a window can show only these 6 colors, besides black (also the shadow) and white (the default):
+// colors that aren't in the palette replace ones that aren't in use.
+//
+// Each window keeps its palette at the start of its struct, and its text sprite draws with a copy of it (made by
+// func_8005C060, which sets a palette color, and others), so a changed palette is copied to the sprite too.
+//
+// The plugin's colors are undone (restoreColors()) before the window's next message, since windows can be reused for
+// other text (like the mini-game help) without being created again.
+struct WindowColors {
+    ushort[16] original;    // As the game set it up
+    ushort[16] palette;     // Color n is entry n; entry n + 7 is its darker edge
+    bool[8] used;           // By the window's current message
+    bool[8] usedByArgs;     // By arguments set since then, for the next message
+    bool[16] changed;       // Entries the plugin changed
+    ushort[16] before;      // Their values before that
+    bool restoreDue;        // Whether to undo the changes before the next message (or its first argument)
+}
+
 class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     ushort messageId;            // Message being loaded by func_800364DC
     string messageReplacement;   // Text (game bytes) to load instead, from replaceMessage()
+    short messageWindow = -1;    // Window whose message (or argument) is being set, or -1
+    bool messageIsArg;           // Whether that's an argument (<1>-<5>) rather than the message
+    char argCharacterColor;      // Color code of a character name in the argument being set (0 if none)
+    WindowColors[short] windowColors;
     BonusType[] bonus;
     int lastFiveTurnsBonus = 20;
 
@@ -618,9 +669,65 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             auto c = Ptr!char(gpr.s0 + 2);
             foreach (i; 0..cast(short)gpr.s1) text ~= c[i];
             messageReplacement = replaceMessage(messageId, text);
+            if (messageWindow >= 0) {
+                auto colored = colorize(messageWindow, messageReplacement is null ? text : messageReplacement, messageIsArg);
+                if (colored != text) messageReplacement = colored;
+            }
             if (messageReplacement !is null) gpr.s1 = cast(uint)messageReplacement.length;
         });
 
+        // Plugin colors in windows (textColor()): player names
+        if (config.bingoPlayerNames) {
+            // Window creation (func_8005AF84 area): the window has just copied the text palette (0x800A2174) to the
+            // start of its struct. Its creator may still change colors (board dialogs make blue light blue), so its
+            // colors are only taken when its text is first colored.
+            0x8005AF8C.onExec({
+                windowColors.remove(cast(short)((gpr.s1 - windowAddress(0)) / WINDOW_SIZE));
+            });
+            // func_8005B43C (set window message, a0 = window, a1 = message ID or pointer). The arguments are set
+            // before the message, so their colors carry over to it. The previous message's colors are undone first,
+            // unless its arguments already did that.
+            0x8005B43C.onExec({
+                auto w = cast(short)gpr.a0;
+                restoreColors(w);
+                if (auto wc = w in windowColors) {
+                    wc.used = wc.usedByArgs;
+                    wc.usedByArgs = false;
+                }
+                if (gpr.a1 >= 0x80000000) colorizeInPlace(w, gpr.a1); // Text of the plugin's own (showGlobalMessage)
+                messageWindow = w;
+                messageIsArg = false;
+                gpr.ra.onExecOnce({ // Back in the caller, where the game can be called
+                    messageWindow = -1;
+                    if (auto wc = w in windowColors) wc.restoreDue = wc.changed[].any;
+                    if (w in paletteChanged) {
+                        paletteChanged.remove(w);
+                        copyTextPalette(w);
+                    }
+                });
+            });
+            // func_8006022C (measure a window message argument, a0 = message ID or pointer, a1 = argument), which sizes
+            // the window: a name given as text is measured as the message it's replaced with (see 0x8005B6BC)
+            0x8006022C.onExec({
+                if (auto id = nameMessageId(gpr.a0)) gpr.a0 = id;
+            });
+            // func_8005B6BC (set window message argument, a0 = window, a1 = message ID or pointer)
+            // An argument can have its own color (window + 178 + n, as color code - 1; -1 for none). The window then
+            // draws it in that color and switches back to the color before it, which colored names use.
+            0x8005B6BC.onExec({
+                if (auto id = nameMessageId(gpr.a1)) gpr.a1 = id; // A name given as text: load it as a message
+                auto w = cast(short)gpr.a0;
+                auto n = cast(byte)gpr.a2;
+                restoreColors(w); // The first argument of a new message
+                messageWindow = w;
+                messageIsArg = true;
+                argCharacterColor = 0;
+                gpr.ra.onExecOnce({
+                    messageWindow = -1;
+                    if (argCharacterColor) (windowAddress(w) + 178 + n).val!byte = cast(byte)(argCharacterColor - 1);
+                });
+            });
+        }
         0x800365BC.onExec({ // s2 = the copy (0 if it couldn't be allocated)
             if (messageReplacement is null) return;
             if (gpr.s2) foreach (i, c; messageReplacement) Ptr!char(gpr.s2)[i] = c;
@@ -1689,14 +1796,141 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         0x8004A994.jal(FRAMES, fadeExtraTrack);                     // HuAudSeqFadeOut: fade the main track
     }
 
-    // The bingo card name for a character's player (null if none, or bingoPlayerNames is off). If several characters
-    // share the card, the character's icon is added after the name.
-    string bingoName(Character c) {
+    // The bingo card name for a character's player, in the character's color (null if none, or bingoPlayerNames is off),
+    // then back to the default color unless `reset` is false
+    string bingoName(Character c, bool reset = true) {
         if (!config.bingoPlayerNames) return null;
         auto n = c in characterToName;
         if (!n) return null;
-        auto sharedCard = (characterToName.values.count(*n) > 1);
-        return *n ~ (sharedCard ? " <OUTLINE>" ~ c.shortName ~ "<NO_OUTLINE>" : "");
+        return characterColor(c) ~ *n ~ (reset ? "<RESET>" : "");
+    }
+
+    enum WINDOW_SIZE = 0x27C;
+    Address windowAddress(short w) { return 0x800CC69C.val!uint + w * WINDOW_SIZE; }
+
+    // Window w's colors, taken from its palette the first time they're needed, or again if its palette no longer
+    // matches (a different window in its place, or one whose creator changed its colors)
+    WindowColors* colorsOf(short w) {
+        auto old = w in windowColors;
+        if (old && iota(1, 9).all!(i => old.palette[i] == (windowAddress(w) + i * 2).val!ushort)) return old;
+        WindowColors wc;
+        foreach (i; 0..16) wc.original[i] = wc.palette[i] = (windowAddress(w) + i * 2).val!ushort;
+        if (old) { // Keep track of the plugin's colors that are still there, so they can still be undone
+            foreach (i; 0..16) {
+                if (!old.changed[i] || wc.palette[i] != old.palette[i]) continue;
+                wc.changed[i] = true;
+                wc.original[i] = wc.before[i] = old.before[i];
+            }
+            wc.restoreDue = old.restoreDue;
+        }
+        windowColors[w] = wc;
+        return w in windowColors;
+    }
+
+    // Undoes the plugin's colors in window w, except ones the game has since replaced, before its next message
+    void restoreColors(short w) {
+        auto wc = w in windowColors;
+        if (!wc || !wc.restoreDue) return;
+        wc.restoreDue = false;
+        foreach (i; 0..16) {
+            if (!wc.changed[i]) continue;
+            wc.changed[i] = false;
+            auto address = windowAddress(w) + i * 2;
+            if (address.val!ushort != wc.palette[i]) continue; // Replaced by the game
+            address.val!ushort = wc.palette[i] = wc.before[i];
+            paletteChanged[w] = true;
+        }
+    }
+
+    // A window's text sprite draws with a copy of its palette, which may be shared with other windows until the game
+    // gives it one of its own. func_8005C060(window, color - 1, r, g, b) sets a color of the window's palette, then
+    // gives its text sprite a new copy of the whole palette, so calling it with a color the palette already has makes
+    // that copy, with the plugin's colors in it. (Writing to the sprite's palette directly could change shared ones.)
+    bool[short] paletteChanged;
+
+    void copyTextPalette(short w) {
+        auto color = (windowAddress(w) + 2 * 2).val!ushort; // Color 2, as it is
+        gpr.sp -= 24;
+        (gpr.sp + 16).val!uint = ((color >> 1) & 31) << 3; // b, the 5th argument
+        0x8005C060.jal(w, 1, ((color >> 11) & 31) << 3, ((color >> 6) & 31) << 3, { gpr.sp += 24; });
+    }
+
+    // The color code (0x02-0x07) showing `color` in window w, recoloring one that isn't in use if none does
+    char colorCode(short w, ushort color, bool forArg) {
+        auto wc = colorsOf(w);
+        auto use = (int n) { if (forArg) wc.usedByArgs[n] = true; else wc.used[n] = true; return cast(char)n; };
+
+        foreach (n; 2..8) if (wc.palette[n] == color) return use(n);
+
+        // The window's own colors aren't in its text as codes: its default text color (window + 35, as code - 1;
+        // white in board dialogs, but not in others, like Chance Time's speech bubbles), current color (+ 34) and
+        // outline color (+ 51)
+        auto own = [35, 34, 51].map!(o => (windowAddress(w) + o).val!ubyte + 1);
+
+        foreach (n; [6, 2, 4, 3, 5, 7]) { // Cyan first: the game's English text never uses it
+            if (wc.used[n] || wc.usedByArgs[n] || own.canFind(n)) continue;
+            // Its edge, as the game makes them (func_8005FC80 area): 30% of the color at half brightness, 70% of the
+            // window's background (window + 45, + 46, + 47: red, green, blue)
+            ushort edge = 1;
+            foreach (k, shift; [11, 6, 1]) {
+                auto dark = ((color >> shift) & 31) / 2 << 3;
+                auto background = (windowAddress(w) + 45 + cast(uint)k).val!ubyte;
+                edge |= min(255, cast(int)(dark * 0.3f + background * 0.7f)) >> 3 << shift;
+            }
+            foreach (i, value; [n: color, n + 7: edge]) {
+                if (!wc.changed[i]) {
+                    wc.changed[i] = true;
+                    wc.before[i] = wc.palette[i];
+                }
+                wc.palette[i] = value;
+                (windowAddress(w) + i * 2).val!ushort = value;
+            }
+            paletteChanged[w] = true; // Copied to the text sprite once the message is set (copyTextPalette())
+            return use(n);
+        }
+        warning("Window ", w, " has no text color left for ", color);
+        return '\x08'; // White
+    }
+
+    // Text for window w: plugin colors (textColor()) become color codes, and color codes whose color the
+    // window has replaced move to one that shows it. Each change keeps the length (<SKIP_NEXT> 'n' -> code, 0x09).
+    string colorize(short w, string text, bool forArg) {
+        char[] t;
+        for (size_t i = 0; i < text.length; i++) {
+            auto c = text[i];
+            if (c == '\x18' && i + 1 < text.length) { // <SKIP_NEXT> and its byte
+                auto n = text[i + 1] - '0';
+                if (n >= 0 && n < TEXT_COLORS.length) {
+                    if (t is null) t = text.dup;
+                    t[i] = colorCode(w, TEXT_COLORS[n], forArg);
+                    if (forArg) argCharacterColor = t[i];
+                    t[i + 1] = '\x09'; // Does nothing
+                }
+                i++;
+            } else if (c >= '\x02' && c <= '\x07') {
+                auto wc = colorsOf(w);
+                if (wc.palette[c] == wc.original[c]) { // Unchanged: keep it, and keep it from being replaced
+                    if (forArg) wc.usedByArgs[c] = true; else wc.used[c] = true;
+                    continue;
+                }
+                auto code = colorCode(w, wc.original[c], forArg); // Moved: find (or make) the color the game set up
+                if (code != c) {
+                    if (t is null) t = text.dup;
+                    t[i] = code;
+                }
+            }
+        }
+        return t is null ? text : t.idup;
+    }
+
+    // colorize() for text in memory that has character colors (the plugin's own messages)
+    void colorizeInPlace(short w, Address address) {
+        auto p = Ptr!char(address);
+        string text;
+        for (size_t i = 0; p[i] != '\0' && i < 4096; i++) text ~= p[i];
+        if (!text.canFind('\x18')) return;
+        auto colored = colorize(w, text, false);
+        foreach (i, c; colored) p[i] = c;
     }
 
     // Whether game text `shown` is the character name `name`. Some messages have names in capitals (0x1C00-0x1C5F,
@@ -1704,6 +1938,25 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     static bool sameName(string shown, string name) {
         auto upper = (ubyte b) => (b >= 'a' && b <= 'z') ? b - 32 : b;
         return shown.length == name.length && iota(shown.length).all!(i => upper(shown[i]) == upper(name[i]));
+    }
+
+    // The game passes some window arguments as pointers to text instead of message IDs (like the names in the duel
+    // opponent menu, message 0x5C00). If one is just a character's name (maybe colored), this is the ID of that
+    // character's name message (0x1B10 + character), which goes through replaceMessage(); otherwise 0.
+    uint nameMessageId(Address p) {
+        if (p < 0x80000000 || p >= 0x80800000) return 0;
+        string s;
+        auto c = Ptr!char(p);
+        for (int i = 0; c[i] != '\0' && i < 32; i++) s ~= c[i];
+        size_t start = 0, end = s.length;
+        if (end > start && s[start] == '\x0B') start++;
+        if (end > start && s[end - 1] == '\x19') end--;                            // <RESET>
+        if (end > start && s[start] >= '\x01' && s[start] <= '\x08') start++; // Color
+        foreach (ch; [EnumMembers!Character]) {
+            if (ch == Character.UNDEFINED || !sameName(s[start..end], ch.fullName)) continue;
+            return bingoName(ch) ? 0x1B10 + ch : 0;
+        }
+        return 0;
     }
 
     // Text (game bytes) to load instead of message `id`, whose own text is `text`, or null to keep it
@@ -1715,12 +1968,15 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         if (config.bingoPlayerNames && text.length >= 2 && text[0] == '\x0B') {
             size_t start = 1, end = text.length;
             while (end > start && text[end - 1] == '\x00') end--;
+            auto nuls = end;
             if (end > start && text[end - 1] == '\x19') end--;                            // <RESET>
             if (end > start && text[start] >= '\x01' && text[start] <= '\x08') start++; // Color
             foreach (c; [EnumMembers!Character]) {
                 if (!sameName(text[start..end], c.fullName)) continue;
-                auto name = bingoName(c);
-                if (name) return text[0..start] ~ formatText(name) ~ text[end..$];
+                // In the character's color, instead of the message's own. Without a <RESET>: inserted as an argument,
+                // the window switches back to the color before it (see 0x8005B6BC).
+                auto name = bingoName(c, false);
+                if (name) return "\x0B" ~ formatText(name) ~ text[nuls..$];
             }
         }
 
@@ -2376,6 +2632,7 @@ int messageTextWidth(string text) {
     auto t = formatText(text);
     for (size_t i = 0; i < t.length; i++) {
         auto b = cast(ubyte)t[i];
+        if (b == 0x18) i++; // <SKIP_NEXT> skips the next byte
         width += (b == 0x1A ? 10 : (0x800A2194 + b).val!ubyte);
     }
     return width;
