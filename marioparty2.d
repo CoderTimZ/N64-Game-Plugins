@@ -365,6 +365,25 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
         }
     }
 
+    // Text (game bytes) for the bonus star messages, or null for other messages. Each bonus star has 5 messages
+    // (0x5F8, 0x5FD, 0x602): the award, then the winner, or a 2-, 3- or 4-way tie.
+    string bonusMessage(ushort id) {
+        if (id < 0x5F8 || id > 0x606) return null;
+
+        auto i = (id - 0x5F8) / 5;
+        auto b = bonus[i];
+        auto star = "<" ~ getColor(b) ~ "><OUTLINE>" ~ config.bonuses[b] ~ " Star";
+        string text;
+        final switch ((id - 0x5F8) % 5) {
+            case 0: text = ["First, the ", "Next, the ", "Finally, the "][i] ~ star ~ "<NO_OUTLINE><RESET>\naward! This award goes to\nthe player who " ~ getDescription(b) ~ "."; break;
+            case 1: text = "The " ~ star ~ "<NO_OUTLINE><RESET>\ngoes to <1>!"; break;
+            case 2: text = "It's a tie! <YELLOW>Stars<RESET> go\nto two players...\n<1> and <2>!"; break;
+            case 3: text = "It's a three-way tie!\n<YELLOW>Stars<RESET> go to three\nplayers...<1>,\n<2> and <3>!"; break;
+            case 4: text = "It's a four-way tie!!!\nAll four players are\n" ~ star ~ "s<NO_OUTLINE><RESET>, so no\n<YELLOW>Stars<RESET> will be awarded."; break;
+        }
+        return formatText("<CLEAR>" ~ text ~ "<END><NUL>");
+    }
+
     override void onStart() {
         super.onStart();
 
@@ -671,36 +690,23 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                 gpr.v0 = getBonusStat(players[gpr.s1], bonus[BonusType.HAPPENING]);
             });
 
-            void setText(string text) {
-                text = formatText(text ~ "<END><NUL>");
-                mallocTemp(text.length, (ptr) {
-                    text.each!((i, c) { Ptr!char(ptr)[i] = c; });
-                    gpr.a1 = ptr;
-                });
-            }
-
-            0x800890CC.onExecDone({
-                if (data.currentScene != Scene.FINISH_BOARD) return;
-                if (bonus.length < 3) return;
-
-                switch (gpr.a1) {
-                    case 0x5F8: setText("First, the <" ~ getColor(bonus[BonusType.MINI_GAME]) ~ ">" ~ config.bonuses[bonus[BonusType.MINI_GAME]] ~ " Star<RESET>\naward! This award goes to\nthe player who " ~ getDescription(bonus[BonusType.MINI_GAME])  ~ "."); break;
-                    case 0x5F9: setText("The <" ~ getColor(bonus[BonusType.MINI_GAME]) ~ ">" ~ config.bonuses[bonus[BonusType.MINI_GAME]] ~ " Star<RESET>\ngoes to <1>!"); break;
-                    case 0x5FA: setText("It's a tie! <YELLOW>Stars<RESET> go\nto two players...\n<1> and <2>!"); break;
-                    case 0x5FB: setText("It's a three-way tie!\n<YELLOW>Stars<RESET> go to three\nplayers...<1>,\n<2> and <3>!"); break;
-                    case 0x5FC: setText("It's a four-way tie!!!\nAll four players are\n<" ~ getColor(bonus[BonusType.MINI_GAME]) ~ ">" ~ config.bonuses[bonus[BonusType.MINI_GAME]] ~ " Stars<RESET>, so no\n<YELLOW>Stars<RESET> will be awarded."); break;
-                    case 0x5FD: setText("Next, the <" ~ getColor(bonus[BonusType.COIN]) ~ ">" ~ config.bonuses[bonus[BonusType.COIN]] ~ " Star<RESET>\naward! This award goes to\nthe player who " ~ getDescription(bonus[BonusType.COIN])  ~ "."); break;
-                    case 0x5FE: setText("The <" ~ getColor(bonus[BonusType.COIN]) ~ ">" ~ config.bonuses[bonus[BonusType.COIN]] ~ " Star<RESET>\ngoes to <1>!"); break;
-                    case 0x5FF: setText("It's a tie! <YELLOW>Stars<RESET> go\nto two players...\n<1> and <2>!"); break;
-                    case 0x600: setText("It's a three-way tie!\n<YELLOW>Stars<RESET> go to three\nplayers...<1>,\n<2> and <3>!"); break;
-                    case 0x601: setText("It's a four-way tie!!!\nAll four players are\n<" ~ getColor(bonus[BonusType.COIN]) ~ ">" ~ config.bonuses[bonus[BonusType.COIN]] ~ " Stars<RESET>, so no\n<YELLOW>Stars<RESET> will be awarded."); break;
-                    case 0x602: setText("Finally, the <" ~ getColor(bonus[BonusType.HAPPENING]) ~ ">" ~ config.bonuses[bonus[BonusType.HAPPENING]] ~ " Star<RESET>\naward! This award goes to\nthe player who " ~ getDescription(bonus[BonusType.HAPPENING])  ~ "."); break;
-                    case 0x603: setText("The <" ~ getColor(bonus[BonusType.HAPPENING]) ~ ">" ~ config.bonuses[bonus[BonusType.HAPPENING]] ~ " Star<RESET>\ngoes to <1>!"); break;
-                    case 0x604: setText("It's a tie! <YELLOW>Stars<RESET> go\nto two players...\n<1> and <2>!"); break;
-                    case 0x605: setText("It's a three-way tie!\n<YELLOW>Stars<RESET> go to three\nplayers...<1>,\n<2> and <3>!"); break;
-                    case 0x606: setText("It's a four-way tie!!!\nAll four players are\n<" ~ getColor(bonus[BonusType.HAPPENING]) ~ ">" ~ config.bonuses[bonus[BonusType.HAPPENING]] ~ " Stars<RESET>, so no\n<YELLOW>Stars<RESET> will be awarded."); break;
-                    default:
-                }
+            // Every message is loaded by ID through func_80068CD4(id), which reads it from ROM into a newly allocated
+            // buffer of its length. Loading a different length and writing the bonus star text into that buffer
+            // replaces the message with nothing else to manage: the game frees the buffer itself.
+            ushort messageId;
+            string replacement;
+            0x80068CD4.onExec({ messageId = cast(ushort)gpr.a0; });
+            0x80068CE8.onExec({ // 16(sp) = ROM address, 20(sp) = length; next, it allocates and reads that many bytes
+                if (data.currentScene != Scene.FINISH_BOARD || bonus.length < 3) return;
+                replacement = bonusMessage(messageId);
+                if (replacement is null) return;
+                if (replacement.length % 2) replacement ~= '\0';
+                (gpr.sp + 20).val!ushort = cast(ushort)replacement.length;
+            });
+            0x80068D10.onExec({ // s0 = the buffer
+                if (replacement is null) return;
+                foreach (i, c; replacement) Ptr!char(gpr.s0)[i] = c;
+                replacement = null;
             });
         }
 
