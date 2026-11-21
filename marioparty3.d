@@ -275,24 +275,24 @@ union PlayerPanel {
 }
 
 immutable BONUS_TEXT = [
-    ["<BLUE><BOLD>Mini-Game Star<NORMAL><RESET>",  "<BLUE><BOLD>Mini-Game Stars<NORMAL><RESET>",  "has won the most coins\nin Mini-Games"],
-    ["<YELLOW><BOLD>Coin Star<NORMAL><RESET>",     "<YELLOW><BOLD>Coin Stars<NORMAL><RESET>",     "had the most\ncoins at any one time\nduring the game"],
-    ["<GREEN><BOLD>Happening Star<NORMAL><RESET>", "<GREEN><BOLD>Happening Stars<NORMAL><RESET>", "landed on the most\n<GREEN><BOLD>? Spaces<NORMAL><RESET>"]
+    ["<BLUE><OUTLINE>Mini-Game Star<NO_OUTLINE><RESET>",  "<BLUE><OUTLINE>Mini-Game Stars<NO_OUTLINE><RESET>",  "has won the most coins\nin Mini-Games"],
+    ["<YELLOW><OUTLINE>Coin Star<NO_OUTLINE><RESET>",     "<YELLOW><OUTLINE>Coin Stars<NO_OUTLINE><RESET>",     "had the most\ncoins at any one time\nduring the game"],
+    ["<GREEN><OUTLINE>Happening Star<NO_OUTLINE><RESET>", "<GREEN><OUTLINE>Happening Stars<NO_OUTLINE><RESET>", "landed on the most\n<GREEN><OUTLINE>? Spaces<NO_OUTLINE><RESET>"]
 ].map!(e => e.map!(formatText).array).array;
 
 immutable BONUS_TEXT_REPLACEMENT = [
-    ["<BLUE><BOLD>$NAME Star<NORMAL><RESET>",   "<BLUE><BOLD>$NAME Stars<NORMAL><RESET>",   "has won the most coins\nin Mini-Games"],
-    ["<YELLOW><BOLD>$NAME Star<NORMAL><RESET>", "<YELLOW><BOLD>$NAME Stars<NORMAL><RESET>", "had the most\ncoins at any one time\nduring the game"],
-    ["<GREEN><BOLD>$NAME Star<NORMAL><RESET>",  "<GREEN><BOLD>$NAME Stars<NORMAL><RESET>",  "landed on the most\n<GREEN><BOLD>? Spaces<NORMAL><RESET>"],
-    ["<RED><BOLD>$NAME Star<NORMAL><RESET>",    "<RED><BOLD>$NAME Stars<NORMAL><RESET>",    "landed on the most\n<RED><BOLD>Red Spaces<NORMAL><RESET>"],
-    ["<BLUE><BOLD>$NAME Star<NORMAL><RESET>",   "<BLUE><BOLD>$NAME Stars<NORMAL><RESET>",   "landed on the most\n<BLUE><BOLD>Blue Spaces<NORMAL><RESET>"],
-    ["<GREEN><BOLD>$NAME Star<NORMAL><RESET>",  "<GREEN><BOLD>$NAME Stars<NORMAL><RESET>",  "landed on the most\n<GREEN><BOLD>! Spaces<NORMAL><RESET>"],
-    ["<RED><BOLD>$NAME Star<NORMAL><RESET>",    "<RED><BOLD>$NAME Stars<NORMAL><RESET>",    "landed on the most\n<RED><BOLD>Bowser Spaces<NORMAL><RESET>"],
-    ["<GREEN><BOLD>$NAME Star<NORMAL><RESET>",  "<GREEN><BOLD>$NAME Stars<NORMAL><RESET>",  "landed on the most\n<GREEN><BOLD>Battle Spaces<NORMAL><RESET>"],
-    ["<GREEN><BOLD>$NAME Star<NORMAL><RESET>",  "<GREEN><BOLD>$NAME Stars<NORMAL><RESET>",  "landed on the most\n<GREEN><BOLD>Item Spaces<NORMAL><RESET>"],
-    ["<GREEN><BOLD>$NAME Star<NORMAL><RESET>",  "<GREEN><BOLD>$NAME Stars<NORMAL><RESET>",  "landed on the most\n<GREEN><BOLD>Bank Spaces<NORMAL><RESET>"],
-    ["<GREEN><BOLD>$NAME Star<NORMAL><RESET>",  "<GREEN><BOLD>$NAME Stars<NORMAL><RESET>",  "landed on the most\n<GREEN><BOLD>Game Guy Spaces<NORMAL><RESET>"],
-    ["<BLUE><BOLD>$NAME Star<NORMAL><RESET>",   "<BLUE><BOLD>$NAME Stars<NORMAL><RESET>",   "landed on the most\n<BLUE><BOLD>Lucky Spaces<NORMAL><RESET>"]
+    ["<BLUE><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",   "<BLUE><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",   "has won the most coins\nin Mini-Games"],
+    ["<YELLOW><OUTLINE>$NAME Star<NO_OUTLINE><RESET>", "<YELLOW><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>", "had the most\ncoins at any one time\nduring the game"],
+    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>? Spaces<NO_OUTLINE><RESET>"],
+    ["<RED><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",    "<RED><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",    "landed on the most\n<RED><OUTLINE>Red Spaces<NO_OUTLINE><RESET>"],
+    ["<BLUE><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",   "<BLUE><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",   "landed on the most\n<BLUE><OUTLINE>Blue Spaces<NO_OUTLINE><RESET>"],
+    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>! Spaces<NO_OUTLINE><RESET>"],
+    ["<RED><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",    "<RED><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",    "landed on the most\n<RED><OUTLINE>Bowser Spaces<NO_OUTLINE><RESET>"],
+    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>Battle Spaces<NO_OUTLINE><RESET>"],
+    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>Item Spaces<NO_OUTLINE><RESET>"],
+    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>Bank Spaces<NO_OUTLINE><RESET>"],
+    ["<GREEN><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",  "<GREEN><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",  "landed on the most\n<GREEN><OUTLINE>Game Guy Spaces<NO_OUTLINE><RESET>"],
+    ["<BLUE><OUTLINE>$NAME Star<NO_OUTLINE><RESET>",   "<BLUE><OUTLINE>$NAME Stars<NO_OUTLINE><RESET>",   "landed on the most\n<BLUE><OUTLINE>Lucky Spaces<NO_OUTLINE><RESET>"]
 ].map!(e => e.map!(formatText).array).array;
 
 void mallocPerm(size_t size, void delegate(uint ptr) callback) {
@@ -649,7 +649,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                         gameText = gameText[1..$];
                     } else {
                         if (multi) {
-                            name ~= " <BOLD>" ~ character.shortName ~ "<NORMAL>"; 
+                            name ~= " <OUTLINE>" ~ character.shortName ~ "<NO_OUTLINE>"; 
                         }
                         result ~= formatText(name);
                         gameText = gameText[character.to!string.length..$];
@@ -659,14 +659,14 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 gameText = result.to!string;
             }
 
-            if (gameText == formatText("<BEGIN><Z>...Board<NUL><NUL>") && isBoardScene()) {
-                gameText = formatText("<BEGIN><YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET><NUL><NUL>");
+            if (gameText == formatText("<CLEAR><Z>...Board<NUL><NUL>") && isBoardScene()) {
+                gameText = formatText("<CLEAR><YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET><NUL><NUL>");
             }
 
             if (config.randomBonus && data.currentScene == Scene.FINISH_BOARD && bonus.length >= 3) {
                 gameText = gameText.replace("one\nstar", "one star")
-                                   .replace(formatText("<BLUE><BOLD> Mini-Game Star<NORMAL><RESET>"), formatText(" <BLUE><BOLD>Mini-Game Star<NORMAL><RESET>"))
-                                   .replace(formatText("<BLUE><BOLD>Mini-Game Star<NORMAL> <RESET>"), formatText("<BLUE><BOLD>Mini-Game Star<NORMAL><RESET> "));
+                                   .replace(formatText("<BLUE><OUTLINE> Mini-Game Star<NO_OUTLINE><RESET>"), formatText(" <BLUE><OUTLINE>Mini-Game Star<NO_OUTLINE><RESET>"))
+                                   .replace(formatText("<BLUE><OUTLINE>Mini-Game Star<NO_OUTLINE> <RESET>"), formatText("<BLUE><OUTLINE>Mini-Game Star<NO_OUTLINE><RESET> "));
 
                 foreach (i, ref bt; BONUS_TEXT) {
                     if (bt.any!(t => gameText.canFind(t))) {

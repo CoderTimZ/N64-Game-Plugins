@@ -81,7 +81,7 @@ string shortName(Character character) pure {
         case Character.UNDEFINED: return "<WHITE>(?)<RESET>";
         case Character.MARIO:     return "<RED>(M)<RESET>";
         case Character.LUIGI:     return "<GREEN>(L)<RESET>";
-        case Character.PEACH:     return "<PINK>(P)<RESET>";
+        case Character.PEACH:     return "<MAGENTA>(P)<RESET>";
         case Character.YOSHI:     return "<GREEN>(Y)<RESET>";
         case Character.WARIO:     return "<YELLOW>(W)<RESET>";
         case Character.DK:        return "<RED>(D)<RESET>";
@@ -96,28 +96,32 @@ bool isCPU(ubyte flags) pure {
 
 immutable Tuple!(char, "id", string, "text")[] FORMATTING = [
     tuple('\x00', "<NUL>"),
+    // Text colors (palette at 0x800A2174). Text has a 1-pixel drop shadow, except in black.
     tuple('\x01', "<BLACK>"),
-    tuple('\x02', "<BLUE>"),
-    tuple('\x03', "<RED>"),
-    tuple('\x04', "<PINK>"),
-    tuple('\x05', "<GREEN>"),
-    tuple('\x06', "<CYAN>"),
-    tuple('\x07', "<YELLOW>"),
+    tuple('\x02', "<BLUE>"),          // 0, 0, 255
+    tuple('\x03', "<RED>"),           // 255, 66, 66
+    tuple('\x04', "<MAGENTA>"),       // 255, 0, 255
+    tuple('\x05', "<GREEN>"),         // 0, 255, 0
+    tuple('\x06', "<CYAN>"),          // 0, 255, 255
+    tuple('\x07', "<YELLOW>"),        // 255, 255, 0
     tuple('\x08', "<WHITE>"),
-    tuple('\x0B', "<BEGIN>"),
-    tuple('\x0E', "<TAB>"),
-    tuple('\x0F', "<BOLD>"),
-    tuple('\x10', "<SMALL_TAB>"),
+    tuple('\x0B', "<CLEAR>"),         // Clears the window and starts again at the top left
+    tuple('\x0C', "<CHOICE>"),        // Start of a selectable choice
+    tuple('\x0D', "<CHOICE_END>"),    // End of a selectable choice
+    tuple('\x0E', "<TAB>"),           // Moves to the next tab stop
+    tuple('\x0F', "<OUTLINE>"),       // Outlines the text (in black by default)
+    tuple('\x10', "<SPACE>"),         // Same as a space (4 pixels)
     tuple('\x11', "<1>"),
     tuple('\x12', "<2>"),
     tuple('\x13', "<3>"),
     tuple('\x14', "<4>"),
     tuple('\x15', "<5>"),
-    tuple('\x16', "<NORMAL>"),
-    tuple('\x17', "<DELETE_LINE>"),
-    tuple('\x18', "<DELETE_CHAR>"),
-    tuple('\x19', "<RESET>"),
-    tuple('\x1A', "<TAB2>"),
+    tuple('\x16', "<NO_OUTLINE>"),
+    tuple('\x17', "<SHORT_NEWLINE>"), // New line, moving down only a quarter of a line
+    tuple('\x18', "<SKIP_NEXT>"),     // Skips the next byte (no other effect)
+    tuple('\x19', "<RESET>"),         // Default text color
+    tuple('\x1A', "<WIDE_SPACE>"),    // 10-pixel space
+    // Icons: frames of mainfs file 0x34. 0x2D-0x2F are past the end of the icon table; don't use them.
     tuple('\x21', "<A>"),
     tuple('\x22', "<B>"),
     tuple('\x23', "<C_UP>"),
@@ -130,6 +134,7 @@ immutable Tuple!(char, "id", string, "text")[] FORMATTING = [
     tuple('\x2A', "<STAR>"),
     tuple('\x2B', "<START>"),
     tuple('\x2C', "<R>"),
+    // Glyphs: mainfs file 0x2C (10x12, 4-bit) from code 0x30 on; advance widths at 0x800A2194
     tuple('\x3A', "<COIN_OUTLINE>"),
     tuple('\x3B', "<STAR_OUTLINE>"),
     tuple('\x3C', "+"),
@@ -142,14 +147,16 @@ immutable Tuple!(char, "id", string, "text")[] FORMATTING = [
     tuple('\x5E', ")"),
     tuple('\x5F', "/"),
     tuple('\x7B', ":"),
-    tuple('\x7C', "÷"),
+    tuple('\x7C', "%"),
     tuple('\x7D', "·"),
     tuple('\x7E', "&"),
+    tuple('\x80', "゛"),              // Japanese leftovers; 0x80/0x81 are drawn over the previous character
+    tuple('\x81', "゜"),
     tuple('\x82', ","),
-    tuple('\x84', "<LINE>"),
+    tuple('\x83', "。"),
+    tuple('\x84', "—"),
     tuple('\x85', "."),
     tuple('\x86', "_"),
-    tuple('\x87', "<TAB3>"),
     tuple('\x91', "Ä"),
     tuple('\x92', "Ö"),
     tuple('\x93', "Ü"),
@@ -175,8 +182,8 @@ immutable Tuple!(char, "id", string, "text")[] FORMATTING = [
     tuple('\xA7', "<BIG_7>"),
     tuple('\xA8', "<BIG_8>"),
     tuple('\xA9', "<BIG_9>"),
-    tuple('\xC0', "<COPY_NEXT>"),
-    tuple('\xC1', "\""),
+    tuple('\xC0', "“"),
+    tuple('\xC1', "”"),
     tuple('\xC2', "!"),
     tuple('\xC3', "?"),
     tuple('\xC4', "⁉"),
@@ -206,7 +213,7 @@ immutable Tuple!(char, "id", string, "text")[] FORMATTING = [
     tuple('\xE5', "ú"),
     tuple('\xE6', "ñ"),
     tuple('\xFE', "…"),
-    tuple('\xFF', "<END>")
+    tuple('\xFF', "<END>")            // Waits for A, showing the ▼ glyph
 ];
 
 string formatText(string text) pure {
