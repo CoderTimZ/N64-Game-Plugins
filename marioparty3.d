@@ -1696,8 +1696,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         if (ssNameBuffer) {
             foreach (i, g; names) {
                 // Plain label: no <END>, which would make the window show a "press A" arrow.
-                // Coin mini-games are yellow.
-                auto name = g.isCoinMiniGame ? "<YELLOW>" ~ g.fullName ~ "<RESET>" : g.fullName;
+                // Coin mini-games are yellow, Bowser mini-games red.
+                auto name = g.isCoinMiniGame   ? "<YELLOW>" ~ g.fullName ~ "<RESET>"
+                          : g.isBowserMiniGame ? "<RED>"    ~ g.fullName ~ "<RESET>"
+                          : g.fullName;
                 auto text = formatText(name ~ "<NUL><NUL>");
                 if (text.length > SUPERSTARS_NAME_SLOT_SIZE) {
                     text = text[0..SUPERSTARS_NAME_SLOT_SIZE - 2] ~ formatText("<NUL><NUL>");
@@ -1751,7 +1753,8 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         ssPhase = SuperstarsPhase.WAITING;
 
         fadeOutBoardMusic({
-            auto color = ssGame.isCoinMiniGame ? "<YELLOW>" : "<CYAN>"; // Coin mini-games are yellow, as on the roulette
+            // Coin mini-games are yellow and Bowser mini-games red, as on the roulette
+            auto color = ssGame.isCoinMiniGame ? "<YELLOW>" : ssGame.isBowserMiniGame ? "<RED>" : "<CYAN>";
             showGlobalMessage("Let's play " ~ color ~ ssGame.fullName ~ "<RESET>\n" ~
                               "in Mario Party Superstars!\n\n" ~
                               "When you're done, enter the\n" ~
@@ -1829,6 +1832,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             string game;
             MiniGameType category;
             bool coin;
+            bool bowser;
             SuperstarsPlayer[] players;
             bool submitted;
         }
@@ -1838,6 +1842,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             msg.game = ssGame.fullName;
             msg.category = ssType;
             msg.coin = ssGame.isCoinMiniGame;
+            msg.bowser = ssGame.isBowserMiniGame;
             msg.submitted = (ssResults !is null);
             players.each!((p) {
                 SuperstarsPlayer sp;
@@ -2299,6 +2304,18 @@ bool isCoinMiniGame(SuperstarsMiniGame game) {
         case SuperstarsMiniGame.PUDDLE_PADDLE:
         case SuperstarsMiniGame.CASHAPULT:
         case SuperstarsMiniGame.WINNER_OR_DINNER:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Mini-games played against Bowser
+bool isBowserMiniGame(SuperstarsMiniGame game) {
+    switch (game) {
+        case SuperstarsMiniGame.FACE_LIFT:
+        case SuperstarsMiniGame.DARK_N_CRISPY:
+        case SuperstarsMiniGame.PIT_BOSS:
             return true;
         default:
             return false;
