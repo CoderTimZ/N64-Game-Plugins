@@ -841,6 +841,13 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             0x800DFBA8.onExecDone({
                 if (!isPartyBoardScene()) return;
                 allocateSuperstarsNameBuffer();
+
+                // Make the duel roulette (category 5) 3 long, laid out like the other 3-long roulettes (category 1).
+                // These tables are the board overlay's data, which is reloaded with the board.
+                0x80100E1D.val!ubyte = 3;                           // Number of entries
+                0x80100E89.val!ubyte = 0x80100E85.val!ubyte;        // Window Y
+                0x80100E91.val!ubyte = 0x80100E8D.val!ubyte;        // Cursor Y
+                0x801020C4.val!uint  = 0x801020B4.val!uint;         // Entry rectangles
             });
 
             // GWMgUnlockCheck: Show every roulette slot, even if the placeholder MP3 mini-game is still locked
@@ -1682,7 +1689,15 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         auto game = queue.next(random, allowed);
         auto alternatives = choices.filter!(g => g != game && allowed(g)).array.randomShuffle(random)
                           ~ all.filter!(g => g != game && !choices.canFind(g) && allowed(g)).array.randomShuffle(random);
-        auto names = game ~ alternatives.take(count - 1).array;
+        // At most one coin mini-game and one Bowser mini-game per roulette
+        auto fits = (SuperstarsMiniGame g, SuperstarsMiniGame[] list) =>
+            !(g.isCoinMiniGame && list.any!(o => o.isCoinMiniGame)) &&
+            !(g.isBowserMiniGame && list.any!(o => o.isBowserMiniGame));
+        SuperstarsMiniGame[] names = [game];
+        foreach (g; alternatives) {
+            if (names.length == count) break;
+            if (fits(g, names)) names ~= g;
+        }
         for (size_t i = 0; names.length < count; i++) {
             names ~= names[i];
         }
