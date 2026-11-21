@@ -43,8 +43,6 @@ class State {
         new PlayerState()
     ];
     float currentPlayerTurn = 0;
-    BingoCard[] bingoCards;
-    string[Character] characterToName;
 }
 
 union PlayerData {
@@ -206,11 +204,11 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
             0x8004FF60.onExec({
                 if (0x8004FEE4.val!uint != 0x846332BC) return;
 
-                auto card = state.bingoCards.find!(c => c.characters.canFind(player.data.character));
+                auto card = bingoCards.find!(c => c.characters.canFind(player.data.character));
 
                 gpr.v0 = 0;
                 players.filter!(p => p != player).each!((p) {
-                    auto c = state.bingoCards.find!(c => c.characters.canFind(p.data.character));
+                    auto c = bingoCards.find!(c => c.characters.canFind(p.data.character));
 
                     if ((c.empty ? 0 : c.front.bingos) > (card.empty ? 0 : card.front.bingos)) gpr.v0++;
                     else if ((c.empty ? 0 : c.front.bingos) < (card.empty ? 0 : card.front.bingos)) { }

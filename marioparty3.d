@@ -106,8 +106,6 @@ class State {
     uint goldSpaceTexturePtr;
     string[] boardNames;
     float currentPlayerTurn = 0;
-    BingoCard[] bingoCards;
-    string[Character] characterToName;
 }
 
 union Memory {
@@ -632,14 +630,14 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                         [c.to!string, c.fullName].each!((charName) {
                             if (!gameText.startsWith(charName)) return;
 
-                            auto n = (c in state.characterToName);
+                            auto n = (c in characterToName);
                             if (!n) return;
 
                             if (m == -1 || charName.length > character.to!string.length) {
                                 m = i;
                                 character = c;
                                 name = *n;
-                                multi = (state.characterToName.values.count(name) > 1);
+                                multi = (characterToName.values.count(name) > 1);
                             }
                         });
                     });
@@ -1526,11 +1524,11 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             0x800EEA50.onExec({
                 if (0x800EE9E0.val!uint != 0x0C03BB2C) return;
 
-                auto card = state.bingoCards.find!(c => c.characters.canFind(player.data.character));
+                auto card = bingoCards.find!(c => c.characters.canFind(player.data.character));
 
                 gpr.v0 = 0;
                 players.filter!(p => p != player).each!((p) {
-                    auto c = state.bingoCards.find!(c => c.characters.canFind(p.data.character));
+                    auto c = bingoCards.find!(c => c.characters.canFind(p.data.character));
 
                     if ((c.empty ? 0 : c.front.bingos) > (card.empty ? 0 : card.front.bingos)) gpr.v0++;
                     else if ((c.empty ? 0 : c.front.bingos) < (card.empty ? 0 : card.front.bingos)) { }

@@ -264,6 +264,11 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
     Player[] players;
     int[Character.max+1] teams;
 
+    // The bingo cards, as the bingo site last sent them. They aren't part of the State: they belong to the live bingo
+    // session, so loading a save state mustn't bring back older cards. The site sends them whenever the plugin connects.
+    BingoCard[] bingoCards;
+    string[Character] characterToName;
+
     this(string name, string hash) {
         super(name, hash);
 
@@ -487,10 +492,10 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
             
             struct Message { BingoCard[] cards; }
 
-            state.characterToName.clear();
+            characterToName.clear();
 
-            state.bingoCards = json.fromJSON!Message().cards;
-            state.bingoCards.each!((ref card) {
+            bingoCards = json.fromJSON!Message().cards;
+            bingoCards.each!((ref card) {
                 string name = card.name.toUpper();
                 while (!name.empty) {
                     ptrdiff_t m = -1;
@@ -503,12 +508,11 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
                     if (m == -1) {
                         name.decodeFront;
                     } else {
-                        state.characterToName[CHARS[m]] = card.formattedName;
+                        characterToName[CHARS[m]] = card.formattedName;
                         name = name[CHARS[m].to!string.length..$];
                     }
                 }
             });
-            saveState();
         }
     }
 
