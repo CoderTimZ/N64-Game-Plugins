@@ -2021,6 +2021,12 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             }
         }
 
+        // Last Five Turns: the standings. The game shows first and last place outlined, in yellow and red; with the
+        // bingo names in their own colors, they're plain like second and third place.
+        if ((id == 0x4301 || id == 0x4304) && config.bingoPlayerNames && characterToName.length) {
+            return message(id == 0x4301 ? "<1> is first!" : "And <1> is in last place.");
+        }
+
         // Last Five Turns: the present for the predicted winner
         if (id == 0x4308 && config.improveLastFiveTurnsBonus && data.currentScene == Scene.LAST_FIVE_TURNS) {
             return message("And to <1>, our predicted\nwinner, we award a\npresent of <YELLOW><OUTLINE>" ~ lastFiveTurnsBonus.to!string ~ " coins<NO_OUTLINE><RESET><YELLOW>!");
