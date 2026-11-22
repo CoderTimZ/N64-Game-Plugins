@@ -2256,26 +2256,38 @@ enum Scene : uint {
     LAST_FIVE_TURNS          =  81,
     GENIE                    =  82,
     START_BOARD              =  83,
+    START_BOARD_TUTORIAL     =  84, // START_BOARD's tutorial version
     FINAL_RESULTS            =  85,
     OPENING_CREDITS          =  88,
+    DUEL_TRANSITION          =  90, // Duel mode version of TRANSITION
     GATE_GUY_BOARD           =  91,
     ARROWHEAD_BOARD          =  92,
     PIPESQUEAK_BOARD         =  93,
     BLOWHARD_BOARD           =  94,
     MR_MOVER_BOARD           =  95,
     BACKTRACK_BOARD          =  96,
+    DUEL_FINISH_BOARD        =  98, // Duel mode version of FINISH_BOARD
+    DUEL_FINAL_RESULTS       =  99, // Duel mode version of FINAL_RESULTS
+    START_DUEL_BOARD         = 100, // Duel mode version of START_BOARD
+    START_DUEL_BOARD_TUTORIAL = 101, // START_DUEL_BOARD's tutorial version
+    STORY_DEBUG              = 102,
     MINI_GAME_ROOM_RETRY     = 104,
     MINI_GAME_ROOM           = 105,
     CHANCE_TIME              = 106,
     MINI_GAME_RULES          = 112,
     MINI_GAME_RESULTS        = 113,
     GAMBLE_GAME_RESULTS      = 114,
+    DUEL_GAME_RESULTS        = 115,
     BATTLE_GAME_RESULTS      = 116,
+    STORY_TRANSITION         = 117, // Story mode version of TRANSITION
+    MESSAGE_CHECK            = 118, // Debug
     CASTLE_GROUNDS           = 119,
     GAME_SETUP               = 120,
     FILE_SELECTION           = 121,
     TITLE_SCREEN             = 122,
-    PEACHS_CASTLE            = 123
+    PEACHS_CASTLE            = 123,
+    STAFF_CREDITS            = 124,
+    STORY_RESULTS            = 125 // Story mode results
 }
 
 enum MiniGame : ubyte {

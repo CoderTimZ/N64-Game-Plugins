@@ -1139,6 +1139,7 @@ enum Scene : uint {
     TRANSITION           =  61,
     WESTERN_LAND_BOARD   =  62,
     WESTERN_LAND_DUEL    =  63, // Each board's duel: picking the opponent, the wager, the duel and the payout
+    LAST_FIVE_TURNS      =  64,
     PIRATE_LAND_BOARD    =  65,
     PIRATE_LAND_DUEL     =  66,
     HORROR_LAND_BOARD    =  67,
@@ -1149,6 +1150,7 @@ enum Scene : uint {
     MYSTERY_LAND_DUEL    =  72,
     BOWSER_LAND_BOARD    =  73,
     BOWSER_LAND_DUEL     =  74,
+    RULES_LAND           =  77,
     FINAL_RESULTS        =  81,
     FINISH_BOARD         =  82,
     BOWSER_EVENT         =  83,
@@ -1161,8 +1163,12 @@ enum Scene : uint {
     MINI_GAME_RULES_2    =  95,
     MINI_GAME_RULES      =  96,
     TITLE_SCREEN         =  98,
+    FINAL_MINI_GAME_COASTER = 109,
+    MINI_GAME_COASTER    = 110,
     BATTLE_GAME_RESULTS  = 111,
-    MINI_GAME_RESULTS    = 112
+    MINI_GAME_RESULTS    = 112,
+    MESSAGE_TEST         = 113,
+    CREDITS              = 114
 }
 
 immutable ubyte[] LUCKY_SPACE_TEXTURE = [
