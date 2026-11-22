@@ -12,12 +12,8 @@ import std.stdio;
 import std.string;
 import std.traits;
 
-class Config {
-    Character[] characters = [Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED];
+class Config : MarioPartyConfig {
     float[Block] blockWeights;
-    bool saveStateBeforeEachPlayerTurn = false;
-    string bingoURL = "";
-    bool rankPlayersByBingoScore = false;
 
     this() {
         blockWeights = [
@@ -35,14 +31,8 @@ class PlayerState {
 
 }
 
-class State {
-    PlayerState[] players = [
-        new PlayerState(),
-        new PlayerState(),
-        new PlayerState(),
-        new PlayerState()
-    ];
-    float currentPlayerTurn = 0;
+class State : MarioPartyState!PlayerState {
+
 }
 
 union PlayerData {
@@ -86,50 +76,17 @@ union Memory {
     mixin Field!(0x801012E2, ubyte, "chanceOutcome");
 }
 
-class Player {
-    const uint index;
-    PlayerData* data;
-    PlayerPanel* panel;
-    PanelColor cachedColor;
-    PlayerState state;
-
-    this(uint index, ref PlayerData data, ref PlayerPanel panel) {
-        this.index = index;
-        this.data = &data;
-        this.panel = &panel;
-        this.cachedColor = PanelColor.NONE;
-    }
-
-    @property bool isCPU() const {
-        return data.flags.isCPU;
-    }
-
-    bool isAheadOf(const Player o) const {
-        if (data.stars == o.data.stars) {
-            return data.coins > o.data.coins;
-        } else {
-            return data.stars > o.data.stars;
-        }
-    }
-}
-
 union PlayerPanel {
     ubyte[0x40] _data;
     mixin Field!(0x03, PanelColor, "color");
 }
 
-class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
+class MarioParty1 : MarioParty!(Config, State, Memory) {
     this(string name, string hash) {
         super(name, hash);
 
         // Keep the State on the permanent heap (D_800D6030, MakePermHeap, HuMemDirectMalloc, HuMemDirectFree, HuPrcVSleep)
         permanentHeap = PermanentHeap(0x800D6030, 0x8003B680, 0x8003B6A4, 0x8003B6C8, 0x800635B4);
-
-        players = iota(4).map!(i => new Player(i, data.players[i], data.playerPanels[i])).array;
-    }
-
-    override void loadConfig() {
-        super.loadConfig();
     }
 
     override bool lockTeamScores() const {
@@ -164,7 +121,7 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
         }
     }
 
-    bool isMiniGameScene(Scene scene) const {
+    override bool isMiniGameScene(Scene scene) const {
         return Scene.SLOT_MACHINE <= scene && scene <= Scene.BUMPER_BALL_MAZE;
     }
 
@@ -194,122 +151,12 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
         });
 
         if (config.rankPlayersByBingoScore) {
-            Player player = null;
-
-            0x8004FEBC.onExec({
-                if (0x8004FEE4.val!uint != 0x846332BC) return;
-
-                player = players[gpr.a0];
-            });
-            0x8004FF60.onExec({
-                if (0x8004FEE4.val!uint != 0x846332BC) return;
-
-                auto card = bingoCards.find!(c => c.characters.canFind(player.data.character));
-
-                gpr.v0 = 0;
-                players.filter!(p => p != player).each!((p) {
-                    auto c = bingoCards.find!(c => c.characters.canFind(p.data.character));
-
-                    if ((c.empty ? 0 : c.front.bingos) > (card.empty ? 0 : card.front.bingos)) gpr.v0++;
-                    else if ((c.empty ? 0 : c.front.bingos) < (card.empty ? 0 : card.front.bingos)) { }
-                    else if ((c.empty ? 0 : c.front.squares) > (card.empty ? 0 : card.front.squares)) gpr.v0++;
-                    else if ((c.empty ? 0 : c.front.squares) < (card.empty ? 0 : card.front.squares)) { }
-                    else if (p.data.stars > player.data.stars) gpr.v0++;
-                    else if (p.data.stars < player.data.stars) { }
-                    else if (p.data.coins > player.data.coins) gpr.v0++;
-                });
-            });
+            setUpBingoRanking(0x8004FEBC, 0x8004FF60, 0x8004FEE4, 0x846332BC);
         }
 
-        // Chance Time duplicate character fix
-        0x800FC830.onExec({
-            if (data.currentScene != Scene.CHANCE_TIME) return;
+        fixChanceTimeDuplicates(0x800FC830, 0x800FE1A0); // Chance Time duplicate character fix
 
-            gpr.a0 = players.filter!(p => p.data.character == data.chancePlayer1)
-                            .filter!(p => p.index != data.chancePlayer2)
-                            .array.choice(random).index;
-        });
-
-        // Chance Time duplicate character fix
-        0x800FE1A0.onExec({
-            if (data.currentScene != Scene.CHANCE_TIME) return;
-
-            gpr.a0 = players.filter!(p => p.data.character == data.chancePlayer2)
-                            .filter!(p => p.index != data.chancePlayer1)
-                            .array.choice(random).index;
-        });
-
-        // Keep this at the bottom
-        players.each!((p) {
-            p.data.stars.onWrite((ref typeof(p.data.stars) stars) {
-                if (!isScoreScene(data.currentScene)) return;
-                if (stars == p.data.stars) return;
-                
-                p.data.stars = stars;
-
-                sendPlayerInfo(p);
-            });
-
-            p.data.coins.onWrite((ref ushort coins) {
-                if (!isScoreScene(data.currentScene)) return;
-                if (coins == p.data.coins) return;
-
-                p.data.coins = coins;
-
-                sendPlayerInfo(p);
-            });
-
-            p.panel.color.onWrite((ref PanelColor color) {
-                if (!isBoardScene(data.currentScene)) return;
-                if (color == p.panel.color || color == p.cachedColor) return;
-                if (color > PanelColor.max) return;
-                
-                p.cachedColor = color;
-
-                sendPlayerInfo(p);
-            });
-
-            p.data.flags.onWrite((ref ubyte flags) {
-                if (!isBoardScene(data.currentScene)) return;
-                if (flags.isCPU == p.data.flags.isCPU) return;
-
-                p.data.flags = flags;
-
-                sendPlayerInfo(p);
-            });
-        });
-
-        data.currentScene.onWrite((ref Scene scene) {
-            if (data.currentScene == Scene.MINI_GAME_RESULTS) {
-                players.each!(p => p.cachedColor = PanelColor.NONE);
-            }
-            
-            if (data.currentScene == Scene.MINI_GAME_RESULTS || isMiniGameScene(scene) || scene == Scene.MINI_GAME_RULES) {
-                players.each!(p => sendPlayerInfo(p));
-            }
-        });
-    }
-
-    override void sendPlayerInfo(Player player) {
-        struct PlayerInfo {
-            immutable type = "player";
-            int player;
-            Character chr;
-            int stars;
-            int coins;
-            PanelColor color;
-            bool cpu;
-        }
-
-        PlayerInfo msg;
-        msg.player = player.index + 1;
-        msg.chr = player.data.character;
-        msg.stars = player.data.stars;
-        msg.coins = player.data.coins;
-        msg.color = player.cachedColor;
-        msg.cpu = player.isCPU;
-        
-        sendMessage(msg.toJSON());
+        watchPlayerInfo(); // Keep this at the bottom
     }
 }
 

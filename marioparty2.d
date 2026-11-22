@@ -12,8 +12,7 @@ import std.stdio;
 import std.string;
 import std.traits;
 
-class Config {
-    Character[] characters = [Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED];
+class Config : MarioPartyConfig {
     bool alwaysDuel = false;
     bool lastPlaceDoubleRoll = false;
     bool teamControl = false;
@@ -32,9 +31,6 @@ class Config {
     float mapScrollSpeedMultiplier = 1.0;
     bool preventRepeatMiniGames = false;
     MiniGame[] blockedMiniGames;
-    bool saveStateBeforeEachPlayerTurn = false;
-    string bingoURL = "";
-    bool rankPlayersByBingoScore = false;
 
     this() {
         bonuses = [
@@ -67,18 +63,11 @@ class PlayerState {
     int luckySpaceCount = 0;
 }
 
-class State {
-    PlayerState[] players = [
-        new PlayerState(),
-        new PlayerState(),
-        new PlayerState(),
-        new PlayerState()
-    ];
+class State : MarioPartyState!PlayerState {
     ShuffleStream!MiniGame[MiniGameType] miniGameQueue;
     ShuffleStream!Board itemGameQueue;
     ShuffleStream!Board duelGameQueue;
     CustomSpace[] spaces;
-    float currentPlayerTurn = 0;
 }
 
 union Chain {
@@ -189,8 +178,8 @@ union Memory {
     mixin Field!(0x80018B28, Instruction, "randomByteRoutine");
     mixin Field!(0x8004DE7C, Instruction, "openItemMenuRoutine");
     mixin Field!(0x80060A1C, Instruction, "determineTeams");
-    mixin Field!(0x80064200, Instruction, "duelRoutine");
-    mixin Field!(0x80064478, Instruction, "duelCancelRoutine");
+    mixin Field!(0x80064200, Instruction, "duelRoutine");       // Checks the player can duel, then asks for the duel scene
+    mixin Field!(0x80064478, Instruction, "duelCancelRoutine"); // In duelRoutine: shows why there is no duel
     mixin Field!(0x800C99B4, uint, "randomState");
     mixin Field!(0x800CC000, Arr!(ubyte, 10), "itemPrices");
     mixin Field!(0x800DF645, ubyte, "numberOfRolls");
@@ -223,51 +212,7 @@ union PlayerPanel {
     mixin Field!(0x04, PanelColor, "color");
 }
 
-void mallocPerm(size_t size, void delegate(uint ptr) callback) {
-    0x80040DA4.jal(cast(ushort)size, callback);
-}
-
-void freePerm(uint ptr, void delegate() callback) {
-    0x80040DC8.jal(ptr, callback);
-}
-
-void mallocTemp(size_t size, void delegate(uint ptr) callback) {
-    0x80040E74.jal(cast(ushort)size, callback);
-}
-
-void freeTemp(uint ptr, void delegate() callback) {
-    0x80040E98.jal(ptr, callback);
-}
-
-class Player {
-    const uint index;
-    PlayerData* data;
-    PlayerPanel* panel;
-    PanelColor cachedColor;
-    PlayerState state;
-
-    this(uint index, ref PlayerData data, ref PlayerPanel panel) {
-        this.index = index;
-        this.data = &data;
-        this.panel = &panel;
-        this.cachedColor = PanelColor.NONE;
-    }
-
-    @property bool isCPU() const {
-        return data.flags.isCPU;
-    }
-
-    bool isAheadOf(const Player o) const {
-        if (data.stars == o.data.stars) {
-            return data.coins > o.data.coins;
-        } else {
-            return data.stars > o.data.stars;
-        }
-    }
-}
-
-class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
-    BonusType[] bonus;
+class MarioParty2 : MarioParty!(Config, State, Memory) {
     Address[Scene] itemShopRoutines;
     Address[Scene] itemShopEvents;
 
@@ -276,8 +221,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
 
         // Keep the State on the permanent heap (perm_heap_addr, HuMemHeapInitPerm, HuMemMemoryAllocPerm, HuMemMemoryFreePerm, HuPrcVSleep)
         permanentHeap = PermanentHeap(0x800DEFD0, 0x80040D80, 0x80040DA4, 0x80040DC8, 0x8007DA44);
-
-        players = iota(4).map!(i => new Player(i, data.players[i], data.playerPanels[i])).array;
+        tempHeap = TempHeap(0x80040E74, 0x80040E98); // HuMemMemoryAllocTemp, HuMemMemoryFreeTemp
     }
 
     override bool lockTeamScores() const {
@@ -318,13 +262,22 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
             case Scene.START_BOARD:
             case Scene.BATTLE_GAME_RESULTS:
             case Scene.MINI_GAME_RESULTS:
+            // The wager is taken and the pot paid out in the duel scenes (by func_8005DCC8, which adds to a player's
+            // coins), so teammates get the duel's coins there. The duelist's teammates have no coins until then, so
+            // they can't be picked (see setUpTeamDuels()).
+            case Scene.WESTERN_LAND_DUEL:
+            case Scene.PIRATE_LAND_DUEL:
+            case Scene.HORROR_LAND_DUEL:
+            case Scene.SPACE_LAND_DUEL:
+            case Scene.MYSTERY_LAND_DUEL:
+            case Scene.BOWSER_LAND_DUEL:
                 return true;
             default:
                 return isBoardScene(scene);
         }
     }
 
-    bool isMiniGameScene(Scene scene) const {
+    override bool isMiniGameScene(Scene scene) const {
         return Scene.BOWSER_SLOTS <= scene && scene <= Scene.DEEP_SEA_SALVAGE;
     }
 
@@ -349,7 +302,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
         }
     }
 
-    static uint getBonusStat(Player player, BonusType type) {
+    override uint getBonusStat(Player player, BonusType type) {
         final switch (type) {
             case BonusType.MINI_GAME: return player.data.miniGameCoins;
             case BonusType.COIN:      return player.data.maxCoins;
@@ -404,15 +357,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                 if (gpr.s0 == 0) {
                     auto type = (cast(MiniGame)gpr.v0).type;
                     auto games = [EnumMembers!MiniGame].filter!(g => g.type == type).array;
-                    auto choices = games.filter!(g => !config.blockedMiniGames.canFind(g)).array;
-                    if (choices.empty) choices = games; // Every mini-game of this type is blocked
-                    auto queue = &state.miniGameQueue.require(type);
-                    if (queue.empty) queue.initialize(choices, random);
-                    auto game = queue.next(random);
-                    auto altCount = (0x800CBD10 + gpr.s2).val!ubyte - 1;
-                    auto roulette = game ~ games.filter!(g => g != game).array.randomShuffle(random).take(altCount);
-                    roulette.randomShuffle(random).each!((i, e) => data.miniGameRoulette[i] = e);
-                    0x8004A1FC.onExecOnce({ gpr.v0 = cast(uint)roulette.countUntil(game); });
+                    fillMiniGameRoulette(type, games, (0x800CBD10 + gpr.s2).val!ubyte, 0x8004A1FC);
                     saveState();
                 }
                 gpr.v0 = data.miniGameRoulette[gpr.s0];
@@ -422,22 +367,11 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
         }
 
         if (config.teamScores) {
-            data.duelRoutine.addr.onExec({
-                if (!isBoardScene()) return;
-                teammates(currentPlayer).each!((t) {
-                    t.data.coins = 0;
-                });
-            });
-            data.duelCancelRoutine.addr.onExec({
-                if (!isBoardScene()) return;
-                teammates(currentPlayer).each!((t) {
-                    t.data.coins = currentPlayer.data.coins;
-                });
-            });
+            setUpTeamDuels(data.duelRoutine.addr, data.duelCancelRoutine.addr);
         }
 
         if (config.alwaysDuel) {
-            0x800661AC.onExec({ if (isBoardScene()) gpr.v0 = 1; });
+            setUpAlwaysDuel(0x800661AC);
         }
 
         if (config.carryThreeItems) {
@@ -642,53 +576,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
         }
 
         if (config.randomBonus) {
-            data.currentScene.onWrite((ref Scene scene) {
-                if (scene != Scene.FINISH_BOARD) return;
-                bonus = config.bonuses.keys.filter!(b => players.any!(p => getBonusStat(p, b) > 0)).array;
-                if (bonus.length < 3) {
-                    bonus = config.bonuses.keys;
-                }
-                if (bonus.length >= 3) {
-                    bonus.randomShuffle(random);
-                    info("Bonus Stars: ", bonus.take(3));
-                }
-            });
-
-            0x80103F04.onExecDone({
-                if (data.currentScene != Scene.FINISH_BOARD) return;
-                if (bonus.length < 3) return;
-                gpr.v1 = getBonusStat(players[gpr.s1], bonus[BonusType.MINI_GAME]);
-            });
-
-            0x80103F50.onExecDone({
-                if (data.currentScene != Scene.FINISH_BOARD) return;
-                if (bonus.length < 3) return;
-                gpr.v0 = getBonusStat(players[gpr.s1], bonus[BonusType.MINI_GAME]);
-            });
-
-            0x80104314.onExecDone({
-                if (data.currentScene != Scene.FINISH_BOARD) return;
-                if (bonus.length < 3) return;
-                gpr.v1 = getBonusStat(players[gpr.s1], bonus[BonusType.COIN]);
-            });
-
-            0x80104360.onExecDone({
-                if (data.currentScene != Scene.FINISH_BOARD) return;
-                if (bonus.length < 3) return;
-                gpr.v0 = getBonusStat(players[gpr.s1], bonus[BonusType.COIN]);
-            });
-
-            0x80104724.onExecDone({
-                if (data.currentScene != Scene.FINISH_BOARD) return;
-                if (bonus.length < 3) return;
-                gpr.v1 = getBonusStat(players[gpr.s1], bonus[BonusType.HAPPENING]);
-            });
-
-            0x80104770.onExecDone({
-                if (data.currentScene != Scene.FINISH_BOARD) return;
-                if (bonus.length < 3) return;
-                gpr.v0 = getBonusStat(players[gpr.s1], bonus[BonusType.HAPPENING]);
-            });
+            setUpRandomBonus!"s1"([[0x80103F04, 0x80103F50], [0x80104314, 0x80104360], [0x80104724, 0x80104770]], true);
 
             // Every message is loaded by ID through func_80068CD4(id), which reads it from ROM into a newly allocated
             // buffer of its length. Loading a different length and writing the bonus star text into that buffer
@@ -799,63 +687,11 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                 if (!isBoardScene()) return;
                 gpr.v0 = (gpr.s4 <= CustomSpace.max);
             });
-            data.currentScene.onWrite((ref Scene scene) { // Reset lucky spaces at start of game
-                if (scene != Scene.START_BOARD) return;
-                
-                state.spaces.length = 0;
-                state.players.each!(p => p.luckySpaceCount = 0);
-                saveState();
-            });
+            resetCustomSpacesAtStart();
             0x800542FC.onExec({ // Space render function
                 if (!isBoardScene()) return;
 
-                bool changed = false;
-
-                if (state.spaces.length != data.spaceCount) {
-                    state.spaces.length = data.spaceCount;
-                    changed = true;
-                }
-
-                auto solidCount = iota(data.spaceCount).filter!(i => data.spaces[i].isSolid).count;
-                auto blueSpaces = iota(data.spaceCount).filter!(i => data.spaces[i].type == Space.Type.BLUE);
-
-                foreach (type, ratio; config.standardSpaceRatio) {
-                    long newCount = roundTo!long(solidCount * min(ratio, 1.0))
-                                  - iota(data.spaceCount).count!(i => data.spaces[i].type == type || state.spaces[i] == cast(CustomSpace)type);
-                    if (newCount > 0) {
-                        blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
-                                  .array.randomShuffle(random).take(newCount).each!((i) {
-                            state.spaces[i] = cast(CustomSpace)type;
-                            changed = true;
-                        });
-                    }
-                }
-
-                long newCount = roundTo!long(blueSpaces.count * min(config.luckySpaceRatio, 1.0))
-                              - state.spaces.count!(e => e == CustomSpace.LUCKY);
-                if (newCount > 0) {
-                    blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
-                              .array.randomShuffle(random).take(newCount).each!((i) {
-                        state.spaces[i] = CustomSpace.LUCKY;
-                        changed = true;
-                    });
-                }
-
-                blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT).each!((i) {
-                    state.spaces[i] = CustomSpace.LOCKED;
-                    changed = true;
-                });
-
-                iota(data.spaceCount).each!((i) {
-                    if (state.spaces[i] < Space.Type.min) return;
-                    if (state.spaces[i] > Space.Type.max) return;
-                    if (data.spaces[i].type == Space.Type.STAR) return;
-                    if (data.spaces[i].type == Space.Type.BLACK_STAR) return;
-
-                    data.spaces[i].type = cast(Space.Type)state.spaces[i];
-                });
-
-                if (changed) {
+                if (assignCustomSpaces()) {
                     saveState();
                 }
             });
@@ -942,129 +778,20 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
                     gpr.s0 = [7, 10, 12, 15, 20].choice(random);
                 }
             });
-            data.currentScene.onWrite((ref Scene scene) {
-                if (scene != Scene.FINAL_RESULTS) return;
-                info("Lucky Spaces:");
-                iota(4).map!(i => players[data.finalPlayerRankOrder[i]]).each!((p) {
-                    info(format("    %-8s %2d", p.data.character.to!string ~ ":", p.state.luckySpaceCount));
-                });
-            });
+            logLuckySpaces();
         }
 
         if (config.mapScrollSpeedMultiplier != 1.0) {
-            0x80067944.onExec({
-                if (!isBoardScene()) return;
-
-                fpr.f12 *= config.mapScrollSpeedMultiplier;
-            });
+            setUpMapScrollSpeed(0x80067944);
         }
 
         if (config.rankPlayersByBingoScore) {
-            Player player = null;
-
-            0x80059FD0.onExec({
-                if (0x8005A000.val!uint != 0x8484D2CE) return;
-                
-                player = players[gpr.a0];
-            });
-            0x8005A07C.onExec({
-                if (0x8005A000.val!uint != 0x8484D2CE) return;
-
-                auto card = bingoCards.find!(c => c.characters.canFind(player.data.character));
-
-                gpr.v0 = 0;
-                players.filter!(p => p != player).each!((p) {
-                    auto c = bingoCards.find!(c => c.characters.canFind(p.data.character));
-
-                    if ((c.empty ? 0 : c.front.bingos) > (card.empty ? 0 : card.front.bingos)) gpr.v0++;
-                    else if ((c.empty ? 0 : c.front.bingos) < (card.empty ? 0 : card.front.bingos)) { }
-                    else if ((c.empty ? 0 : c.front.squares) > (card.empty ? 0 : card.front.squares)) gpr.v0++;
-                    else if ((c.empty ? 0 : c.front.squares) < (card.empty ? 0 : card.front.squares)) { }
-                    else if (p.data.stars > player.data.stars) gpr.v0++;
-                    else if (p.data.stars < player.data.stars) { }
-                    else if (p.data.coins > player.data.coins) gpr.v0++;
-                });
-            });
+            setUpBingoRanking(0x80059FD0, 0x8005A07C, 0x8005A000, 0x8484D2CE);
         }
 
-        // Chance Time duplicate character fix
-        0x8010D6F0.onExec({
-            if (data.currentScene != Scene.CHANCE_TIME) return;
+        fixChanceTimeDuplicates(0x8010D6F0, 0x8010D924); // Chance Time duplicate character fix
 
-            gpr.a0 = players.filter!(p => p.data.character == data.chancePlayer1)
-                            .filter!(p => p.index != data.chancePlayer2)
-                            .array.choice(random).index;
-        });
-
-        // Chance Time duplicate character fix
-        0x8010D924.onExec({
-            if (data.currentScene != Scene.CHANCE_TIME) return;
-
-            gpr.a0 = players.filter!(p => p.data.character == data.chancePlayer2)
-                            .filter!(p => p.index != data.chancePlayer1)
-                            .array.choice(random).index;
-        });
-
-        // Keep this at the bottom
-        players.each!((p) {
-            p.data.stars.onWrite((ref typeof(p.data.stars) stars) {
-                if (!isScoreScene(data.currentScene)) return;
-                if (stars == p.data.stars) return;
-                
-                p.data.stars = stars;
-
-                sendPlayerInfo(p);
-            });
-
-            p.data.coins.onWrite((ref ushort coins) {
-                if (!isScoreScene(data.currentScene)) return;
-                if (coins == p.data.coins) return;
-
-                p.data.coins = coins;
-
-                sendPlayerInfo(p);
-            });
-
-            if (!config.carryThreeItems) {
-                p.data.item.onWrite((ref Item item) {
-                    if (!isScoreScene(data.currentScene)) return;
-                    if (item == p.data.item) return;
-
-                    p.data.item = item;
-
-                    sendPlayerInfo(p);
-                });
-            }
-
-            p.panel.color.onWrite((ref PanelColor color) {
-                if (!isBoardScene(data.currentScene)) return;
-                if (color == p.panel.color || color == p.cachedColor) return;
-                if (color > PanelColor.max) return;
-                
-                p.cachedColor = color;
-
-                sendPlayerInfo(p);
-            });
-
-            p.data.flags.onWrite((ref ubyte flags) {
-                if (!isBoardScene(data.currentScene)) return;
-                if (flags.isCPU == p.data.flags.isCPU) return;
-
-                p.data.flags = flags;
-
-                sendPlayerInfo(p);
-            });
-        });
-
-        data.currentScene.onWrite((ref Scene scene) {
-            if (data.currentScene == Scene.MINI_GAME_RESULTS) {
-                players.each!(p => p.cachedColor = PanelColor.NONE);
-            }
-            
-            if (data.currentScene == Scene.MINI_GAME_RESULTS || isMiniGameScene(scene) || scene == Scene.MINI_GAME_RULES) {
-                players.each!(p => sendPlayerInfo(p));
-            }
-        });
+        watchPlayerInfo(); // Keep this at the bottom
     }
 
     override bool overrideItems(Player p, string[] names) {
@@ -1085,30 +812,22 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
         return true;
     }
 
-    override void sendPlayerInfo(Player player) {
-        struct PlayerInfo {
-            immutable type = "player";
-            int player;
-            Character chr;
-            int stars;
-            int coins;
-            Item[] items;
-            int itemSlots;
-            PanelColor color;
-            bool cpu;
-        }
+    override void addPlayerItems(Player player, ref JSONValue msg) {
+        msg["items"] = (config.carryThreeItems ? player.state.items : [player.data.item]).toJSON();
+        msg["itemSlots"] = JSONValue(config.carryThreeItems ? 3 : 1);
+    }
 
-        PlayerInfo msg;
-        msg.player = player.index + 1;
-        msg.chr = player.data.character;
-        msg.stars = player.data.stars;
-        msg.coins = player.data.coins;
-        msg.items = (config.carryThreeItems ? player.state.items : [player.data.item]);
-        msg.itemSlots = (config.carryThreeItems ? 3 : 1);
-        msg.color = player.cachedColor;
-        msg.cpu = player.isCPU;
-        
-        sendMessage(msg.toJSON());
+    override void watchPlayerItems(Player p) {
+        if (config.carryThreeItems) return; // The item hooks in onStart() send the player when their items change
+
+        p.data.item.onWrite((ref Item item) {
+            if (!isScoreScene(data.currentScene)) return;
+            if (item == p.data.item) return;
+
+            p.data.item = item;
+
+            sendPlayerInfo(p);
+        });
     }
 }
 
@@ -1419,11 +1138,17 @@ enum Scene : uint {
     DEEP_SEA_SALVAGE     =  60,
     TRANSITION           =  61,
     WESTERN_LAND_BOARD   =  62,
+    WESTERN_LAND_DUEL    =  63, // Each board's duel: picking the opponent, the wager, the duel and the payout
     PIRATE_LAND_BOARD    =  65,
+    PIRATE_LAND_DUEL     =  66,
     HORROR_LAND_BOARD    =  67,
+    HORROR_LAND_DUEL     =  68,
     SPACE_LAND_BOARD     =  69,
+    SPACE_LAND_DUEL      =  70,
     MYSTERY_LAND_BOARD   =  71,
+    MYSTERY_LAND_DUEL    =  72,
     BOWSER_LAND_BOARD    =  73,
+    BOWSER_LAND_DUEL     =  74,
     FINAL_RESULTS        =  81,
     FINISH_BOARD         =  82,
     BOWSER_EVENT         =  83,
