@@ -216,6 +216,9 @@ immutable Tuple!(char, "id", string, "text")[] FORMATTING = [
     tuple('\xFF', "<END>")            // Waits for A, showing the ▼ glyph
 ];
 
+// Game text (bytes) for text in the plugin's markup: FORMATTING's tags and characters become their codes, and other
+// ASCII is kept as it is (letters, digits, space, and control bytes like "\n"). Other characters have no glyph, so
+// they become "?".
 string formatText(string text) pure {
     char[] result;
 
@@ -228,7 +231,8 @@ string formatText(string text) pure {
             }
         });
         if (m == -1) {
-            result ~= text.decodeFront;
+            auto c = text.decodeFront;
+            result ~= c < 0x80 ? cast(char)c : '\xC3'; // "?"
         } else {
             result ~= FORMATTING[m].id;
             text = text[FORMATTING[m].text.length..$];
@@ -238,14 +242,53 @@ string formatText(string text) pure {
     return result;
 }
 
+// The plugin's markup for game text (bytes): the reverse of formatText(). Bytes with no meaning in FORMATTING are kept
+// if they're ASCII, and become "?" otherwise (so the result is valid UTF-8).
 string unformatText(string text) pure {
-    char[] result;
+    static immutable string[256] MARKUP = () {
+        string[256] markup;
+        foreach (f; FORMATTING) markup[cast(ubyte)f.id] = f.text;
+        return markup;
+    }();
+    string result;
 
-    text.each!((c) {
-        auto f = FORMATTING.find!((ref f) => f.id == c);
-        if (f.empty) result ~= c; else result ~= f.front.text;
-    });
-    
+    foreach (b; cast(immutable(ubyte)[])text) { // Bytes: game text isn't UTF-8
+        if (MARKUP[b] !is null) result ~= MARKUP[b];
+        else result ~= b < 0x80 ? cast(char)b : '?';
+    }
+
+    return result;
+}
+
+// Markup showing a player's name as closely as the game's font can: without tags (so "<1>" is just text), and with
+// characters the font has no glyph for replaced by similar ones, or by "?". The result goes through formatText().
+string gameName(string name) {
+    string result;
+    foreach (dchar c; name) {
+        // The font's own characters: ASCII letters, digits and space, and FORMATTING's characters
+        // (but not the Japanese marks, which are drawn over the previous character)
+        auto glyph = FORMATTING.find!(f => f.id >= '\x30' && f.id != '\x80' && f.id != '\x81' && !f.text.startsWith("<") &&
+                                           f.text == c.to!string);
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ' ' || !glyph.empty) {
+            result ~= c;
+            continue;
+        }
+        switch (c) {
+            case '~', '=', '–':                result ~= '-'; break;
+            case '<', '[', '{':                result ~= '('; break;
+            case '>', ']', '}':                result ~= ')'; break;
+            case '\\', '|':                    result ~= '/'; break;
+            case ';':                          result ~= ':'; break;
+            case '*':                          result ~= '×'; break;
+            case '`', '‘', '’', '´':           result ~= '\''; break;
+            case '\t', '\n', '\r', ' ':   result ~= ' '; break;
+            default:
+                // A letter with a mark the font doesn't have (like "Å" or "ł"): the letter by itself
+                auto base = normalize!NFD(c.to!string);
+                auto b = base.empty ? dchar.init : base.front;
+                result ~= ((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')) ? b : '?';
+        }
+    }
     return result;
 }
 
@@ -508,7 +551,7 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
                     if (m == -1) {
                         name.decodeFront;
                     } else {
-                        characterToName[CHARS[m]] = card.formattedName;
+                        characterToName[CHARS[m]] = gameName(card.formattedName);
                         name = name[CHARS[m].to!string.length..$];
                     }
                 }
