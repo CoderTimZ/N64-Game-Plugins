@@ -440,6 +440,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     ushort messageId;            // Message being loaded by func_800364DC
     string messageReplacement;   // Text (game bytes) to load instead, from replaceMessage()
     short messageWindow = -1;    // Window whose message is being set, or -1
+    char nameColor;              // The game's color for a name given as text (see nameMessageId()), or 0
     WindowColors[short] windowColors;
     BonusType[] bonus;
     int lastFiveTurnsBonus = 20;
@@ -721,6 +722,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             // the window: a name given as text is measured as the message it's replaced with (see 0x8005B6BC)
             0x8006022C.onExec({
                 if (auto id = nameMessageId(gpr.a0)) gpr.a0 = id;
+                gpr.ra.onExecOnce({ nameColor = 0; });
             });
             // func_8005B6BC (set window message argument, a0 = window, a1 = message ID or pointer, a2 = argument).
             // Arguments are usually set before the message, which colors them again, but some may come after it.
@@ -729,6 +731,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
                 auto w = cast(short)gpr.a0;
                 auto n = cast(byte)gpr.a2;
                 gpr.ra.onExecOnce({
+                    nameColor = 0;
                     colorArg(w, n);
                     copyTextPaletteIfChanged(w);
                 });
@@ -1802,14 +1805,18 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         0x8004A994.jal(FRAMES, fadeExtraTrack);                     // HuAudSeqFadeOut: fade the main track
     }
 
-    // The bingo card name for a character's player, in the character's color (null if none, or bingoPlayerNames is off),
-    // then back to the default color unless `reset` is false
-    string bingoName(Character c, bool reset = true) {
+    // The bingo card name for a character's player (null if none, or bingoPlayerNames is off)
+    string bingoPlainName(Character c) {
         if (!config.bingoPlayerNames) return null;
         auto n = c in characterToName;
         if (!n) return null;
-        auto name = (*n).toUpper == "CPU" ? c.fullName : *n; // CPUs go by their character (Mario, Daisy, DK, ...)
-        return characterColor(c) ~ name ~ (reset ? "<RESET>" : "");
+        return (*n).toUpper == "CPU" ? c.fullName : *n; // CPUs go by their character (Mario, Daisy, DK, ...)
+    }
+
+    // bingoPlainName() in the character's color, then back to the default color unless `reset` is false
+    string bingoName(Character c, bool reset = true) {
+        auto name = bingoPlainName(c);
+        return name ? characterColor(c) ~ name ~ (reset ? "<RESET>" : "") : null;
     }
 
     enum WINDOW_SIZE = 0x27C;
@@ -1960,7 +1967,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
     // The game passes some window arguments as pointers to text instead of message IDs (like the names in the duel
     // opponent menu, message 0x5C00). If one is just a character's name (maybe colored), this is the ID of that
     // character's name message (0x1B10 + character), which goes through replaceMessage(); otherwise 0.
+    // Menus show players who can't be chosen (yourself, or someone with nothing to take) in color 1, which is dark
+    // (enabled ones are white, color 8). That color is kept in nameColor for replaceMessage(), until the caller is done.
     uint nameMessageId(Address p) {
+        nameColor = 0;
         if (p < 0x80000000 || p >= 0x80800000) return 0;
         string s;
         auto c = Ptr!char(p);
@@ -1968,10 +1978,13 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         size_t start = 0, end = s.length;
         if (end > start && s[start] == '\x0B') start++;
         if (end > start && s[end - 1] == '\x19') end--;                            // <RESET>
-        if (end > start && s[start] >= '\x01' && s[start] <= '\x08') start++; // Color
+        char color = 0;
+        if (end > start && s[start] >= '\x01' && s[start] <= '\x08') color = s[start++]; // Color
         foreach (ch; [EnumMembers!Character]) {
             if (ch == Character.UNDEFINED || !sameName(s[start..end], ch.fullName)) continue;
-            return bingoName(ch) ? 0x1B10 + ch : 0;
+            if (!bingoName(ch)) return 0;
+            if (color == '\x01') nameColor = color;
+            return 0x1B10 + ch;
         }
         return 0;
     }
@@ -1991,7 +2004,11 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             foreach (c; [EnumMembers!Character]) {
                 if (!sameName(text[start..end], c.fullName)) continue;
                 // In the character's color, instead of the message's own. Without a <RESET>: inserted as an argument,
-                // the window switches back to the color before it (see colorArg()).
+                // the window switches back to the color before it (see colorArg()). A name the game showed dark (a
+                // player who can't be chosen) stays dark.
+                if (nameColor) {
+                    if (auto plain = bingoPlainName(c)) return "\x0B" ~ nameColor ~ formatText(plain) ~ text[nuls..$];
+                }
                 auto name = bingoName(c, false);
                 if (name) return "\x0B" ~ formatText(name) ~ text[nuls..$];
             }
