@@ -874,12 +874,13 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
         abstract uint getBonusStat(Player player, BonusType type);
 
         // randomBonus: Gives 3 random bonus stars instead of the game's: ones that someone has a stat for, if 3 do.
-        // When the board ends, the game loads each player's stat for its i-th bonus star twice: statLoads[i][0] leaves
-        // it in v1 and statLoads[i][1] in v0 (both after the instruction there if afterLoad), with the player's index
-        // in playerRegister.
-        void setUpRandomBonus(string playerRegister)(Address[2][3] statLoads, bool afterLoad) {
+        // When the board ends (in bonusScene), the game loads each player's stat for its i-th bonus star twice:
+        // statLoads[i][0] leaves it in v1 and statLoads[i][1] in v0 (both after the instruction there if afterLoad),
+        // with the player's index in playerRegister.
+        void setUpRandomBonus(string playerRegister)(Address[2][3] statLoads, bool afterLoad,
+                                                     Scene bonusScene = Scene.FINISH_BOARD) {
             data.currentScene.onWrite((ref Scene scene) {
-                if (scene != Scene.FINISH_BOARD) return;
+                if (scene != bonusScene) return;
                 bonus = config.bonuses.keys.filter!(b => players.any!(p => getBonusStat(p, b) > 0)).array;
                 if (bonus.length < 3) {
                     bonus = config.bonuses.keys;
@@ -893,7 +894,7 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
             // Each in its own call, so each handler gets its own slot and register
             void replaceStat(Address address, size_t slot, bool inV1) {
                 auto replace = {
-                    if (data.currentScene != Scene.FINISH_BOARD) return;
+                    if (data.currentScene != bonusScene) return;
                     if (bonus.length < 3) return;
                     auto stat = getBonusStat(players[mixin("gpr." ~ playerRegister)], bonus[slot]);
                     if (inV1) gpr.v1 = stat; else gpr.v0 = stat;
@@ -910,8 +911,9 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
     // preventRepeatMiniGames, blockedMiniGames: Fills the mini-game roulette (data.miniGameRoulette) with count of the
     // mini-games in games (all of the category being chosen, type): the next one in the category's queue, which skips
     // blocked mini-games (unless all of them are), and others, in a random order. The game picks the entry the roulette
-    // lands on at landOn (v0), so it lands on that next one.
-    void fillMiniGameRoulette(MiniGameType, MiniGame)(MiniGameType type, MiniGame[] games, int count, Address landOn) {
+    // lands on at landOn (in landRegister), so it lands on that next one.
+    void fillMiniGameRoulette(string landRegister = "v0", MiniGameType, MiniGame)(MiniGameType type, MiniGame[] games,
+                                                                                int count, Address landOn) {
         auto choices = games.filter!(g => !config.blockedMiniGames.canFind(g)).array;
         if (choices.empty) choices = games; // Every mini-game of this type is blocked
         auto queue = &state.miniGameQueue.require(type);
@@ -919,17 +921,19 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
         auto game = queue.next(random);
         auto roulette = game ~ games.filter!(g => g != game).array.randomShuffle(random).take(count - 1);
         roulette.randomShuffle(random).each!((i, e) => data.miniGameRoulette[i] = e);
-        landOn.onExecOnce({ gpr.v0 = cast(uint)roulette.countUntil(game); });
+        landOn.onExecOnce({ mixin("gpr." ~ landRegister) = cast(uint)roulette.countUntil(game); });
     }
 
-    // Custom spaces (standardSpaceRatio, luckySpaceRatio): blue spaces the plugin turns into other kinds, kept in
-    // state.spaces for the whole game. These clear them when a game starts.
+    // Custom spaces (standardSpaceRatio, and luckySpaceRatio in games with lucky spaces): blue spaces the plugin turns
+    // into other kinds, kept in state.spaces for the whole game. These clear them when a game starts.
     void resetCustomSpacesAtStart()() {
         data.currentScene.onWrite((ref Scene scene) { // Reset lucky spaces at start of game
             if (scene != Scene.START_BOARD) return;
 
             state.spaces.length = 0;
-            state.players.each!(p => p.luckySpaceCount = 0);
+            static if (is(typeof(state.players[0].luckySpaceCount))) {
+                state.players.each!(p => p.luckySpaceCount = 0);
+            }
             saveState();
         });
     }
@@ -962,14 +966,16 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
             }
         }
 
-        long newCount = roundTo!long(blueSpaces.count * min(config.luckySpaceRatio, 1.0))
-                      - state.spaces.count!(e => e == CustomSpace.LUCKY);
-        if (newCount > 0) {
-            blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
-                      .array.randomShuffle(random).take(newCount).each!((i) {
-                state.spaces[i] = CustomSpace.LUCKY;
-                changed = true;
-            });
+        static if (is(typeof(config.luckySpaceRatio))) { // Games with lucky spaces
+            long newCount = roundTo!long(blueSpaces.count * min(config.luckySpaceRatio, 1.0))
+                          - state.spaces.count!(e => e == CustomSpace.LUCKY);
+            if (newCount > 0) {
+                blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT)
+                          .array.randomShuffle(random).take(newCount).each!((i) {
+                    state.spaces[i] = CustomSpace.LUCKY;
+                    changed = true;
+                });
+            }
         }
 
         blueSpaces.filter!(i => state.spaces[i] == CustomSpace.DEFAULT).each!((i) {
