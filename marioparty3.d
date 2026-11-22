@@ -676,6 +676,31 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             if (messageReplacement !is null) gpr.s1 = cast(uint)messageReplacement.length;
         });
 
+        // The turn counter (see maintainTurnCounter())
+        0x8004F074.onExecDone({ maintainTurnCounter(); }); // HuPrcVSleep, after "addiu sp, sp, ..."
+        0x8005F364.onExec({ // func_8005F364 (close window, a0 = window)
+            if (cast(short)gpr.a0 == turnCounterWindow) turnCounterWindow = -1;
+        });
+        data.currentScene.onWrite((ref Scene scene) { // The board's windows go away with it: forget the counter's
+            if (scene != data.currentScene) {
+                turnCounterWindow = -1;
+                turnCounterCovered = 0;
+                turnCounterLowered = 0;
+            }
+        });
+        // Hidden while the pause menu is open (MBPauseCreate), and lowered below the up arrow while the scrolling map is
+        // (MBMapScrollExec): they return once it's closed
+        0x800F1EC8.onExec({
+            if (!isPartyBoardScene()) return;
+            turnCounterCovered++;
+            gpr.ra.onExecOnce({ if (turnCounterCovered > 0) turnCounterCovered--; });
+        });
+        0x8010067C.onExec({
+            if (!isPartyBoardScene()) return;
+            turnCounterLowered++;
+            gpr.ra.onExecOnce({ if (turnCounterLowered > 0) turnCounterLowered--; });
+        });
+
         // Plugin colors in windows (textColor()): player names
         if (config.bingoPlayerNames) {
             // Window creation (func_8005AF84 area): the window has just copied the text palette (0x800A2174) to the
@@ -1981,9 +2006,9 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             }
         }
 
-        // The turn counter shown in place of "<Z>...Board" on the board
-        if ((id == 0x1D0B || id == 0x300B) && isBoardScene()) {
-            return formatText("<CLEAR><YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET><NUL><NUL>");
+        // The turn counter's text, while it's being loaded (see maintainTurnCounter())
+        if (id == TURN_COUNTER_MESSAGE && turnCounterText !is null) {
+            return formatText("<CLEAR>" ~ turnCounterText ~ "<NUL><NUL>");
         }
 
         // Bonus stars: 0x1402 introduces them, then each has 5 messages (0x1403, 0x1408, 0x140D): the award, then the
@@ -2026,6 +2051,88 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         }
 
         return null;
+    }
+
+    // The turn counter: a frameless window at the top center of the board screen, between the top players' panels,
+    // made the way the board makes its button hints (func_800E1F70). Its text is message TURN_COUNTER_MESSAGE (one the
+    // board never shows), which replaceMessage() replaces while the counter loads it, so the game keeps its own copy.
+    //
+    // It's shown on the board, except while the pause menu is open, and lowered while the scrolling map is (see
+    // onStart(); the game pauses for its other menus too, like the item screen and the full map, so 0x800D6A90 can't
+    // tell them apart). Whenever what it should show changes (its text or place, or showing it at all), its window is
+    // closed and another made. That's at most a few times a turn, and simpler than changing a window.
+    //
+    // It's kept up from inside a game process (HuPrcVSleep), one call to the game at a time. Windows go away when the
+    // game closes them, or all at once when the board does, and their numbers are reused, so a window only counts as
+    // the counter while it still has the sprite group it was made with (window + 108).
+    enum TURN_COUNTER_MESSAGE = 0x2A0D;
+    short turnCounterWindow = -1;
+    short turnCounterGroup;         // Its sprite group
+    string turnCounterShown;        // Its text
+    int turnCounterX, turnCounterY; // Where it is
+    string turnCounterText;         // Text being loaded, or null
+    int turnCounterCovered;         // Screens open that it's hidden for
+    int turnCounterLowered;         // Screens open that it's lowered for
+    bool turnCounterBusy;           // Calls to the game are in progress
+
+    short windowGroup(short w) { return (windowAddress(w) + 108).val!short; }
+
+    void maintainTurnCounter() {
+        if (turnCounterBusy || stateAllocating) return;
+        if ((0x8004F074.val!uint & 0xFFFF0000) != 0x27BD0000) return; // HuPrcVSleep isn't "addiu sp, sp, ..."
+        if (!isBoardScene() || 0x800A2150.val!ubyte == 0) return;      // Not on the board, or no windows set up
+
+        auto exists = turnCounterWindow >= 0 && windowGroup(turnCounterWindow) == turnCounterGroup;
+        if (!exists) turnCounterWindow = -1;
+
+        // What it should show. The text is centered on the screen (320 pixels wide, so the same way as a 5-pixel "/" on
+        // pixels 158-162): func_8005A968 takes the window's left side, and the text starts 4 pixels right of it. The
+        // text is from 4 lines above y to 6 below: level with the top players' panels, or on the scrolling map, below
+        // its up arrow (down to line 31).
+        auto wanted = data.currentTurn >= 1 && turnCounterCovered == 0;
+        auto text = "<YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET>";
+        auto x = (321 - messageTextWidth(text)) / 2 - 4;
+        auto y = turnCounterLowered > 0 ? 40 : 15;
+
+        if (exists) {
+            if (wanted && text == turnCounterShown && x == turnCounterX && y == turnCounterY) return;
+            turnCounterBusy = true;
+            auto w = turnCounterWindow;
+            turnCounterWindow = -1;
+            0x8005F364.jal(w, { turnCounterBusy = false; }); // Closed; made again later if it's wanted
+            return;
+        }
+        if (!wanted) return;
+
+        // func_80060394(1, short[2]* size, message) measures the window the text needs (padding included), and
+        // func_8005A968(x, y, w, h, 0, 0) makes it, with (x, y) its top left
+        turnCounterBusy = true;
+        turnCounterText = text; // Replaces the message while it's measured and set
+        gpr.sp -= 32;
+        0x80060394.jal(1, gpr.sp + 24, TURN_COUNTER_MESSAGE, {
+            auto width = (gpr.sp + 24).val!short, height = (gpr.sp + 26).val!short;
+            (gpr.sp + 16).val!uint = 0; // The 5th and 6th arguments
+            (gpr.sp + 20).val!uint = 0;
+            0x8005A968.jal(x, y, width, height, (uint result) {
+                gpr.sp += 32;
+                auto w = cast(short)result;
+                0x8005BDFC.jal(w, 0, {                     // Text appears at once, not letter by letter
+                    0x8005BEE0.jal(w, 0, {                 // No window frame or background
+                        0x8005B63C.jal(w, 0, 0x20000, {    // Outlined text
+                            0x8005B43C.jal(w, TURN_COUNTER_MESSAGE, -1, -1, {
+                                turnCounterText = null;
+                                turnCounterWindow = w;
+                                turnCounterGroup = windowGroup(w);
+                                turnCounterShown = text;
+                                turnCounterX = x;
+                                turnCounterY = y;
+                                turnCounterBusy = false;
+                            });
+                        });
+                    });
+                });
+            });
+        });
     }
 
     void showSuperstarsMessage() {
