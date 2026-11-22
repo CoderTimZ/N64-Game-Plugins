@@ -1802,7 +1802,8 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         if (!config.bingoPlayerNames) return null;
         auto n = c in characterToName;
         if (!n) return null;
-        return characterColor(c) ~ *n ~ (reset ? "<RESET>" : "");
+        auto name = (*n).toUpper == "CPU" ? c.fullName : *n; // CPUs go by their character (Mario, Daisy, DK, ...)
+        return characterColor(c) ~ name ~ (reset ? "<RESET>" : "");
     }
 
     enum WINDOW_SIZE = 0x27C;
