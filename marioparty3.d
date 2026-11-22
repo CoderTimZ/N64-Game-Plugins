@@ -1952,6 +1952,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         auto p = Ptr!char(address);
         string text;
         for (size_t i = 0; p[i] != '\0' && i < 4096; i++) text ~= p[i];
+        markUsed(w, text); // Its own colors, even with no plugin colors in it (like a custom board's star shop price)
         if (!text.canFind('\x18')) return;
         auto colored = colorize(w, text);
         foreach (i, c; colored) p[i] = c;
