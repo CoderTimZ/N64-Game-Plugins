@@ -2110,6 +2110,12 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             auto width = (gpr.sp + 24).val!short, height = (gpr.sp + 26).val!short;
             (gpr.sp + 16).val!uint = 0; // The 5th and 6th arguments
             (gpr.sp + 20).val!uint = 0;
+            // func_8005A968 takes the first free window from 2 up (window + 94 is -1 when free). Custom board events
+            // can update a window by its number (like Thwomp Toll's window 2), so the counter takes the last free one
+            // instead, which leaves the game's windows the numbers they'd have without it.
+            uint slot = 0;
+            foreach_reverse (i; 2..16) if (!slot && (windowAddress(cast(short)i) + 94).val!short == -1) slot = i;
+            if (slot) 0x8005A9AC.onExecOnce({ gpr.fp = slot; }); // After the search starts at 2
             0x8005A968.jal(x, y, width, height, (uint result) {
                 gpr.sp += 32;
                 auto w = cast(short)result;
