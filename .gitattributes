@@ -1,0 +1,2 @@
+# Raw texture data, compiled into the plugins: never change its bytes
+*.rgba binary
