@@ -1067,7 +1067,25 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
         });
     }
 
-    void sendPlayerInfo(Player player) {
+    override bool overrideItems(Player p, string[] names) {
+        Item[] items;
+        try {
+            items = names.map!(n => n.to!Item).array;
+        } catch (ConvException) {
+            return false;
+        }
+        if (items.canFind(Item.NONE)) return false;
+
+        if (config.carryThreeItems) {
+            p.state.items = items; // The game's own slot stays empty: the hooks in onStart() hand out these
+        } else {
+            if (items.length > 1) return false;
+            p.data.item = (items.empty ? Item.NONE : items[0]);
+        }
+        return true;
+    }
+
+    override void sendPlayerInfo(Player player) {
         struct PlayerInfo {
             immutable type = "player";
             int player;
@@ -1075,6 +1093,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
             int stars;
             int coins;
             Item[] items;
+            int itemSlots;
             PanelColor color;
             bool cpu;
         }
@@ -1085,6 +1104,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory, Player) {
         msg.stars = player.data.stars;
         msg.coins = player.data.coins;
         msg.items = (config.carryThreeItems ? player.state.items : [player.data.item]);
+        msg.itemSlots = (config.carryThreeItems ? 3 : 1);
         msg.color = player.cachedColor;
         msg.cpu = player.isCPU;
         

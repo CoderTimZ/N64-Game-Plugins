@@ -290,7 +290,7 @@ class MarioParty1 : MarioParty!(Config, State, Memory, Player) {
         });
     }
 
-    void sendPlayerInfo(Player player) {
+    override void sendPlayerInfo(Player player) {
         struct PlayerInfo {
             immutable type = "player";
             int player;

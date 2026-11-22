@@ -2347,7 +2347,24 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
         }
     }
 
-    void sendPlayerInfo(Player player) {
+    override bool isPlayable(Character c) const {
+        return c >= Character.MARIO && c <= Character.DAISY;
+    }
+
+    override bool overrideItems(Player p, string[] names) {
+        Item[] items;
+        try {
+            items = names.map!(n => n.to!Item).array;
+        } catch (ConvException) {
+            return false;
+        }
+        if (items.canFind(Item.NONE)) return false;
+
+        iota(3).each!(i => p.data.items[i] = (i < items.length ? items[i] : Item.NONE)); // The game keeps them packed
+        return true;
+    }
+
+    override void sendPlayerInfo(Player player) {
         struct PlayerInfo {
             immutable type = "player";
             int player;
@@ -2355,6 +2372,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory, Player) {
             int stars;
             int coins;
             Item[] items;
+            int itemSlots = 3;
             PanelColor color;
             bool cpu;
         }

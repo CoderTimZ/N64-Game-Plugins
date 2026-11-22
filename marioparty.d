@@ -300,6 +300,15 @@ struct BingoCard {
     Character[] characters;
 }
 
+// A bingo admin's correction to a player (the Bingo page's player panels). Names are the games' enum names.
+struct PlayerOverride {
+    int player;      // 1-4
+    string chr;
+    int stars;
+    int coins;
+    string[] items;  // Without NONE, in slot order
+}
+
 class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
     alias typeof(Memory.currentScene) Scene;
 
@@ -342,7 +351,18 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
     abstract bool disableTeamControl() const;
     abstract bool isBoardScene(Scene scene) const;
     abstract bool isScoreScene(Scene scene) const;
+    abstract void sendPlayerInfo(Player player);
     bool isBoardScene() const { return isBoardScene(data.currentScene); }
+
+    // Characters a player can be in this game (Waluigi and Daisy are new in Mario Party 3)
+    bool isPlayable(Character c) const {
+        return c >= Character.MARIO && c <= Character.DK;
+    }
+
+    // Sets a player's items from a PlayerOverride, or returns false (changing nothing) if they aren't valid for this game
+    bool overrideItems(Player p, string[] items) {
+        return items.empty;
+    }
     bool isScoreScene() const { return isScoreScene(data.currentScene); }
 
     auto team(const Player p) const {
@@ -556,7 +576,51 @@ class MarioParty(Config, State, Memory, Player) : Game!(Config, State) {
                     }
                 }
             });
+        } else if (json.object["type"].str == "player-override") {
+            overridePlayer(json.fromJSON!PlayerOverride());
         }
+    }
+
+    // A bingo admin fixing a mistake: sets the player's coins, stars, items and character in the game
+    void overridePlayer(PlayerOverride o) {
+        if (o.player < 1 || o.player > players.length) return warning("Ignoring override for player ", o.player);
+        auto p = players[o.player - 1];
+
+        Character chr;
+        try {
+            chr = o.chr.to!Character;
+        } catch (ConvException) {
+            chr = Character.UNDEFINED;
+        }
+        if (!isPlayable(chr)) return warning("Ignoring override for P", o.player, ": invalid character ", o.chr);
+        if (o.coins < 0 || o.coins > 999) return warning("Ignoring override for P", o.player, ": invalid coins ", o.coins);
+        if (o.stars < 0 || o.stars > 99) return warning("Ignoring override for P", o.player, ": invalid stars ", o.stars);
+        if (o.items.length > 3 || !overrideItems(p, o.items)) {
+            return warning("Ignoring override for P", o.player, ": invalid items ", o.items);
+        }
+
+        auto old = p.data.character;
+        p.data.character = chr; // Just the game's: a character set in the config still wins (see onStart())
+
+        p.data.coins = cast(ushort)o.coins;
+        p.data.stars = cast(typeof(p.data.stars))o.stars;
+        if (p.data.maxCoins < p.data.coins) p.data.maxCoins = p.data.coins;
+
+        static if (is(typeof(config.teamScores))) {
+            if (config.teamScores) {
+                teammates(p).each!((t) {
+                    t.data.coins = p.data.coins;
+                    t.data.stars = p.data.stars;
+                    if (t.data.maxCoins < t.data.coins) t.data.maxCoins = t.data.coins;
+                });
+            }
+        }
+
+        info("Bingo admin override for P", o.player, ": ", chr, (chr != old ? " (was " ~ old.to!string ~ ")" : ""),
+            ", ", o.stars, " stars, ", o.coins, " coins, items ", o.items);
+
+        saveState();
+        players.each!(t => sendPlayerInfo(t));
     }
 
     void onTurn(float turn) {
