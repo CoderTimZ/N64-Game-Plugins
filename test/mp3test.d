@@ -214,6 +214,8 @@ class TestMarioParty3 : MarioParty3 {
         return [
             Test("smoke", &smoke, 60 * 60),
             Test("singleUseBattleSpaces", &singleUseBattleSpaces, 60 * 60 * 20),
+            Test("autoStartNextBoard", &autoStartNextBoard, 60 * 60 * 30),
+            Test("flagReaders", &flagReaders, 60 * 60 * 20),
             Test("explore", &explore, 60 * 60 * 30),
             Test("serve", &serve, ulong.max),
         ];
@@ -444,5 +446,88 @@ class TestMarioParty3 : MarioParty3 {
 
         d.screenshot("singleUseBattleSpaces");
         d.check(problems.empty, problems.join("; "));
+    }
+
+    // autoStartNextBoard (run with test/mp3-config-autostart.json, which also has Lucky Spaces and
+    // preventRepeatMiniGames): the game ends after this turn, and the next board starts with the plugin's
+    // start-of-game resets done, like a game started from the castle grounds: no Lucky Spaces landed on, the mini-game
+    // order started over, and the board's own custom spaces.
+    void autoStartNextBoard() {
+        d.check(config.autoStartNextBoard && config.luckySpaceRatio > 0 && config.preventRepeatMiniGames,
+                "Run this with test/mp3-config-autostart.json");
+        string[] problems;
+
+        setUp(STATE_CHILLY_TURN_1);
+        waitForBoard();
+        data.totalTurns = data.currentTurn; // This turn is the last
+        players.each!(p => p.state.luckySpaceCount = 5);
+        saveState();
+        auto board = data.currentBoard;
+        d.note("Last turn on board ", board, ": ", describe());
+
+        Scene[] scenes;
+        Scene scene = data.currentScene;
+        auto start = d.frame;
+        d.waitUntil(() {
+            if (data.currentScene != scene) {
+                scene = data.currentScene;
+                if (scene != Scene.TRANSITION) scenes ~= scene;
+                d.note("Scene ", scene, ": ", describe());
+            }
+            if (!isBoardScene() && (d.frame - start) % 90 < 10) d.hold(0, Pad.A); else d.hold(0, 0);
+            return isBoardScene() && data.currentBoard != board;
+        }, "the next board", 60 * 60 * 25);
+        d.release(0);
+        waitForBoard();
+        d.wait(120);
+        d.note("Next board: ", describe(), "; scenes ", scenes);
+        d.screenshot("autoStartNextBoard");
+
+        if (!scenes.canFind(Scene.FINAL_RESULTS)) problems ~= "no final results: " ~ scenes.to!string;
+        if (data.currentBoard != (board + 1) % 6) problems ~= format("board %d after board %d", data.currentBoard, board);
+        if (data.currentTurn != 1) problems ~= format("the next game starts on turn %d", data.currentTurn);
+        foreach (p; players) {
+            if (p.state.luckySpaceCount != 0) {
+                problems ~= format("P%d's Lucky Space count is still %d", p.index + 1, p.state.luckySpaceCount);
+            }
+        }
+        if (state.miniGameQueue.byValue.any!(q => !q.empty)) problems ~= "the mini-game order wasn't started over";
+        if (state.spacesBoard != data.currentBoard) {
+            problems ~= format("the custom spaces are board %d's, not board %d's", state.spacesBoard, data.currentBoard);
+        }
+        d.check(problems.empty, problems.join("; "));
+    }
+
+    // Logs the code that reads and writes the save's flag bytes that unlockEverything changes (GwCommon.flag[5] and
+    // [6]), and the calls that set or clear flags and encode the save, while the game plays to its end (the final
+    // results save the game)
+    void flagReaders() {
+        int[Address] readers;
+        foreach (Address a; [0x800CC158, 0x800CC159]) {
+            a.val!ubyte.onRead((ref ubyte v, Address pc) { readers[pc]++; });
+            a.val!ubyte.onWrite((ref ubyte v, Address pc) {
+                d.note("WRITE ", a.to!string(16), " = ", v.to!string(16), " from ", pc.to!string(16));
+            });
+        }
+        0x80035EF4.onExec({ d.note("CALL _SetFlag(", cast(int)gpr.a0, ") from ", (cast(uint)gpr.ra).to!string(16)); });
+        0x80035F44.onExec({ d.note("CALL _ClearFlag(", cast(int)gpr.a0, ") from ", (cast(uint)gpr.ra).to!string(16)); });
+        0x8004F5A4.onExec({
+            d.note("CALL SaveFileEncode(", (cast(uint)gpr.a0).to!string(16), ", ", (cast(uint)gpr.a1).to!string(16), ")");
+        });
+
+        setUp(STATE_CHILLY_TURN_1);
+        waitForBoard();
+        data.totalTurns = data.currentTurn; // This turn is the last
+        auto start = d.frame;
+        ulong resultsAt;
+        d.waitUntil(() {
+            if (data.currentScene == Scene.FINAL_RESULTS && !resultsAt) resultsAt = d.frame;
+            auto press = data.currentScene != Scene.FINAL_RESULTS && (d.frame - start) % 90 < 10;
+            d.hold(0, press ? Pad.A : 0);
+            return resultsAt && d.frame - resultsAt > 60 * 30;
+        }, "the final results", 60 * 60 * 15);
+        d.release(0);
+        foreach (pc; readers.keys.sort) d.note("READ from ", pc.to!string(16), " x", readers[pc]);
+        d.note("Flags now ", 0x800CC158.val!ubyte.to!string(16), " ", 0x800CC159.val!ubyte.to!string(16));
     }
 }

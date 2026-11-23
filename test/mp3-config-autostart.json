@@ -1,0 +1,5 @@
+{
+    "autoStartNextBoard": true,
+    "luckySpaceRatio": 0.25,
+    "preventRepeatMiniGames": true
+}

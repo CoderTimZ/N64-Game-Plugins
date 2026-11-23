@@ -419,6 +419,11 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             config.battleCoinDistribution = config.battleCoinDistribution[0..4];
         }
 
+        if (config.battleCoinDistribution.any!(e => e < 0.0)) {
+            config.battleCoinDistribution = DEFAULT_BATTLE_DIST.dup;
+            throw new Exception("battleCoinDistribution has a negative fraction");
+        }
+
         if (fixRoundingError(config.battleCoinDistribution.sum) > 1.0) {
             config.battleCoinDistribution = DEFAULT_BATTLE_DIST.dup;
             throw new Exception("battleCoinDistribution.sum > 1.0");
@@ -1162,8 +1167,20 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         // TODO: Not actually everything. Expand later.
         if (config.unlockEverything) {
             0x80035C00.onExecDone({ gpr.a0 |= 0xFF; });                        // Mini-Games (800CC0DE - 800CC0E5)
-            0x800CC158.val!ubyte.onRead((ref ubyte flags) { flags |= 0x20; }); // Super Hard
-            0x800CC159.val!ubyte.onRead((ref ubyte flags) { flags |= 0x02; }); // Waluigi's Island
+            // Super Hard and Waluigi's Island are bits in the save's flags (GwCommon.flag[5] and [6]), which are made
+            // to read as set. Not for the code that changes other flags in those bytes (_SetFlag and _ClearFlag read,
+            // change and write back the whole byte) or that writes the save (the saveEncode and saveload code), so the
+            // unlocks never become part of the save.
+            bool keepsSave(Address pc) {
+                return (pc >= 0x80035EF4 && pc < 0x80035F98)  // _SetFlag, _ClearFlag
+                    || (pc >= 0x8004F290 && pc < 0x80050F50); // saveEncode, saveload
+            }
+            0x800CC158.val!ubyte.onRead((ref ubyte flags, Address pc) { // Super Hard
+                if (!keepsSave(pc)) flags |= 0x20;
+            });
+            0x800CC159.val!ubyte.onRead((ref ubyte flags, Address pc) { // Waluigi's Island
+                if (!keepsSave(pc)) flags |= 0x02;
+            });
         }
 
         if (config.mapScrollSpeedMultiplier != 1.0) {
