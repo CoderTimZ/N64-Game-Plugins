@@ -160,6 +160,8 @@ union PlayerData {
     mixin Field!(0x0E, ushort, "stars");
     mixin Field!(0x10, ushort, "chain");
     mixin Field!(0x12, ushort, "space");
+    mixin Field!(0x14, ushort, "nextChain"); // Where the player moves next
+    mixin Field!(0x16, ushort, "nextSpace");
     mixin Field!(0x19, Item, "item");
     mixin Field!(0x1B, PanelColor, "color");
     mixin Field!(0x28, ushort, "miniGameCoins");
@@ -838,7 +840,12 @@ extern (C) {
     }
 
     int startup() {
-        pluginFactory = (name, hash) => new MarioParty2(name, hash);
+        version (TestDriver) {
+            import me.timz.n64.mp2test : TestMarioParty2;
+            pluginFactory = (name, hash) => new TestMarioParty2(name, hash); // The test build (test/mp2test.d)
+        } else {
+            pluginFactory = (name, hash) => new MarioParty2(name, hash);
+        }
 
         return 0;
     }

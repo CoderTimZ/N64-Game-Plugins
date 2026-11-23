@@ -118,6 +118,12 @@ class TestMarioParty1 : MarioParty1 {
         super.sendPlayerInfo(player);
     }
 
+    // Tests never connect to a Bingo page, whatever the config says
+    override void loadConfig() {
+        super.loadConfig();
+        config.bingoURL = "";
+    }
+
     override void onStart() {
         super.onStart();
         driver = new TestDriver(tests());
@@ -662,7 +668,7 @@ class TestMarioParty1 : MarioParty1 {
     }
 
     // Keeps the emulator open for commands: runs each batch of steps written to TestCommands/mp1.txt (by
-    // test/send-mp1-command.ps1; the first line is "# <id>"), logs "READY <id>" and pauses until the next batch.
+    // test/send-command.ps1; the first line is "# <id>"), logs "READY <id>" and pauses until the next batch.
     // "quit" ends it, and "test:<name>" runs one of the tests.
     void serve() {
         d.note("READY 0");

@@ -245,7 +245,7 @@ final class TestDriver {
         note("SCREENSHOT ", label, ": ", newest.empty ? "?" : absolutePath(newest));
     }
 
-    // Pauses the emulator until a command file changes (written by test/send-mp1-command.ps1), then returns its text.
+    // Pauses the emulator until a command file changes (written by test/send-command.ps1), then returns its text.
     // A thread watches the file and resumes the emulator; the game doesn't run while it waits.
     string waitForCommand(string file) {
         import core.atomic : atomicLoad, atomicStore;

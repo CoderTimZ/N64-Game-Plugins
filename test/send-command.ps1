@@ -1,17 +1,18 @@
-# Sends steps to RMG running the "serve" test (.\test\run-mp1-tests.ps1 -Serve), waits for them to finish, and prints
-# what they logged. Steps are as in runSteps() in test/mp1test.d, e.g.:
+# Sends steps to RMG running a game's "serve" test (.\test\run-tests.ps1 -Game <game> -Serve), waits for them to
+# finish, and prints what they logged. Steps are as in runSteps() in test/mp1test.d or test/mp2test.d, e.g.:
 #
-#   .\test\send-mp1-command.ps1 "load:TestStates/mp1-setup-map.st A wait200 shot"
-#   .\test\send-mp1-command.ps1 "test:customSpaces"
-#   .\test\send-mp1-command.ps1 quit
+#   .\test\send-command.ps1 "load:TestStates/mp1-setup-map.st A wait200 shot"
+#   .\test\send-command.ps1 -Game mp2 "test:teamDuels"
+#   .\test\send-command.ps1 quit
 param(
-    [Parameter(Mandatory)][string]$Steps,
+    [Parameter(Mandatory, Position = 0)][string]$Steps,
+    [ValidateSet("mp1", "mp2")][string]$Game = "mp1",
     [string]$Rmg = "C:\Users\timzi\Code\RMG-Test",
     [int]$TimeoutSeconds = 600
 )
 
 $ErrorActionPreference = "Stop"
-$log = Join-Path $Rmg (Get-Content "$Rmg\TestCommands\mp1-log.txt" -Raw).Trim()
+$log = Join-Path $Rmg (Get-Content "$Rmg\TestCommands\$Game-log.txt" -Raw).Trim()
 $id = [guid]::NewGuid().ToString("N").Substring(0, 8)
 
 # RMG may still be starting: wait for the serve test to say it's ready
@@ -22,7 +23,7 @@ while (-not ((Test-Path $log) -and (Select-String -Path $log -Pattern "READY" -Q
 }
 $before = @(Get-Content $log).Count
 
-Set-Content "$Rmg\TestCommands\mp1.txt" "# $id`n$Steps"
+Set-Content "$Rmg\TestCommands\$Game.txt" "# $id`n$Steps"
 
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 while ((Get-Date) -lt $deadline) {
