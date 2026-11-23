@@ -4,7 +4,7 @@ module me.timz.n64.mp1test;
 version (TestDriver):
 
 import me.timz.n64.marioparty;
-import me.timz.n64.marioparty2; // Mario Party 1's module (marioparty1.d)
+import me.timz.n64.marioparty1;
 import me.timz.n64.plugin;
 import me.timz.n64.testdriver;
 import std.algorithm;

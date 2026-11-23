@@ -1,4 +1,4 @@
-module me.timz.n64.marioparty2;
+module me.timz.n64.marioparty1;
 
 import me.timz.n64.marioparty;
 import me.timz.n64.plugin;
