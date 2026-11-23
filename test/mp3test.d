@@ -216,6 +216,8 @@ class TestMarioParty3 : MarioParty3 {
             Test("singleUseBattleSpaces", &singleUseBattleSpaces, 60 * 60 * 20),
             Test("autoStartNextBoard", &autoStartNextBoard, 60 * 60 * 30),
             Test("flagReaders", &flagReaders, 60 * 60 * 20),
+            Test("balanceSuperHardCPU", &balanceSuperHardCPU, 60 * 60 * 20),
+            Test("logJamMistakes", &logJamMistakes, 60 * 60 * 20),
             Test("frigidBridgesFps", &frigidBridgesFps, 60 * 60 * 20),
             Test("explore", &explore, 60 * 60 * 30),
             Test("serve", &serve, ulong.max),
@@ -530,6 +532,146 @@ class TestMarioParty3 : MarioParty3 {
         d.release(0);
         foreach (pc; readers.keys.sort) d.note("READ from ", pc.to!string(16), " x", readers[pc]);
         d.note("Flags now ", 0x800CC158.val!ubyte.to!string(16), " ", 0x800CC159.val!ubyte.to!string(16));
+    }
+
+    // balanceSuperHardCPU in Log Jam (run with test/mp3-config-logjam.json, which blocks every other 2 vs 2
+    // mini-game): every player is a Super Hard computer, and the panels are kept 2 blue and 2 red so the round ends
+    // with Log Jam. Logs the code that reads each player's difficulty, by scene, and the value it gets (after the
+    // plugin's change); in Log Jam, every read should get Easy.
+    void balanceSuperHardCPU() {
+        d.check(config.balanceSuperHardCPU, "Run this with test/mp3-config-logjam.json");
+        int[string] reads;
+        string[] problems;
+        foreach (p; players) {
+            p.data.cpuDifficulty.onRead((ref ubyte v, Address pc) {
+                auto key = format("%s from %08X: %s", data.currentScene, pc, cast(CPUDifficulty)v);
+                if (key !in reads) d.note("READ P", p.index + 1, " ", key);
+                reads[key]++;
+                if (data.currentScene == Scene.LOG_JAM && v != CPUDifficulty.EASY) {
+                    problems ~= format("Log Jam read P%d's difficulty as %s (from %08X)", p.index + 1,
+                                       cast(CPUDifficulty)v, pc);
+                }
+            });
+        }
+
+        setUp(STATE_CHILLY_TURN_1);
+        waitForBoard();
+        players.each!(p => p.data.cpuDifficulty = CPUDifficulty.SUPER_HARD);
+        Scene[] scenes;
+        Scene scene = data.currentScene;
+        auto start = d.frame;
+        d.waitUntil(() {
+            if (data.currentScene != scene) {
+                scene = data.currentScene;
+                if (scene != Scene.TRANSITION) scenes ~= scene;
+                d.note("Scene ", scene);
+            }
+            if (isBoardScene() && !scenes.canFind(Scene.LOG_JAM)) {
+                foreach (p; players) {
+                    auto color = p.index < 2 ? PanelColor.BLUE : PanelColor.RED;
+                    p.data.color = color;
+                    p.panel.color = color;
+                }
+            }
+            auto press = !isBoardScene() && (d.frame - start) % 90 < 10;
+            d.hold(0, press ? Pad.A : 0);
+            return scenes.canFind(Scene.LOG_JAM) && isBoardScene();
+        }, "Log Jam to be played", 60 * 60 * 15);
+        d.release(0);
+        d.note("Scenes ", scenes);
+        foreach (key; reads.keys.sort) d.note("  ", key, " x", reads[key]);
+        d.check(scenes.canFind(Scene.LOG_JAM), "Log Jam wasn't played: " ~ scenes.to!string);
+        d.check(reads.keys.any!(k => k.startsWith("LOG_JAM")), "Log Jam never read a difficulty");
+        d.check(problems.empty, problems.uniq.join("; "));
+    }
+
+    // Counts the computers' right and wrong presses in Log Jam, with every player a Super Hard computer (run with
+    // test/mp3-config-logjam.json for balanceSuperHardCPU, which makes them Easy, or test/mp3-config-logjam-off.json
+    // without it). Log Jam's two press decisions store the right button at 0x801089B8 and 0x80108C18, and a wrong one
+    // at 0x80108A04 and 0x80108C64 (for the player whose data is in s1 and s0 there).
+    void logJamMistakes() {
+        string[Address] presses; // By player data: "R" or "W" for each press, in order
+        auto record = (Address player, string press) {
+            if (data.currentScene == Scene.LOG_JAM) presses[player] ~= press;
+        };
+        0x801089B8.onExec({ record(gpr.s1, "R"); });
+        0x80108C18.onExec({ record(gpr.s0, "R"); });
+        0x80108A04.onExec({ record(gpr.s1, "W"); });
+        0x80108C64.onExec({ record(gpr.s0, "W"); });
+        // Before a wrong press, each decision checks a computer flag (offset 0x1E) in another struct: s0 for the
+        // player in s1, and s2 for the player in s0
+        int[string] checks;
+        auto check = (Address player, Address other) {
+            if (data.currentScene != Scene.LOG_JAM) return; // Other code is at these addresses outside Log Jam
+            auto key = format("player %08X (port %d, computer %d) checks %08X: %d", player, (player + 26).val!short,
+                              (player + 30).val!short, other, (other + 30).val!short);
+            if (key !in checks) d.note("CHECK ", key);
+            checks[key]++;
+        };
+        0x8010896C.onExec({ check(gpr.s1, gpr.s0); });
+        0x80108BCC.onExec({ check(gpr.s0, gpr.s2); });
+
+        setUp(STATE_CHILLY_TURN_1);
+        waitForBoard();
+        players.each!(p => p.data.cpuDifficulty = CPUDifficulty.SUPER_HARD);
+        // N64TEST_ARG: the players (1-4) to make human, like "1,3"
+        foreach (n; d.arg.split(",").filter!(a => !a.empty).map!(a => a.strip.to!int)) {
+            players[n - 1].data.flags = players[n - 1].data.flags & ~1;
+        }
+        d.note("Players: ", players.map!(p => format("P%d port %d %s", p.index + 1, p.data.controller,
+                                                       p.isCPU ? "computer" : "human")).join(", "));
+        bool played;
+        auto start = d.frame;
+        d.waitUntil(() {
+            if (data.currentScene == Scene.LOG_JAM) played = true;
+            if (isBoardScene() && !played) {
+                foreach (p; players) {
+                    auto color = p.index < 2 ? PanelColor.BLUE : PanelColor.RED;
+                    p.data.color = color;
+                    p.panel.color = color;
+                }
+            }
+            auto press = (!isBoardScene() || !players.find!(p => p.data.controller == 0).front.isCPU) && (d.frame - start) % 90 < 10;
+            // On the rules screen, A only pages through the rules: Start starts the mini-game
+            auto button = data.currentScene == Scene.MINI_GAME_RULES ? Pad.START : Pad.A;
+            d.hold(0, press ? button : 0);
+            // Human players' controllers too, everywhere (their turns, and the mini-game roulette)
+            foreach (p; players.filter!(p => !p.isCPU && p.data.controller != 0)) {
+                d.hold(p.data.controller, (d.frame - start) % 90 < 10 ? button : 0);
+            }
+            // In Log Jam, humans press the button their log needs (in their Log Jam data, which is 0x38 bytes per
+            // player from 0x801DA370, in no particular order: the controller port at 0x1A, the button at 0x24: 0 A, 1 B, 2 Z), every 12 frames
+            if (data.currentScene == Scene.LOG_JAM) {
+                foreach (p; players.filter!(p => !p.isCPU)) {
+                    auto found = iota(4).map!(k => cast(Address)(0x801DA370 + k * 0x38))
+                                        .find!(a => (a + 0x1A).val!short == p.data.controller);
+                    if (found.empty) continue;
+                    auto st = found.front;
+                    auto need = (st + 0x24).val!short;
+                    auto b = need == 0 ? Pad.A : need == 1 ? Pad.B : Pad.Z;
+                    d.hold(p.data.controller, d.frame % 12 < 4 ? b : 0);
+                }
+            }
+            return played && isBoardScene();
+        }, "Log Jam to be played", 60 * 60 * 15);
+        foreach (port; 0..4) d.release(port);
+
+        d.check(played, "Log Jam wasn't played");
+        size_t right, wrong, longest;
+        foreach (player; presses.keys.sort) {
+            auto seq = presses[player];
+            auto w = seq.count('W');
+            auto streak = seq.split("R").map!(r => r.length).fold!max(0UL);
+            d.note(format("Player data %08X: %d presses, %d wrong (%.0f%%), at most %d wrong in a row: %s", player,
+                          seq.length, w, 100.0 * w / seq.length, streak, seq));
+            right += seq.length - w;
+            wrong += w;
+            longest = max(longest, streak);
+        }
+        d.note(format("All: %d presses, %d wrong (%.1f%%), at most %d wrong in a row", right + wrong, wrong,
+                      100.0 * wrong / (right + wrong), longest));
+        foreach (key; checks.keys.sort) d.note("  ", key, " x", checks[key]);
+        d.check(right + wrong > 0, "No presses counted");
     }
 
     // Measures the emulator's speed (frames per wall-clock second, with the speed limiter off and on) on the board and in
