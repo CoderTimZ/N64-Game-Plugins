@@ -117,6 +117,7 @@ enum CustomSpace : byte {
 
 union PlayerData {
     ubyte[0x30] _data;
+    mixin Field!(0x00, ubyte, "group"); // Which side of a mini-game or Chance Time the player is on
     mixin Field!(0x01, ubyte, "cpuDifficulty1");
     mixin Field!(0x02, ubyte, "cpuDifficulty2");
     mixin Field!(0x03, ubyte, "controller");
@@ -152,6 +153,13 @@ union Memory {
     mixin Field!(0x800D8100, ushort, "spaceCount");
     mixin Field!(0x800D8108, Ptr!Space, "spaces");
     mixin Field!(0x800D83A8, Arr!(PlayerPanel, 4), "playerPanels");
+    // What the board does once the current space's events are done (func_800587BC(overlay, entrance, fade, sound) asks
+    // for an overlay call): flags (8: call boardRequestOverlay), the fade, whether to play a sound, and the overlay
+    mixin Field!(0x800D86EC, short, "boardRequest");
+    mixin Field!(0x800D86EE, short, "boardRequestFade");
+    mixin Field!(0x800D86F0, short, "boardRequestSound");
+    mixin Field!(0x800D86F4, int, "boardRequestOverlay");
+    mixin Field!(0x800D86F8, short, "boardRequestEntrance");
     mixin Field!(0x800ED5C7, ubyte, "totalTurns");
     mixin Field!(0x800ED5C9, ubyte, "currentTurn");
     mixin Field!(0x800ED5DC, ushort, "currentPlayerIndex");
@@ -419,6 +427,27 @@ class MarioParty1 : MarioParty!(Config, State, Memory) {
                     saveState();
                 }
             });
+
+            // Chance Time comes from an event the board gives each of its ! Spaces, not from the space type, so
+            // converted ! Spaces would do nothing. RunSpaceEvents (0x8004C968, a0 = space, a1 = activation) has the
+            // space in s0 and the activation in s3 here: on landing (3) on a converted ! Space, do what the boards'
+            // own ! Space event does (like 0x800F79BC on Peach's Birthday Cake)
+            0x8004CA28.onExec({
+                if (cast(short)gpr.s3 != 3) return;
+                auto space = cast(short)gpr.s0;
+                if (space < 0 || space >= data.spaceCount || space >= state.spaces.length) return;
+                if (state.spaces[space] != CustomSpace.CHANCE) return;
+                if (data.spaces[space].type != Space.Type.CHANCE) return;
+
+                // The current player is on one side, everyone else on the other
+                players.each!(p => p.data.group = (p.index == data.currentPlayerIndex ? 0 : 1));
+                // func_800587BC(1, 0, 5, 1): Chance Time (scene 1), back to the board after it
+                data.boardRequestOverlay = Scene.CHANCE_TIME;
+                data.boardRequestEntrance = 0;
+                data.boardRequest = 8;
+                data.boardRequestFade = 5;
+                data.boardRequestSound = 1;
+            });
         }
 
         if (config.mapScrollSpeedMultiplier != 1.0) {
@@ -441,7 +470,12 @@ extern (C) {
     }
 
     int startup() {
-        pluginFactory = (name, hash) => new MarioParty1(name, hash);
+        version (TestDriver) {
+            import me.timz.n64.mp1test : TestMarioParty1;
+            pluginFactory = (name, hash) => new TestMarioParty1(name, hash); // The test build (test/mp1test.d)
+        } else {
+            pluginFactory = (name, hash) => new MarioParty1(name, hash);
+        }
 
         return 0;
     }
