@@ -1,0 +1,23 @@
+{
+    "blockWeights": {
+        "NORMAL": 1
+    },
+    "teamScores": true,
+    "teamControl": true,
+    "teamMiniGames": true,
+    "randomBonus": true,
+    "standardSpaceRatio": {
+        "RED": 0.15,
+        "CHANCE": 0.1,
+        "MINI_GAME": 0.1,
+        "HAPPENING": 0.1,
+        "MUSHROOM": 0.05,
+        "BOWSER": 0.05
+    },
+    "mapScrollSpeedMultiplier": 2.0,
+    "preventRepeatMiniGames": true,
+    "blockedMiniGames": [
+        "SLOT_MACHINE",
+        "BUMPER_BALLS"
+    ]
+}

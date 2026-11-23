@@ -28,6 +28,14 @@
       "sourceFiles": ["plugin.d", "marioparty.d", "marioparty3.d"]
     },
     {
+      "name": "mp1-test",
+      "targetType": "dynamicLibrary",
+      "targetName": "MarioParty1",
+      "targetPath": "test-build",
+      "versions": ["TestDriver"],
+      "sourceFiles": ["plugin.d", "marioparty.d", "marioparty1.d", "test/driver.d", "test/mp1test.d"]
+    },
+    {
       "name": "mg64",
       "targetType": "dynamicLibrary",
       "targetName": "MarioGolf64",

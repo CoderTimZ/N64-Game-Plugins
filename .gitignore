@@ -10,3 +10,4 @@
 .directory
 /.dub
 /*.pdb
+/test-build
