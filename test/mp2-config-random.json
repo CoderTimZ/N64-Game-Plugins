@@ -1,0 +1,8 @@
+{
+    "randomItemAndDuelMiniGames": true,
+    "alwaysDuel": true,
+    "blockedMiniGames": [
+        "QUICK_DRAW_CORKS", "SABER_SLASHES", "MUSHROOM_BREW",
+        "GIVE_ME_A_BRAKE", "ROLL_OUT_THE_BARRELS", "COFFIN_CONGESTION"
+    ]
+}

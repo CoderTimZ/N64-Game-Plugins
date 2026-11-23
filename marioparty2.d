@@ -11,6 +11,7 @@ import std.random;
 import std.stdio;
 import std.string;
 import std.traits;
+import std.typecons;
 
 class Config : MarioPartyConfig {
     bool alwaysDuel = false;
@@ -378,7 +379,7 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
         }
 
         if (config.carryThreeItems) {
-            data.currentScene.onWrite((ref Scene scene) { // Reset lucky spaces at start of game
+            data.currentScene.onWrite((ref Scene scene) { // Clear the carried items at the start of a game
                 if (scene == Scene.START_BOARD) {
                     players.each!(p => p.state.items = []);
                     saveState();
@@ -562,15 +563,31 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
                 }
             });
 
+            // The duel's board is read twice: first to start its mini-game, then to unlock it (in the mini-game flags at
+            // 0x800F8C7C, for the mini-game lists): both get the board chosen for it
+            Nullable!Board duelBoard;
             data.currentBoard.onRead((ref Board board, Address pc) {
                 if (!isBoardScene()) return;
+
+                if (pc == 0x80064594) { // Unlock the duel mini-game
+                    if (!duelBoard.isNull) board = duelBoard.get;
+                    duelBoard.nullify();
+                    return;
+                }
 
                 if (state.duelGameQueue.empty) state.duelGameQueue.initialize([EnumMembers!Board], random);
                 if (state.itemGameQueue.empty) state.itemGameQueue.initialize([EnumMembers!Board], random);
 
+                // Skips the boards whose mini-game is blocked (unless all of them are)
+                auto blocked = (MiniGame game) => config.blockedMiniGames.canFind(game);
                 switch (pc) {
-                    case 0x80064574: board = state.duelGameQueue.next(random); break;
-                    case 0x80066428: board = state.itemGameQueue.next(random); break;
+                    case 0x80064574: // Start the duel mini-game
+                        board = state.duelGameQueue.next(random, b => !blocked(DUEL_MINI_GAMES[b]));
+                        duelBoard = board;
+                        break;
+                    case 0x80066428: // Start the Item Space mini-game
+                        board = state.itemGameQueue.next(random, b => !blocked(ITEM_MINI_GAMES[b]));
+                        break;
                     default: return;
                 }
 
@@ -905,6 +922,16 @@ enum Board : ushort {
     MYSTERY = 4,
     BOWSER  = 5
 }
+
+// Each board's duel and Item Space mini-games, by Board (the game's tables at 0x800CCD54 and 0x800CCCFC)
+immutable MiniGame[6] DUEL_MINI_GAMES = [
+    MiniGame.QUICK_DRAW_CORKS, MiniGame.SABER_SLASHES, MiniGame.MUSHROOM_BREW,
+    MiniGame.TIME_BOMB,        MiniGame.PSYCHIC_SAFARI, MiniGame.ROCK_PAPER_MARIO
+];
+immutable MiniGame[6] ITEM_MINI_GAMES = [
+    MiniGame.GIVE_ME_A_BRAKE, MiniGame.ROLL_OUT_THE_BARRELS, MiniGame.COFFIN_CONGESTION,
+    MiniGame.HAMMER_SLAMMER,  MiniGame.MALLET_GO_ROUND,      MiniGame.BOWSER_SLOTS
+];
 
 enum Item : byte {
     NONE            = -1,

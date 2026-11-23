@@ -23,6 +23,7 @@ import std.string;
 enum STATE_WESTERN_TURN_1 = "TestStates/mp2-western-turn1.st";
 
 // Board data the plugin's Memory doesn't have
+enum Address MINI_GAME_FLAGS = 0x800F8C7C; // A bit for each mini-game (MiniGame - 1): unlocked
 enum Address STEPS_LEFT = 0x80100028; // s32: steps left in the moving player's move (counts down on each solid space;
                                       // they land on the one where it reaches 0)
 
@@ -238,6 +239,7 @@ class TestMarioParty2 : MarioParty2 {
         return [
             Test("smoke", &smoke, 60 * 60),
             Test("teamDuels", &teamDuels, 60 * 60 * 20),
+            Test("randomItemAndDuelMiniGames", &randomItemAndDuelMiniGames, 60 * 60 * 40),
             Test("explore", &explore, 60 * 60 * 30),
             Test("serve", &serve, ulong.max),
         ];
@@ -430,6 +432,111 @@ class TestMarioParty2 : MarioParty2 {
                 if (duel) problems ~= "a duel with only P1's teammate on the space: " ~ scenes.to!string;
                 if (team1 != 3 || team2 != 0) problems ~= format("coins changed without a duel: P1's team %+d, the other %+d", team1, team2);
             }
+        }
+        d.check(problems.empty, problems.join("; "));
+    }
+
+    // --- randomItemAndDuelMiniGames ---
+
+    ref ubyte flagByte(MiniGame game) { return (MINI_GAME_FLAGS + (game - 1) / 8).val!ubyte; }
+    bool unlocked(MiniGame game) { return (flagByte(game) & (1 << ((game - 1) % 8))) != 0; }
+    void lock(MiniGame game) { flagByte(game) = cast(ubyte)(flagByte(game) & ~(1 << ((game - 1) % 8))); }
+
+    // The duel mini-game a duel scene plays (each board's duel scene plays its own)
+    static MiniGame duelOf(Scene scene) {
+        switch (scene) {
+            case Scene.WESTERN_LAND_DUEL: return DUEL_MINI_GAMES[Board.WESTERN];
+            case Scene.PIRATE_LAND_DUEL:  return DUEL_MINI_GAMES[Board.PIRATE];
+            case Scene.HORROR_LAND_DUEL:  return DUEL_MINI_GAMES[Board.HORROR];
+            case Scene.SPACE_LAND_DUEL:   return DUEL_MINI_GAMES[Board.SPACE];
+            case Scene.MYSTERY_LAND_DUEL: return DUEL_MINI_GAMES[Board.MYSTERY];
+            case Scene.BOWSER_LAND_DUEL:  return DUEL_MINI_GAMES[Board.BOWSER];
+            default:                      return cast(MiniGame)0;
+        }
+    }
+
+    // Waits for a player's turn to end, pressing A now and then off the board (for the screens around a mini-game),
+    // and returns the scenes it went through
+    Scene[] playTurn(uint player) {
+        Scene[] scenes;
+        Scene scene = data.currentScene;
+        auto start = d.frame;
+        d.waitUntil(() {
+            if (data.currentScene != scene) {
+                scene = data.currentScene;
+                if (scene != Scene.TRANSITION) scenes ~= scene;
+                d.note("Scene ", scene, ": ", describe());
+            }
+            if (!isBoardScene() && (d.frame - start) % 90 < 10) d.hold(0, Pad.A); else d.hold(0, 0);
+            return isBoardScene() && data.currentPlayerIndex != player;
+        }, "P" ~ (player + 1).to!string ~ "'s turn to end", 60 * 60 * 10);
+        d.release(0);
+        return scenes;
+    }
+
+    // Waits for a player's turn with the board loaded, pressing A now and then off the board (for the mini-game
+    // between turns)
+    void waitForTurnPressing(uint player) {
+        auto start = d.frame;
+        d.waitUntil(() {
+            if (!isBoardScene() && (d.frame - start) % 90 < 10) d.hold(0, Pad.A); else d.hold(0, 0);
+            return isBoardScene() && data.currentPlayerIndex == player && chainCount > 0;
+        }, "P" ~ (player + 1).to!string ~ "'s turn", 60 * 60 * 10);
+        d.release(0);
+        d.wait(30); // The board's chains are filled in just after they're allocated
+    }
+
+    // randomItemAndDuelMiniGames with blockedMiniGames (run with test/mp2-config-random.json, which blocks Western,
+    // Pirate and Horror Land's duel and item mini-games, and has alwaysDuel): players land on Item Spaces 3 times, and
+    // duel 3 times. Each plays a different one of the other 3 boards' mini-games, and unlocks the one it played (not
+    // Western Land's own).
+    void randomItemAndDuelMiniGames() {
+        d.check(config.randomItemAndDuelMiniGames && config.alwaysDuel && !config.blockedMiniGames.empty,
+                "Run this with test/mp2-config-random.json");
+        string[] problems;
+        MiniGame[] items, duels;
+
+        setUp(STATE_WESTERN_TURN_1);
+        waitForTurnPressing(0);
+        foreach (g; DUEL_MINI_GAMES ~ ITEM_MINI_GAMES) lock(g);
+        auto itemSpaces = reachableSpaces(Space.Type.ITEM);
+        auto blueSpaces = reachableSpaces(Space.Type.BLUE);
+        d.check(!itemSpaces.empty && !blueSpaces.empty, "No Item Space or Blue Space can be reached in one step");
+
+        // P1, P2 and P3 land on an Item Space, then P4, P1 and P2 duel
+        foreach (n, player; [0, 1, 2, 3, 0, 1]) {
+            waitForTurnPressing(player);
+            auto p = players[player];
+            players.each!(q => q.data.coins = 30);
+            p.data.item = Item.NONE;
+            auto duel = n >= 3;
+            if (duel) {
+                moveOnto(players[(player + 1) % 4], blueSpaces[0]);
+                forceLanding(p, blueSpaces[0]);
+            } else {
+                forceLanding(p, itemSpaces[0]);
+            }
+            auto scenes = playTurn(player);
+            d.note("P", player + 1, "'s turn: ", scenes);
+
+            auto played = duel ? scenes.map!(s => duelOf(s)).filter!(g => g != 0).array
+                               : scenes.map!(s => cast(MiniGame)s).filter!(g => ITEM_MINI_GAMES[].canFind(g)).array;
+            if (played.length != 1) {
+                problems ~= format("P%d's turn: not one %s: %s", player + 1, duel ? "duel" : "item mini-game", scenes);
+                continue;
+            }
+            if (duel) duels ~= played[0]; else items ~= played[0];
+            if (!unlocked(played[0])) problems ~= format("%s was played but isn't unlocked", played[0]);
+        }
+
+        d.note("Item mini-games ", items, ", duels ", duels);
+        foreach (g; items ~ duels) {
+            if (config.blockedMiniGames.canFind(g)) problems ~= format("blocked %s was played", g);
+        }
+        if (items.dup.sort.uniq.count != items.length) problems ~= format("an item mini-game repeated: %s", items);
+        if (duels.dup.sort.uniq.count != duels.length) problems ~= format("a duel repeated: %s", duels);
+        foreach (g; DUEL_MINI_GAMES ~ ITEM_MINI_GAMES) {
+            if (unlocked(g) && !(items ~ duels).canFind(g)) problems ~= format("%s is unlocked but wasn't played", g);
         }
         d.check(problems.empty, problems.join("; "));
     }
