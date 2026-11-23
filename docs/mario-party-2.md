@@ -20,6 +20,7 @@ how the file works and describes the options every Mario Party plugin has: `char
 | [`standardSpaceRatio`](#standardspaceratio) | object | `{}` (off) |
 | [`luckySpaceRatio`](#luckyspaceratio) | number | `0` (off) |
 | [`luckySpaceItemChance`](#luckyspaceitemchance) | number | `0.5` |
+| [`revealHiddenBlocksOnRemainingTurns`](#revealhiddenblocksonremainingturns) | number | `0` (off) |
 | [`preventRepeatMiniGames`](#preventrepeatminigames) | `true`/`false` | `false` |
 | [`blockedMiniGames`](#blockedminigames) | list | `[]` |
 | [`randomItemAndDuelMiniGames`](#randomitemandduelminigames) | `true`/`false` | `false` |
@@ -238,6 +239,19 @@ The chance that a Lucky Space gives an item instead of coins.
 
 `0` always gives coins, `1` always gives an item (when the player has room for one). It only matters with
 `luckySpaceRatio`.
+
+### `revealHiddenBlocksOnRemainingTurns`
+
+Shows where the hidden blocks are near the end of the game.
+
+- Type: a whole number of turns
+- Default: `0` (off)
+
+When this many turns or fewer remain, counting the current one, the spaces with the hidden Coin and Star blocks are
+shown in gold. `1` shows them on the final turn only, `5` in the last 5 turns. The blocks still work as usual. It only
+matters when the game's own Hidden Blocks setting is on.
+
+Turning on this option, `standardSpaceRatio` or `luckySpaceRatio` also keeps the hidden blocks off Lucky Spaces.
 
 ## Mini-games
 

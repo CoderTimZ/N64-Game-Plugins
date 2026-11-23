@@ -28,7 +28,7 @@ class Config : MarioPartyConfig {
     float[Space.Type] standardSpaceRatio;
     float luckySpaceRatio = 0;
     float luckySpaceItemChance = 0.5;
-    //bool revealHiddenBlocksOnFinalTurn = false;
+    int revealHiddenBlocksOnRemainingTurns = 0;
     float mapScrollSpeedMultiplier = 1.0;
     bool preventRepeatMiniGames = false;
     MiniGame[] blockedMiniGames;
@@ -70,6 +70,8 @@ class State : MarioPartyState!PlayerState {
     ShuffleStream!Board duelGameQueue;
     CustomSpace[] spaces;
     int spacesBoard = -1; // The board (data.currentBoard) spaces are for (-1: none yet)
+    uint luckySpaceTexturePtr; // The custom spaces' textures, in the board's temporary heap (0: none)
+    uint goldSpaceTexturePtr;
 }
 
 union Chain {
@@ -142,7 +144,7 @@ enum CustomSpace : byte {
     TOAD        = 0x10,
     BABY_BOWSER = 0x11,
     LUCKY       = 0x12,
-//  HIDDEN      = 0x13
+    HIDDEN      = 0x13  // A revealed hidden block (drawn only; never in State.spaces)
 }
 
 union Event {
@@ -197,14 +199,19 @@ union Memory {
     mixin Field!(0x800E18D4, Ptr!Space, "spaces");
     mixin Field!(0x800E18D8, Ptr!Chain, "chains");
     mixin Field!(0x800E18E0, Arr!(Address, 18), "spaceTypeTexturePointers");
+    mixin Field!(0x800E1B68, Arr!(short, 16), "noHiddenBlockSpaces"); // Spaces the board keeps hidden blocks off
+    mixin Field!(0x800E1B88, short, "noHiddenBlockSpaceCount");
     mixin Field!(0x800F851A, byte, "itemMenuOpen");
+    mixin Field!(0x800F8CE1, ubyte, "flags9"); // Flags 0x48-0x4F (_CheckFlag): 0x40 = hidden blocks are on (0x4E)
     mixin Field!(0x800F8CE4, Arr!(short, 4), "finalPlayerRankOrder");
     mixin Field!(0x800F93AA, Board, "currentBoard");
     mixin Field!(0x800F93AE, ushort, "totalTurns");
     mixin Field!(0x800F93B0, ushort, "currentTurn");
     mixin Field!(0x800F93C6, ushort, "currentPlayerIndex");
+    mixin Field!(0x800FA608, short, "coinHiddenBlock"); // The hidden blocks' spaces (-1: none)
     mixin Field!(0x800FA63C, Scene, "currentScene");
     mixin Field!(0x800FD2C0, Arr!(PlayerData, 4), "players");
+    mixin Field!(0x800FD418, short, "starHiddenBlock");
     mixin Field!(0x80101510, Arr!(PlayerPanel, 4), "playerPanels");
     mixin Field!(0x80110180, ubyte, "chancePlayer1");
     mixin Field!(0x80110181, ubyte, "chancePlayer2");
@@ -762,7 +769,8 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
             });
         }
 
-        if (config.luckySpaceRatio > 0 || config.standardSpaceRatio.values.any!(v => v > 0.0)) {
+        if (config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 ||
+            config.standardSpaceRatio.values.any!(v => v > 0.0)) {
             immutable ITEM_WEIGHTS_EARLY = [
                 Item.MUSHROOM:        22,
                 Item.SKELETON_KEY:     9,
@@ -802,48 +810,101 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
                 Item.MAGIC_LAMP:      11
             ];
 
-            Ptr!Address luckySpaceTexturePtr = 0;
-//          Ptr!Address goldSpaceTexturePtr  = 0;
-
-            0x80077AA8.onExecDone({ // Finish making temp heap
-                luckySpaceTexturePtr = 0;
-                //goldSpaceTexturePtr = 0;
-                if (!isBoardScene()) return;
-
+            // The custom spaces' textures go in the board's temporary heap when it's made, and their addresses in the
+            // State, which is saved with each save state (as the heap is). A save state that has none (made without
+            // these options) gets them when the spaces are next drawn.
+            bool allocatingTextures;
+            void allocateSpaceTextures() {
+                if (allocatingTextures) return;
+                immutable needLucky = !state.luckySpaceTexturePtr;
+                immutable needGold = config.revealHiddenBlocksOnRemainingTurns > 0 && !state.goldSpaceTexturePtr;
+                if (!needLucky && !needGold) return;
+                allocatingTextures = true;
+                void allocateGold() {
+                    if (!needGold) {
+                        allocatingTextures = false;
+                        saveState();
+                        return;
+                    }
+                    mallocTemp(GOLD_SPACE_TEXTURE.length + 0x10, (ptr) {
+                        GOLD_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
+                        state.goldSpaceTexturePtr = ptr;
+                        allocatingTextures = false;
+                        saveState();
+                    });
+                }
+                if (!needLucky) {
+                    allocateGold();
+                    return;
+                }
                 mallocTemp(LUCKY_SPACE_TEXTURE.length + 0x10, (ptr) {
                     LUCKY_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
-                    luckySpaceTexturePtr = ptr;
-
-                    /*
-                    if (config.revealHiddenBlocksOnFinalTurn) {
-                        mallocTemp(GOLD_SPACE_TEXTURE.length + 0x10, (ptr) {
-                            GOLD_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
-                            goldSpaceTexturePtr = ptr;
-                        });
-                    }
-                    */
+                    state.luckySpaceTexturePtr = ptr;
+                    allocateGold();
                 });
+            }
+            0x80077AA8.onExecDone({ // Finish making temp heap
+                state.luckySpaceTexturePtr = 0;
+                state.goldSpaceTexturePtr = 0;
+                if (!isBoardScene()) return;
+                allocateSpaceTextures();
             });
+
+            // The hidden blocks (Coin and Star): the game places each on a Blue Space it picks (func_80064DA8),
+            // picking again while the space is -1. Like MP3, they're kept off Lucky Spaces, so a revealed block never
+            // hides one.
+            bool hiddenBlocksOn() { return (data.flags9 & 0x40) != 0; }
+            bool hiddenBlockAllowed(int i, int other) {
+                return i >= 0 && i < data.spaceCount && i != other && data.spaces[i].type == Space.Type.BLUE &&
+                       (i >= state.spaces.length || state.spaces[i] != CustomSpace.LUCKY) &&
+                       !iota(min(cast(int)data.noHiddenBlockSpaceCount, 16)).any!(j => data.noHiddenBlockSpaces[j] == i);
+            }
+            void moveHiddenBlock(ref short block, short other) {
+                if (block < 0 || hiddenBlockAllowed(block, other)) return;
+                auto choices = iota(data.spaceCount).filter!(i => hiddenBlockAllowed(i, other)).array;
+                if (!choices.empty) block = cast(short)choices.choice(random);
+            }
+            // A space it picks that isn't allowed becomes -1, so it picks again (if any space is allowed: if none is,
+            // it would never stop)
+            void rejectHiddenBlock(ref short block, short other) {
+                if (!isBoardScene() || block < 0 || hiddenBlockAllowed(block, other)) return;
+                if (iota(data.spaceCount).any!(i => hiddenBlockAllowed(i, other))) block = -1;
+            }
+            data.coinHiddenBlock.onWrite((ref short block) { rejectHiddenBlock(block, data.starHiddenBlock); });
+            data.starHiddenBlock.onWrite((ref short block) { rejectHiddenBlock(block, data.coinHiddenBlock); });
+            bool revealed(int i) {
+                return remainingTurns() <= config.revealHiddenBlocksOnRemainingTurns && hiddenBlocksOn() &&
+                       (i == data.coinHiddenBlock || i == data.starHiddenBlock);
+            }
 
             0x800540B0.onExec({ // Force high res space textures on full map view
                 if (!isBoardScene()) return;
                 gpr.a0 = false;
             });
+            // The space render function (func_800542FC) draws each type s4 in turn (0x80054810 loops while it's below
+            // 18), with that type's texture (0x80054460, 0x8005448C), at its scale (f20, from a table of 18 for the
+            // board's view), each space s2 whose type (0x800546B4) is s4. Lucky Spaces and revealed hidden blocks are
+            // drawn as types of their own, after the game's, with their own textures at a Blue Space's scale.
             auto selectSpaceTexture = {
                 if (!isBoardScene()) return;
                 switch (gpr.s4) {
-                    case CustomSpace.LUCKY:  gpr.v0 = luckySpaceTexturePtr; break;
-//                  case CustomSpace.HIDDEN: gpr.v0 = goldSpaceTexturePtr;  break;
+                    case CustomSpace.LUCKY:  gpr.v0 = state.luckySpaceTexturePtr; break;
+                    case CustomSpace.HIDDEN: gpr.v0 = state.goldSpaceTexturePtr;  break;
                     default:                                                break;
                 }
             };
             0x80054460.onExecDone(selectSpaceTexture);
             0x8005448C.onExecDone(selectSpaceTexture);
+            0x80054474.onExecDone({ // f20 = the scale, from the table at 108(sp)
+                if (!isBoardScene() || gpr.s4 < CustomSpace.LUCKY) return;
+                fpr.f20 = ((gpr.sp + 108).val!uint + 4 * Space.Type.BLUE).val!float;
+            });
             0x800546B4.onExecDone({
                 if (!isBoardScene()) return;
                 if (gpr.v0 != Space.Type.BLUE) return;
-                if (gpr.s2 >= state.spaces.length) return;
-                if (state.spaces[gpr.s2] == CustomSpace.LUCKY) {
+                if (revealed(cast(int)gpr.s2)) {
+                    gpr.v0 = CustomSpace.HIDDEN;
+                } else if (gpr.s2 < state.spaces.length && state.spaces[gpr.s2] == CustomSpace.LUCKY) {
                     gpr.v0 = CustomSpace.LUCKY;
                 }
             });
@@ -858,6 +919,13 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
                 if (assignCustomSpaces()) {
                     saveState();
                 }
+
+                if (hiddenBlocksOn()) {
+                    moveHiddenBlock(data.coinHiddenBlock, data.starHiddenBlock);
+                    moveHiddenBlock(data.starHiddenBlock, data.coinHiddenBlock);
+                }
+
+                allocateSpaceTextures(); // Calls back into this function when it allocates (allocatingTextures stops it)
             });
             0x80065AA4.onExec({ // Increment lucky space count
                 if (!isBoardScene()) return;
@@ -1354,6 +1422,11 @@ enum Scene : uint {
 
 // The Lucky Space texture: 32x32 pixels, 4 bytes each (red, green, blue, alpha), from textures/mp2-lucky-space.rgba
 immutable ubyte[] LUCKY_SPACE_TEXTURE = cast(immutable(ubyte)[])import("mp2-lucky-space.rgba");
+
+// The gold space (a revealed hidden block) texture: 32x32 pixels, 4 bytes each (red, green, blue, alpha), from
+// textures/mp2-gold-space.rgba: the Blue Space texture, recolored gold.
+immutable ubyte[] GOLD_SPACE_TEXTURE = cast(immutable(ubyte)[])import("mp2-gold-space.rgba");
+static assert(GOLD_SPACE_TEXTURE.length == 32 * 32 * 4);
 
 // The Lucky Spaces column's icon in the detailed results, from textures/mp2-lucky-results-icon.ci8: the Blue Spaces
 // icon (16x16 pixels, a byte each, a palette index) with a white four-leaf clover. Its pixels (256 bytes, for 0x2C in

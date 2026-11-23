@@ -240,6 +240,7 @@ class TestMarioParty2 : MarioParty2 {
             Test("smoke", &smoke, 60 * 60),
             Test("teamDuels", &teamDuels, 60 * 60 * 20),
             Test("randomItemAndDuelMiniGames", &randomItemAndDuelMiniGames, 60 * 60 * 40),
+            Test("revealHiddenBlocks", &revealHiddenBlocks, 60 * 60 * 5),
             Test("explore", &explore, 60 * 60 * 30),
             Test("serve", &serve, ulong.max),
         ];
@@ -419,6 +420,97 @@ class TestMarioParty2 : MarioParty2 {
         d.note(data.spaceCount, " spaces in ", chainCount, " chains; P1 on space ", spaceOf(players[0]));
         d.wait(60);
         d.screenshot("smoke");
+    }
+
+    // revealHiddenBlocksOnRemainingTurns (1, with luckySpaceRatio: test/mp2-config-reveal.json): with the game's Hidden
+    // Blocks on, blocks put on Lucky Spaces are moved to Blue Spaces that aren't, no space is drawn gold before the
+    // last turn, and on the last turn exactly the Coin and Star blocks' spaces are (with the gold texture). Then the
+    // blocks are put on the Blue Spaces nearest P1, for a screenshot.
+    void revealHiddenBlocks() {
+        d.check(config.revealHiddenBlocksOnRemainingTurns == 1 && config.luckySpaceRatio > 0,
+                "Needs test/mp2-config-reveal.json");
+        setUp(STATE_WESTERN_TURN_1, 1, 20);
+        d.waitUntil(() => isBoardScene() && chainCount > 0 && state.spaces.length == data.spaceCount, "the board's spaces",
+                    60 * 60);
+        d.wait(30);
+        d.note("Hidden Blocks ", hiddenBlocksSetting() ? "on" : "off", " in the state; Coin block on space ",
+               data.coinHiddenBlock, ", Star block on ", data.starHiddenBlock);
+        data.flags9 = data.flags9 | 0x40;
+
+        // The spaces drawn gold, and the texture they're drawn with, while watching
+        bool[short] gold;
+        Address goldTexture;
+        bool watching;
+        0x800546B4.onExecDone({
+            if (watching && isBoardScene() && gpr.v0 == CustomSpace.HIDDEN) gold[cast(short)gpr.s2] = true;
+        });
+        0x8005448C.onExecDone({
+            if (watching && isBoardScene() && gpr.s4 == CustomSpace.HIDDEN) goldTexture = cast(Address)gpr.v0;
+        });
+        bool[short] goldFor(ulong frames) {
+            gold = null;
+            goldTexture = 0;
+            watching = true;
+            d.wait(frames);
+            watching = false;
+            return gold;
+        }
+
+        bool lucky(short i) { return i >= 0 && i < state.spaces.length && state.spaces[i] == CustomSpace.LUCKY; }
+        bool blue(short i) { return i >= 0 && i < data.spaceCount && data.spaces[i].type == Space.Type.BLUE; }
+        auto luckySpaces = iota(data.spaceCount).map!(i => cast(short)i).filter!(i => lucky(i)).array;
+        d.check(luckySpaces.length >= 2, "Fewer than 2 Lucky Spaces");
+
+        // Blocks on Lucky Spaces are moved
+        data.coinHiddenBlock = luckySpaces[0];
+        data.starHiddenBlock = luckySpaces[1];
+        d.wait(10);
+        auto coin = data.coinHiddenBlock, star = data.starHiddenBlock;
+        d.note("Blocks put on Lucky Spaces ", luckySpaces[0], " and ", luckySpaces[1], " are now on ", coin, " and ", star);
+        string[] problems;
+        foreach (name, i; ["Coin": coin, "Star": star]) {
+            if (!blue(i) || lucky(i)) problems ~= format("the %s block is on space %d, not a plain Blue Space", name, i);
+        }
+        if (coin == star) problems ~= "both blocks are on the same space";
+
+        // Not shown before the last turn
+        auto before = goldFor(60);
+        d.note("Gold before the last turn: ", before.keys.sort);
+        if (!before.empty) problems ~= format("spaces %s were gold on turn %d of %d", before.keys.sort, data.currentTurn,
+                                              data.totalTurns);
+
+        // Shown on it
+        data.totalTurns = data.currentTurn;
+        auto last = goldFor(60);
+        d.note("Gold on the last turn: ", last.keys.sort, ", texture ", goldTexture.to!string(16));
+        if (last.keys.sort.array != [coin, star].sort.array) {
+            problems ~= format("gold on the last turn: %s, but the blocks are on %d and %d", last.keys.sort, coin, star);
+        }
+        if (!valid(goldTexture)) problems ~= "no gold texture";
+
+        // For the screenshot: the blocks on the plain Blue Spaces nearest P1
+        float[3] position(short i) {
+            Address a = data.spaces.address + i * cast(uint)Space.sizeof;
+            return [(a + 8).val!float, (a + 12).val!float, (a + 16).val!float];
+        }
+        auto p1 = position(spaceOf(players[0]));
+        auto near = iota(data.spaceCount).map!(i => cast(short)i).filter!(i => blue(i) && !lucky(i))
+            .array.sort!((a, b) => distance(position(a), p1) < distance(position(b), p1)).array;
+        data.coinHiddenBlock = near[0];
+        data.starHiddenBlock = near[1];
+        auto shown = goldFor(30);
+        d.note("Blocks moved near P1 to ", near[0], " and ", near[1], "; gold: ", shown.keys.sort);
+        if (shown.keys.sort.array != [near[0], near[1]].sort.array) problems ~= format("gold near P1: %s", shown.keys.sort);
+        d.screenshot("reveal-hidden-blocks");
+
+        d.check(problems.empty, problems.join("; "));
+    }
+
+    bool hiddenBlocksSetting() { return (data.flags9 & 0x40) != 0; }
+
+    static float distance(float[3] a, float[3] b) {
+        import std.math : sqrt;
+        return sqrt((a[0] - b[0]) ^^ 2 + (a[1] - b[1]) ^^ 2 + (a[2] - b[2]) ^^ 2);
     }
 
     // teamScores in duels (with alwaysDuel, so a duel can happen on any turn): P1 lands on a Blue Space with other
