@@ -160,6 +160,9 @@ union Memory {
     mixin Field!(0x800D86F0, short, "boardRequestSound");
     mixin Field!(0x800D86F4, int, "boardRequestOverlay");
     mixin Field!(0x800D86F8, short, "boardRequestEntrance");
+    // Each player's bonus stars, once the board's end has given them: the final results add them to the players'
+    // stars (at 0x800FB0F0), and put the stars back (as they saved them) when the game goes back to the title screen
+    mixin Field!(0x800ED168, Arr!(ushort, 4), "bonusStars");
     mixin Field!(0x800ED5C7, ubyte, "totalTurns");
     mixin Field!(0x800ED5C9, ubyte, "currentTurn");
     mixin Field!(0x800ED5DC, ushort, "currentPlayerIndex");
@@ -232,7 +235,7 @@ class MarioParty1 : MarioParty!(Config, State, Memory) {
     }
 
     override bool isMiniGameScene(Scene scene) const {
-        return Scene.SLOT_MACHINE <= scene && scene <= Scene.BUMPER_BALL_MAZE;
+        return scene == Scene.MEMORY_MATCH || (Scene.SLOT_MACHINE <= scene && scene <= Scene.BUMPER_BALL_MAZE);
     }
 
     override bool isScoreScene(Scene scene) const {
@@ -352,6 +355,17 @@ class MarioParty1 : MarioParty!(Config, State, Memory) {
             data.currentScene.onWrite((ref Scene scene) {
                 if (scene != Scene.BOWSER) coinsEqualizing = false;
             });
+
+            // The final results add each player's own bonus stars to their stars, outside the scenes where teammates'
+            // scores are kept the same. Each player's bonus stars are made their team's, before the board's winner is
+            // shown, so the final results give every teammate the team's.
+            data.currentScene.onWrite((ref Scene scene) {
+                if (scene != Scene.BOARD_WINNER || data.currentScene == Scene.BOARD_WINNER) return;
+                ushort[4] team;
+                foreach (p; players) team[p.index] = cast(ushort)teamMembers(p).map!(t => cast(int)data.bonusStars[t.index]).sum;
+                foreach (i, b; team) data.bonusStars[i] = b;
+            });
+
             0x800F6AF8.onExec({ // func_800F6AF8_BowserSpaceEvent: sets every player's coins to the average
                 if (data.currentScene == Scene.BOWSER) coinsEqualizing = true;
             });
@@ -449,6 +463,13 @@ class MarioParty1 : MarioParty!(Config, State, Memory) {
                 data.boardRequestSound = 1;
             });
         }
+
+        // The Bingo page gets the players' stars with the bonus stars, which the final results add (in the loop
+        // ending at 0x800FB158) outside the scenes where star changes are sent
+        0x800FB158.onExec({
+            if (data.currentScene != Scene.FINAL_RESULTS) return;
+            players.each!(p => sendPlayerInfo(p));
+        });
 
         if (config.mapScrollSpeedMultiplier != 1.0) {
             setUpMapScrollSpeed(0x80058F5C);
@@ -658,7 +679,7 @@ MiniGameType type(MiniGame game) {
 }
 
 enum Scene : uint {
-    BOOT                        =   0,
+    MEMORY_MATCH                =   0, // Also the scene number before the game sets one, at boot
     CHANCE_TIME                 =   1,
     SLOT_MACHINE                =   2,
     BURIED_TREASURE             =   3,
