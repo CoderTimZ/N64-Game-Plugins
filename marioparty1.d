@@ -65,6 +65,7 @@ class PlayerState {
 class State : MarioPartyState!PlayerState {
     ShuffleStream!MiniGame[MiniGameType] miniGameQueue;
     CustomSpace[] spaces;
+    int spacesBoard = -1; // The board (data.currentBoard) spaces are for (-1: none yet)
 }
 
 union Space {
@@ -163,6 +164,7 @@ union Memory {
     // Each player's bonus stars, once the board's end has given them: the final results add them to the players'
     // stars (at 0x800FB0F0), and put the stars back (as they saved them) when the game goes back to the title screen
     mixin Field!(0x800ED168, Arr!(ushort, 4), "bonusStars");
+    mixin Field!(0x800ED5C2, short, "currentBoard");   // GwSystem.curBoardIndex
     mixin Field!(0x800ED5C7, ubyte, "totalTurns");
     mixin Field!(0x800ED5C9, ubyte, "currentTurn");
     mixin Field!(0x800ED5DC, ushort, "currentPlayerIndex");

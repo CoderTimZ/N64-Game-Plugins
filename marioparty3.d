@@ -92,6 +92,7 @@ class State : MarioPartyState!PlayerState {
     ShuffleStream!MiniGame[MiniGameType] miniGameQueue;
     ShuffleStream!SuperstarsMiniGame[MiniGameType] superstarsMiniGameQueue;
     CustomSpace[] spaces;
+    int spacesBoard = -1; // The board (data.currentBoard) spaces are for (-1: none yet)
     uint luckySpaceTexturePtr;
     uint goldSpaceTexturePtr;
     string[] boardNames;

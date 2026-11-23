@@ -925,12 +925,14 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
     }
 
     // Custom spaces (standardSpaceRatio, and luckySpaceRatio in games with lucky spaces): blue spaces the plugin turns
-    // into other kinds, kept in state.spaces for the whole game. These clear them when a game starts.
+    // into other kinds, kept in state.spaces (for the board in state.spacesBoard) for the whole game. These clear them
+    // when a game starts.
     void resetCustomSpacesAtStart()() {
         data.currentScene.onWrite((ref Scene scene) { // Reset lucky spaces at start of game
             if (scene != Scene.START_BOARD) return;
 
             state.spaces.length = 0;
+            state.spacesBoard = -1;
             static if (is(typeof(state.players[0].luckySpaceCount))) {
                 state.players.each!(p => p.luckySpaceCount = 0);
             }
@@ -945,6 +947,23 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
         alias CustomSpace = typeof(state.spaces[0]);
 
         bool changed = false;
+
+        // The board's spaces are drawn before the plugin's frame handler can notice a save state was loaded: without
+        // this, the State from before the load would add its custom spaces to the loaded board's
+        reloadStateIfSaveStateLoaded();
+
+        // The spaces may be another board's (like when the State came from a backup of another game): start over.
+        // A State from before spacesBoard was kept is taken to be this board's if it has as many spaces.
+        auto board = cast(int)data.currentBoard;
+        if (state.spacesBoard < 0 && state.spaces.length > 0 && state.spaces.length == data.spaceCount) {
+            state.spacesBoard = board;
+            changed = true;
+        }
+        if (state.spacesBoard != board) {
+            state.spaces.length = 0;
+            state.spacesBoard = board;
+            changed = true;
+        }
 
         if (state.spaces.length != data.spaceCount) {
             state.spaces.length = data.spaceCount;

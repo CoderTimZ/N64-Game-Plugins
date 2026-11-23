@@ -68,6 +68,7 @@ class State : MarioPartyState!PlayerState {
     ShuffleStream!Board itemGameQueue;
     ShuffleStream!Board duelGameQueue;
     CustomSpace[] spaces;
+    int spacesBoard = -1; // The board (data.currentBoard) spaces are for (-1: none yet)
 }
 
 union Chain {

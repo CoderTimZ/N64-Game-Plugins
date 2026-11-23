@@ -911,12 +911,20 @@ abstract class Game(Config, State = NoState) : Plugin {
     void onInput(int, InputData*) { }
     void onMessage(string msg) { }
     void onFrame(ulong) {
+        reloadStateIfSaveStateLoaded();
+    }
+
+    // Switches to the State saved with a save state, if one was loaded since the plugin last wrote the State (the
+    // emulator doesn't say when). Each frame checks, but call it before using the State in game code that can run
+    // before that, like on the first frame after a load. Returns whether it switched.
+    bool reloadStateIfSaveStateLoaded() {
         static if (!is(State == NoState)) {
-            // A save state was loaded since the plugin last wrote the State
             if (stateInMemory && stateBlock && !stateAllocating && stateBlockChanged()) {
                 reloadStateFromMemory();
+                return true;
             }
         }
+        return false;
     }
     void onFinish() {
         if (!stateError) {
