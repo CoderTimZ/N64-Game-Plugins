@@ -14,9 +14,9 @@ usage() {
     cat <<EOF
 Usage: $0 [options] [plugin...]
 
-Builds the plugins with dub (release builds by default). The plugins are built
-into the repository's folder: MarioParty1.dll on Windows, libMarioParty1.so on
-Linux, libMarioParty1.dylib on macOS.
+Builds the plugins with dub (release builds by default) into bin/:
+MarioParty1.dll on Windows, libMarioParty1.so on Linux, libMarioParty1.dylib on
+macOS.
 
 Plugins (default: all):
   mp1    Mario Party 1 (MarioParty1)
@@ -93,7 +93,7 @@ for plugin in $plugins; do
 
     # dub names the library for the platform
     file=
-    for candidate in "$name.dll" "lib$name.so" "lib$name.dylib"; do
+    for candidate in "bin/$name.dll" "bin/lib$name.so" "bin/lib$name.dylib"; do
         if [ -f "$candidate" ] && { [ -z "$file" ] || [ "$candidate" -nt "$file" ]; }; then
             file=$candidate
         fi

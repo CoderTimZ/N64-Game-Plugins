@@ -12,4 +12,5 @@
 .directory
 /.dub
 /*.pdb
-/test-build
+/test-bin
+/bin/

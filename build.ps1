@@ -4,8 +4,8 @@ Builds the N64 game plugins with dub, on Windows (or anywhere with PowerShell). 
 file, and build.sh does the same from a POSIX shell.
 
 .DESCRIPTION
-Builds the plugins with dub (release builds by default). The plugins are built into the repository's folder:
-MarioParty1.dll on Windows, libMarioParty1.so on Linux, libMarioParty1.dylib on macOS.
+Builds the plugins with dub (release builds by default) into bin\: MarioParty1.dll on Windows, libMarioParty1.so on
+Linux, libMarioParty1.dylib on macOS.
 
 Requires a D compiler with a recent dub, such as the official ones from https://dlang.org/download.html (some Linux
 distributions ship a dub too old for vibe.d's packages).
@@ -80,7 +80,7 @@ try {
         if ($exitCode -ne 0) { throw "dub couldn't build $name (exit code $exitCode)" }
 
         # dub names the library for the platform
-        $file = @("$name.dll", "lib$name.so", "lib$name.dylib") |
+        $file = @("bin/$name.dll", "bin/lib$name.so", "bin/lib$name.dylib") |
             Where-Object { Test-Path $_ } |
             ForEach-Object { Get-Item $_ } |
             Sort-Object LastWriteTime -Descending |

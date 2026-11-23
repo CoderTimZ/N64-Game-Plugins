@@ -42,7 +42,7 @@ if (-not $NoBuild) {
     }
 }
 
-Copy-Item "$repo\test-build\$plugin.dll" "$Rmg\Plugin\Execution\$plugin.dll" -Force
+Copy-Item "$repo\test-bin\$plugin.dll" "$Rmg\Plugin\Execution\$plugin.dll" -Force
 Copy-Item $Config "$Rmg\$configName.json" -Force
 New-Item -ItemType Directory -Force "$Rmg\TestLogs" | Out-Null
 New-Item -ItemType Directory -Force "$Rmg\TestCommands" | Out-Null

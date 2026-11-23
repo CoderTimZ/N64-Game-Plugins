@@ -13,25 +13,28 @@
       "name": "mp1",
       "targetType": "dynamicLibrary",
       "targetName": "MarioParty1",
+      "targetPath": "bin",
       "sourceFiles": ["plugin.d", "marioparty.d", "marioparty1.d"]
     },
     {
       "name": "mp2",
       "targetType": "dynamicLibrary",
       "targetName": "MarioParty2",
+      "targetPath": "bin",
       "sourceFiles": ["plugin.d", "marioparty.d", "marioparty2.d"]
     },
     {
       "name": "mp3",
       "targetType": "dynamicLibrary",
       "targetName": "MarioParty3",
+      "targetPath": "bin",
       "sourceFiles": ["plugin.d", "marioparty.d", "marioparty3.d"]
     },
     {
       "name": "mp1-test",
       "targetType": "dynamicLibrary",
       "targetName": "MarioParty1",
-      "targetPath": "test-build",
+      "targetPath": "test-bin",
       "versions": ["TestDriver"],
       "sourceFiles": ["plugin.d", "marioparty.d", "marioparty1.d", "test/driver.d", "test/mp1test.d"]
     },
@@ -39,7 +42,7 @@
       "name": "mp2-test",
       "targetType": "dynamicLibrary",
       "targetName": "MarioParty2",
-      "targetPath": "test-build",
+      "targetPath": "test-bin",
       "versions": ["TestDriver"],
       "sourceFiles": ["plugin.d", "marioparty.d", "marioparty2.d", "test/driver.d", "test/mp2test.d"]
     },
@@ -47,6 +50,7 @@
       "name": "mg64",
       "targetType": "dynamicLibrary",
       "targetName": "MarioGolf64",
+      "targetPath": "bin",
       "sourceFiles": ["plugin.d", "mariogolf.d"]
     }
   ]
