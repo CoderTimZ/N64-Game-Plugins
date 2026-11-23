@@ -1,0 +1,9 @@
+{
+    "teamScores": true,
+    "randomBonus": true,
+    "bonuses": {
+        "COIN": "Coin",
+        "MUSHROOM": "Mushroom",
+        "RED": "Unlucky"
+    }
+}

@@ -21,6 +21,10 @@ import std.traits;
 // P1's turn, at the dice block (A Block, B Map, R Overview). P1 Yoshi, P2 Mario (human), P3 Luigi, P4 Peach
 // (computers), 10 coins each. The default teams make Yoshi and Peach (P1, P4) one team and Mario and Luigi (P2, P3) the
 // other.
+enum STATE_DK_BEFORE_BONUS = "TestStates/mp1-dk-before-bonus.st"; // DK, the final mini-game's results (turn 20/20):
+                                                                    // stars 2, 1, 1, 2 (made by makeBonusState)
+enum STATE_DK_TURN_1_CUSTOM = "TestStates/mp1-dk-turn1-custom.st"; // STATE_DK_TURN_1 with mp1-config.json's custom
+                                                                    // spaces assigned (space 14 is a converted ! Space)
 enum STATE_DK_TURN_1 = "TestStates/mp1-dk-turn1.st";
 
 // Board data the plugin's Memory doesn't have
@@ -43,10 +47,100 @@ class TestMarioParty1 : MarioParty1 {
         super(name, hash);
     }
 
+    // A mini-game roulette: the type, the mini-games it showed, the one it stopped on, and the players' panel colors
+    struct RoulettePick {
+        ulong frame;
+        MiniGameType type;
+        MiniGame[] shown;
+        MiniGame chosen;
+        PanelColor[4] colors;
+    }
+    RoulettePick[] roulettePicks; // Every roulette since the emulator started
+    bool splitTeams;              // Make the game's blue and red panels split every team (see splitTeamPanels())
+    int[2] forcedChancePlayers = [-1, -1]; // Chance Time's two players, made these when its blocks set them (-1: not)
+    int forcedBowserEvent = -1;   // The Bowser Space roulette's result, made this (2: everyone's coins to the average)
+
+    // Hooks for the forced events above
+    void forceEvents() {
+        data.chancePlayer1.onWrite((ref ubyte v) { if (forcedChancePlayers[0] >= 0) v = cast(ubyte)forcedChancePlayers[0]; });
+        data.chancePlayer2.onWrite((ref ubyte v) { if (forcedChancePlayers[1] >= 0) v = cast(ubyte)forcedChancePlayers[1]; });
+        // The roulette's result (-1 while it spins), read by func_80049328 and func_80049334
+        foreach (Address a; [0x800D670C, 0x800D6710]) {
+            a.val!int.onWrite((ref int v) { if (forcedBowserEvent >= 0 && v >= 0) v = forcedBowserEvent; });
+        }
+    }
+
+    void setScores(int[4] coins, int[4] stars) {
+        foreach (i, p; players) {
+            p.data.coins = cast(ushort)coins[i];
+            p.data.stars = cast(ushort)stars[i];
+        }
+    }
+
+    int[2][4] scores() {
+        int[2][4] result;
+        foreach (i, p; players) result[i] = [p.data.coins, p.data.stars];
+        return result;
+    }
+
+    // Problems with teammates' scores (teamScores keeps them the same)
+    string[] teamProblems() {
+        string[] problems;
+        foreach (p; players) foreach (t; teammates(p)) {
+            if (t.index > p.index && (p.data.coins != t.data.coins || p.data.stars != t.data.stars)) {
+                problems ~= format("teammates P%d (%dc %ds) and P%d (%dc %ds) differ", p.index + 1, p.data.coins,
+                                   p.data.stars, t.index + 1, t.data.coins, t.data.stars);
+            }
+        }
+        return problems;
+    }
+
+    // While splitTeams is set, the blue and red panel colors the game sets are replaced so each team has one of each:
+    // the round's mini-game is then 2 vs 2 with teammates apart, which teamMiniGames turns into teams against teams
+    void splitTeamPanels() {
+        foreach (i; 0..4) splitTeamPanel(i);
+    }
+
+    // (A function of its own so each hook has its own index: delegates made in a loop share its variables)
+    void splitTeamPanel(uint index) {
+        data.playerPanels[index].color.onWrite((ref PanelColor color) {
+            if (!splitTeams || (color != PanelColor.BLUE && color != PanelColor.RED)) return;
+            auto p = players[index];
+            auto first = players.find!(q => team(q) == team(p)).front; // The team's first player gets blue
+            color = (first.index == p.index) ? PanelColor.BLUE : PanelColor.RED;
+        });
+    }
+
+    int[4] starsSentInResults = [-1, -1, -1, -1]; // The stars last sent to the Bingo page in the final results
+
+    override void sendPlayerInfo(Player player) {
+        if (data.currentScene == Scene.FINAL_RESULTS) starsSentInResults[player.index] = player.data.stars;
+        super.sendPlayerInfo(player);
+    }
+
     override void onStart() {
         super.onStart();
         driver = new TestDriver(tests());
         clampForcedRolls();
+        splitTeamPanels();
+        forceEvents();
+
+        0x80042DB4.onExec({ // The roulette (func_80042BAC) has just chosen the slot it stops on (v1)
+            if (!isBoardScene()) return;
+            auto slot = cast(uint)gpr.v1;
+            auto game = data.miniGameRoulette[slot < 5 ? slot : 0];
+            if (slot >= 5 || ![EnumMembers!MiniGame].canFind(game)) {
+                d.note("Roulette stopped on slot ", slot, " (", cast(uint)game, "), which isn't a mini-game");
+                return;
+            }
+            RoulettePick pick;
+            pick.frame = d.frame;
+            pick.chosen = game;
+            pick.type = type(game);
+            pick.shown = iota(min(5, data.miniGameRouletteSizes[pick.type])).map!(i => data.miniGameRoulette[i]).array;
+            foreach (i, p; players) pick.colors[i] = p.panel.color;
+            roulettePicks ~= pick;
+        });
     }
 
     override void onFrame(ulong frame) {
@@ -55,9 +149,10 @@ class TestMarioParty1 : MarioParty1 {
         driver.onFrame();
     }
 
+    // The test's buttons go in first, as a real controller's would (teamControl copies them to teammates)
     override void onInput(int port, InputData* input) {
-        super.onInput(port, input);
         driver.onInput(port, input);
+        super.onInput(port, input);
     }
 
     // --- Setup ---
@@ -218,11 +313,288 @@ class TestMarioParty1 : MarioParty1 {
             Test("customSpaces", &customSpaces, 60 * 60 * 5),
             Test("landOnCustomSpaces", &landOnCustomSpaces, 60 * 60 * 20),
             Test("bonusStars", &bonusStars, 60 * 60 * 20),
+            Test("bonusStarCases", &bonusStarCases, 60 * 60 * 20),
+            Test("makeBonusState", &makeBonusState, 60 * 60 * 20),
+            Test("chanceTimeTeams", &chanceTimeTeams, 60 * 60 * 10),
+            Test("bowserAverage", &bowserAverage, 60 * 60 * 10),
+            Test("booTeams", &booTeams, 60 * 60 * 10),
+            Test("teamControl", &teamControl, 60 * 60 * 10),
+            Test("mapScrollSpeed", &mapScrollSpeed, 60 * 60 * 5),
+            Test("miniGameRoulette", () => miniGameRoulette(false), 60 * 60 * 60),
+            Test("teamMiniGames", () => miniGameRoulette(true), 60 * 60 * 60),
             Test("mapEventSpaces", &mapEventSpaces, 60 * 60 * 30),
             Test("landOnEachConverted", &landOnEachConverted, 60 * 60 * 60),
             Test("explore", &explore, 60 * 60 * 30),
             Test("serve", &serve, ulong.max),
         ];
+    }
+
+    // preventRepeatMiniGames, blockedMiniGames, teamMiniGames: plays (all CPU) until there have been N64TEST_ARG
+    // roulettes (8 by default), and checks each: the game played is the one it stopped on, which isn't blocked, and in
+    // a 2 vs 2 teammates are on the same side. Then that no type repeats a mini-game within a cycle of its allowed ones.
+    // With split, every team's panels are split, so every round's mini-game should be teams against teams.
+    void miniGameRoulette(bool split) {
+        setUp(STATE_DK_TURN_1);
+        splitTeams = split;
+        scope (exit) splitTeams = false;
+        auto count = d.arg.empty ? 8 : d.arg.to!int;
+        auto first = roulettePicks.length;
+        string[] problems;
+
+        foreach (n; 0..count) {
+            d.waitUntil(() => roulettePicks.length > first + n, "roulette " ~ (n + 1).to!string, 60 * 60 * 10);
+            auto pick = roulettePicks[first + n];
+
+            Scene[] scenes;
+            Scene scene = data.currentScene;
+            d.waitUntil(() => !isBoardScene(), "the mini-game to start", 60 * 60);
+            d.waitUntil(() {
+                if (data.currentScene != scene) {
+                    scene = data.currentScene;
+                    if (!isBoardScene(scene) && scene != cast(Scene)53) scenes ~= scene;
+                }
+                return isBoardScene();
+            }, "the board after the mini-game", 60 * 60 * 10);
+
+            d.note(format("Roulette %d (%s, turn %d): %s from %s, panels %s; scenes %s", n + 1, pick.type,
+                          data.currentTurn, pick.chosen, pick.shown, pick.colors, scenes));
+            auto what = format("roulette %d (%s)", n + 1, pick.chosen);
+            if (!pick.shown.canFind(pick.chosen)) problems ~= what ~ " wasn't one it showed";
+            if (config.blockedMiniGames.canFind(pick.chosen)) problems ~= what ~ " is blocked";
+            if (!scenes.canFind!(s => s.to!string == pick.chosen.to!string)) problems ~= what ~ " wasn't played: " ~ scenes.to!string;
+            if (split && pick.type != MiniGameType.TWO_V_TWO && pick.type != MiniGameType.ONE_PLAYER) {
+                problems ~= what ~ " isn't 2 vs 2, with every team's panels split";
+            }
+            if (pick.type == MiniGameType.TWO_V_TWO && config.teamMiniGames) {
+                foreach (p; players) foreach (t; teammates(p)) {
+                    if (pick.colors[p.index] != pick.colors[t.index]) problems ~= what ~ format(": teammates P%d and P%d on different sides", p.index + 1, t.index + 1);
+                }
+            }
+        }
+
+        foreach (kind; EnumMembers!MiniGameType) {
+            auto chosen = roulettePicks[first..$].filter!(p => p.type == kind).map!(p => p.chosen).array;
+            auto allowed = [EnumMembers!MiniGame].count!(g => type(g) == kind && !config.blockedMiniGames.canFind(g));
+            d.note(kind, " (", allowed, " allowed): ", chosen);
+            if (!config.preventRepeatMiniGames || allowed == 0) continue;
+            for (size_t start = 0; start < chosen.length; start += allowed) {
+                auto cycle = chosen[start .. min($, start + allowed)];
+                if (cycle.dup.sort.uniq.count != cycle.length) problems ~= format("%s repeated a mini-game within a cycle: %s", kind, cycle);
+            }
+        }
+        d.check(problems.empty, problems.join("; "));
+    }
+
+    // randomBonus edge cases: on the final turn, with stars to start with, sets every player's stats as the bonus scene
+    // starts (so the bonus stars are decided on them), then follows the stars to the final results. Each team should
+    // gain the bonus stars its players won (a tie between teammates counting for both), and teammates should match.
+    // Run it with a config whose bonuses are the 3 the stats are set up for (test/mp1-config-bonus-a.json, -b.json).
+    void bonusStarCases() {
+        setUp(STATE_DK_BEFORE_BONUS);
+
+        d.waitUntil(() => isBonusScene(), "the bonus stars", 60 * 60 * 3);
+        auto starsBefore = players.map!(p => cast(int)p.data.stars).array;
+        foreach (i, p; players) {
+            p.data.miniGameCoins = cast(short)[-5, -5, -12, -30][i]; // A tie on a negative Game Star total, across teams
+            p.data.blueSpaces = cast(ubyte)[3, 9, 9, 3][i];          // A tie between teammates (P2 and P3)
+            p.data.happeningSpaces = 2;                               // A 4-way tie: nobody
+            p.data.maxCoins = cast(ushort)[40, 25, 25, 40][i];       // A tie between teammates (P1 and P4)
+            p.data.mushroomSpaces = cast(ubyte)[0, 2, 2, 2][i];       // A 3-way tie
+            p.data.redSpaces = cast(ubyte)[1, 5, 0, 0][i];            // One winner (P2)
+        }
+        // Without randomBonus, the game's own: the Game, Coin and Happening Stars
+        auto chosen = config.randomBonus ? bonus.take(3).array : [BonusType.MINI_GAME, BonusType.COIN, BonusType.HAPPENING];
+        d.note("Bonus scene ", data.currentScene, ", bonus stars ", chosen, "; ", describe());
+        d.check(chosen.length == 3, "The plugin didn't pick 3 bonus stars");
+
+        int[4] won;
+        foreach (b; chosen) {
+            auto value = (int i) => cast(int)getBonusStat(players[i], b);
+            auto best = iota(4).map!(i => value(i)).maxElement;
+            auto winners = iota(4).filter!(i => value(i) == best).array;
+            d.note(b, ": ", iota(4).map!(i => value(i)).array, " -> ", winners.length == 4 ? "nobody" : winners.map!(w => "P" ~ (w + 1).to!string).join(", "));
+            if (winners.length < 4) foreach (w; winners) won[w]++;
+        }
+
+        // The game adds the bonus stars to the players' stars during the final results (and takes them back off when
+        // it goes back to the title screen)
+        starsSentInResults = [-1, -1, -1, -1];
+        Scene scene = data.currentScene;
+        d.waitUntil(() {
+            if (data.currentScene != scene) {
+                scene = data.currentScene;
+                d.note("Scene ", scene, ": bonus stars ", iota(4).map!(i => data.bonusStars[i]).array);
+            }
+            return data.currentScene == Scene.FINAL_RESULTS;
+        }, "the final results", 60 * 60 * 3);
+        auto starsAtResults = players.map!(p => cast(int)p.data.stars).array;
+        d.check(starsAtResults == starsBefore, format("Stars changed before the final results: %s -> %s", starsBefore, starsAtResults));
+        d.waitUntil(() => players.any!(p => p.data.stars != starsAtResults[p.index]) || data.currentScene != Scene.FINAL_RESULTS,
+                    "the bonus stars to be added", 60 * 60);
+        d.wait(30); // In case they're added one player at a time
+        if (d.arg == "shots") d.screenshot("final results");
+        auto starsWithBonus = players.map!(p => cast(int)p.data.stars).array;
+        d.waitUntil(() => data.currentScene != Scene.FINAL_RESULTS, "the end of the final results", 60 * 60 * 2);
+        d.note("After the final results: stars ", players.map!(p => p.data.stars).array);
+
+        string[] problems;
+        d.note("Stars sent to the Bingo page in the final results: ", starsSentInResults);
+        if (starsSentInResults != starsWithBonus) problems ~= format("the Bingo page got stars %s, not %s", starsSentInResults, starsWithBonus);
+        foreach (i, p; players) {
+            auto expected = starsBefore[i] + (config.teamScores ? teamMembers(p).map!(t => won[t.index]).sum : won[i]);
+            auto got = starsWithBonus[i];
+            d.note(format("P%d: %d -> %d stars, expected %d (own wins %d)", i + 1, starsBefore[i], got, expected, won[i]));
+            if (got != expected) problems ~= format("P%d has %d stars, expected %d", i + 1, got, expected);
+        }
+        d.check(problems.empty, problems.join("; "));
+    }
+
+    // Makes STATE_DK_BEFORE_BONUS: plays the final turn from STATE_DK_TURN_1 (run it with the plain config, so the
+    // state has no custom spaces) and saves when the final mini-game's results start
+    void makeBonusState() {
+        setUp(STATE_DK_TURN_1, 20, 20);
+        foreach (i, p; players) p.data.stars = cast(ushort)[2, 1, 1, 2][i]; // Someone has a Star: FINISH_BOARD
+        waitForTurn(3, "P4's turn, before the round's mini-game"); // Not a 1P game from a Mini-Game Space
+        d.waitUntil(() => data.currentScene == Scene.MINI_GAME_RESULTS, "the final mini-game's results", 60 * 60 * 10);
+        d.saveEmulatorState(STATE_DK_BEFORE_BONUS);
+        d.note("Saved: ", describe());
+    }
+
+    // teamScores in Chance Time: P1 lands on a converted ! Space, and Chance Time's players are made P1 and a
+    // teammate (N64TEST_ARG "teammates", the default: nothing should change) or an opponent ("opponents": teammates'
+    // scores should still match)
+    void chanceTimeTeams() {
+        setUp(STATE_DK_TURN_1_CUSTOM);
+        setScores([30, 5, 5, 30], [2, 1, 1, 2]);
+        auto opponents = d.arg == "opponents";
+        forcedChancePlayers = opponents ? [0, 1] : [0, 3];
+        scope (exit) forcedChancePlayers = [-1, -1];
+        auto before = scores();
+        auto r = land(14, Space.Type.CHANCE);
+        d.note("Landed: ", r.describe, "; outcome ", data.chanceOutcome, "; scores ", before, " -> ", scores());
+        d.check(r.scenes.canFind(Scene.CHANCE_TIME), "No Chance Time: " ~ r.scenes.to!string);
+        auto problems = teamProblems();
+        if (!opponents && scores() != before) problems ~= format("scores changed in a Chance Time between teammates: %s -> %s", before, scores());
+        d.check(problems.empty, problems.join("; "));
+    }
+
+    // The Bowser Space event that sets everyone's coins to the average, with teamScores: P1 lands on Bowser Space 16
+    // with the event forced. The average of 40, 10, 10, 40 is 25.
+    void bowserAverage() {
+        setUp(STATE_DK_TURN_1_CUSTOM);
+        setScores([40, 10, 10, 40], [0, 0, 0, 0]);
+        forcedBowserEvent = 2;
+        scope (exit) forcedBowserEvent = -1;
+        auto r = land(16, Space.Type.BOWSER);
+        d.note("Landed: ", r.describe, "; scores ", scores());
+        d.check(r.scenes.canFind(Scene.BOWSER), "No Bowser event: " ~ r.scenes.to!string);
+        auto problems = teamProblems();
+        foreach (p; players) if (p.data.coins != 25) problems ~= format("P%d has %d coins, not 25", p.index + 1, p.data.coins);
+        d.check(problems.empty, problems.join("; "));
+    }
+
+    // Boo with teamScores, for a CPU: P1 passes DK's Boo (space 10; Boo runs on the board, not in a scene of its own).
+    // First only P1's teammate has coins and stars, so Boo can't steal anything (nobody loses any); then opponents
+    // have them too, so Boo steals from them, and teammates' scores should still match.
+    void booTeams() {
+        string[] problems;
+        foreach (opponentsHaveSome; [false, true]) {
+            setUp(STATE_DK_TURN_1_CUSTOM);
+            auto opponents = opponentsHaveSome ? 20 : 0;
+            setScores([30, opponents, opponents, 30], [1, opponentsHaveSome ? 1 : 0, opponentsHaveSome ? 1 : 0, 1]);
+            auto before = scores();
+            auto r = land(10, Space.Type.INVISIBLE);
+            d.note(opponentsHaveSome ? "Opponents have coins: " : "Only P1's teammate has coins: ", r.describe,
+                   "; scores ", before, " -> ", scores());
+            problems ~= teamProblems();
+            auto after = scores();
+            auto lost = iota(4).filter!(i => after[i][0] < before[i][0] || after[i][1] < before[i][1]).array;
+            if (!opponentsHaveSome && !lost.empty) problems ~= format("Boo stole from P1's teammate: %s -> %s", before, after);
+            if (opponentsHaveSome && !lost.all!(i => i == 1 || i == 2)) problems ~= format("Boo stole from the wrong team: %s -> %s", before, after);
+            if (opponentsHaveSome && lost.empty) problems ~= "Boo didn't steal from the opponents";
+        }
+        d.check(problems.empty, problems.join("; "));
+    }
+
+    // teamControl: a human's teammate on a later controller is played with the human's controller. P1 Yoshi is made
+    // human on controller 1 at the start of his turn (rolling with A, onto a Blue Space); when P4 Peach's turn comes
+    // (she's his teammate), she should not be a CPU, should wait for her roll, and A on controller 1 should hit it.
+    void teamControl() {
+        setUp(STATE_DK_TURN_1_CUSTOM);
+        auto yoshi = players[0], peach = players[3];
+        yoshi.data.flags = yoshi.data.flags & ~1;
+        yoshi.data.controller = 0;
+        d.note("Controllers: ", players.map!(p => p.data.controller + 1).array, "; ", describe());
+        d.check(peach.data.controller > 0, "Peach is on controller 1 already");
+
+        // One step onto a Blue Space (no junction to choose at): his roll may already be set (the CPU hits the block
+        // quickly), or not yet, when A hits it
+        auto target = reachableSpaces(Space.Type.BLUE).front;
+        moveBefore(yoshi, target);
+        if (stepsLeft > 0) {
+            stepsLeft = 1;
+        } else {
+            forcedRoll = 0;
+            forcing = true;
+            scope (exit) forcing = false;
+            d.wait(60);
+            d.press(0, Pad.A, 10);
+            d.waitUntil(() => forcedRoll != 0, "Yoshi's roll", 300);
+        }
+        // With a human in the game, some messages in other scenes (like Chance Time's) wait for A: press it now and
+        // then there, but not on the board (where it could pick something in a CPU's turn) until Peach's turn
+        d.waitUntil(() {
+            if (d.arg == "shots" && d.frame % 300 == 0) d.screenshot(format("P%d's turn, %s", data.currentPlayerIndex + 1, data.currentScene));
+            auto peachsTurn = isBoardScene() && data.currentPlayerIndex == 3;
+            if (isBoardScene()) d.release(0);
+            else if (d.frame % 90 == 0) d.hold(0, Pad.A);
+            else if (d.frame % 90 == 5) d.hold(0, 0);
+            return peachsTurn;
+        }, "Peach's turn", 60 * 60 * 10);
+        d.release(0);
+
+        d.wait(300);
+        d.check(!peach.isCPU, "Peach is a CPU");
+        d.check(stepsLeft == 0, format("Peach rolled (%d) without anyone pressing A", stepsLeft));
+        auto start = d.frame;
+        d.waitUntil(() {
+            if ((d.frame - start) % 60 == 0) d.hold(0, Pad.A);
+            else if ((d.frame - start) % 60 == 5) d.hold(0, 0);
+            return stepsLeft > 0;
+        }, "Peach's roll, pressing A on controller 1", 60 * 15);
+        d.release(0);
+        d.note("Peach rolled ", stepsLeft, " with controller 1");
+    }
+
+    // mapScrollSpeedMultiplier: P1 (made human) opens the map with B at the dice block; the game's scroll speed
+    // (0x800D672C, 4 normally) should be 4 times the multiplier. Screenshots before and after holding the stick up
+    // for 20 frames show how far it scrolls.
+    void mapScrollSpeed() {
+        setUp(STATE_DK_TURN_1_CUSTOM);
+        auto yoshi = players[0];
+        yoshi.data.flags = yoshi.data.flags & ~1;
+        yoshi.data.controller = 0;
+        // B opens the map at the dice block or at a junction (whichever comes first): press it until the map sets
+        // its scroll speed
+        ref float speed() { return (cast(Address)0x800D672C).val!float; }
+        auto before = speed;
+        auto start = d.frame;
+        d.waitUntil(() {
+            if ((d.frame - start) % 30 == 0) d.hold(0, Pad.B);
+            else if ((d.frame - start) % 30 == 5) d.hold(0, 0);
+            return speed != before;
+        }, "the map to open", 60 * 30);
+        d.release(0);
+        d.wait(60);
+        d.screenshot("map opened");
+        d.hold(0, 0, 0, 80);
+        d.wait(20);
+        d.release(0);
+        d.wait(5);
+        d.screenshot("after 20 frames of scrolling up");
+        auto expected = 4.0f * config.mapScrollSpeedMultiplier;
+        d.note("Map scroll speed ", speed, " (", before, " before the map), expected ", expected);
+        d.check(abs(speed - expected) < 0.001, format("The map scroll speed is %s, not %s", speed, expected));
     }
 
     // jal() from an onExec hook: the call gets its arguments (GetPlayerStruct(2) returns P3's), and the registers are
@@ -327,6 +699,25 @@ class TestMarioParty1 : MarioParty1 {
                 }
             } else if (step.startsWith("shots:")) { // shots:<n>: screenshots land: takes as a landing happens
                 shotsOnLanding = step[6..$].to!int;
+            } else if (step.startsWith("coins:") || step.startsWith("stars:")) { // coins:<P1>,<P2>,<P3>,<P4> (or stars:)
+                auto values = step[6..$].split(",").map!(v => v.to!ushort).array;
+                foreach (i, p; players) {
+                    if (step[0] == 'c') p.data.coins = values[i]; else p.data.stars = values[i];
+                }
+                d.note("Set ", step, ": ", describe());
+            } else if (step.startsWith("turn:")) { // turn:<player>: waits for a player's (1-4) turn on the board
+                waitForTurn(step[5..$].to!int - 1);
+                d.note("Turn: ", describe());
+            } else if (step.startsWith("human:")) { // human:<player>: makes a player (1-4) human, on controller 1
+                auto p = players[step[6..$].to!int - 1];
+                p.data.flags = p.data.flags & ~1;
+                d.note("Set ", step, " (it was on controller ", p.data.controller + 1, "): ", describe());
+                p.data.controller = 0;
+            } else if (step.startsWith("move:")) { // move:<space>: the current player's next move is 1 step, onto it
+                auto target = step[5..$].to!short;      // (without waiting for the roll, so a human can roll)
+                moveBefore(players[data.currentPlayerIndex], target);
+                forcedRoll = 0;
+                forcing = true; // Until the roll (clampForcedRolls() makes it 1)
             } else if (step.startsWith("land:")) { // land:<space>: the current player's next move lands there
                 auto target = step[5..$].to!short;
                 auto r = land(target, data.spaces[target].type);

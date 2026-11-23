@@ -17,7 +17,9 @@
     "mapScrollSpeedMultiplier": 2.0,
     "preventRepeatMiniGames": true,
     "blockedMiniGames": [
-        "SLOT_MACHINE",
-        "BUMPER_BALLS"
+        "BUMPER_BALLS",
+        "PIPE_MAZE",
+        "DESERT_DASH",
+        "SLOT_MACHINE"
     ]
 }
