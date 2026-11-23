@@ -17,15 +17,18 @@ every Mario Party plugin shares. Each game's own options are on its page:
 | Mario Party 3 | `MarioParty3.json` |
 | Mario Golf | `MarioGolf64.json` |
 
-The file is named after the name inside the game's ROM, and lives in the emulator's working folder (RMG's folder).
+The file is named after the name inside the game's ROM, and lives in the folder RMG runs in (normally RMG's own
+folder).
 
 - **First run:** if the file doesn't exist, the plugin writes it with every option at its default.
 - **Read once:** the file is read when the game starts. To change an option, edit the file and start the game again.
 - **Rewritten:** after reading the file, the plugin writes it back with every option, in alphabetical order. Options you
-  left out appear with their defaults, and anything it doesn't recognise is removed.
+  left out appear with their defaults, and anything it doesn't recognise is removed without an error, so a misspelled
+  option just disappears: check the file after starting the game.
 - **Errors:** if the file isn't valid (a JSON syntax error, a value of the wrong kind for its option, or a name that
-  isn't one of an option's values), the plugin shows an error naming the option, plays with every option at its
-  default, and leaves your file as it is so you can fix it.
+  isn't one of an option's values), the plugin reports what's wrong (in a message box on Windows, and in the emulator's
+  log), plays with every option at its default, and leaves your file as it is so you can fix it. Numbers and
+  `true`/`false` are interchangeable: `1` is `true`, and `true` is `1`.
 
 ### Names
 
@@ -40,13 +43,14 @@ means random bonus stars only choose from those three.
 
 ### Example
 
-Options you leave out keep their defaults, so a config only needs what you change:
+Options you leave out keep their defaults, so a config only needs what you change. For example, a Mario Party 1 config
+that never plays Tipsy Tourney, and picks the bonus stars at random from three:
 
 ```json
 {
-    "bingoURL": "https://mp.bingo/ABC123",
-    "teamScores": true,
-    "teams": { "MARIO": 1, "LUIGI": 1, "PEACH": 2, "YOSHI": 2 }
+    "blockedMiniGames": ["TIPSY_TOURNEY"],
+    "randomBonus": true,
+    "bonuses": { "MINI_GAME": "Game", "COIN": "Coin", "RED": "Unlucky" }
 }
 ```
 
@@ -54,23 +58,22 @@ Options you leave out keep their defaults, so a config only needs what you chang
 
 Some options need the plugin to remember things during a game, like which spaces it changed or which mini-games have
 been played. The plugin keeps this in the game's own memory, so it's saved and loaded with the emulator's save states. It
-also keeps a backup file, used when the game is continued without a save state:
+also keeps a backup file, used when a game is continued from the game's own save file rather than a save state:
 
 - Windows: `%APPDATA%\N64-Game-Plugins`
 - Linux and macOS: `$XDG_STATE_HOME/N64-Game-Plugins` (`~/.local/state/N64-Game-Plugins` by default)
 
-These files aren't settings: you don't need to edit them.
+These files aren't settings: you don't need to edit them. Mario Golf keeps no saved state.
 
 ## Options for every Mario Party game
 
-These work in Mario Party 1, 2 and 3. Options with the same name on the game pages (such as `teamScores` or
-`randomBonus`) also work the same way in every game that has them, apart from the differences each page describes.
+These work in Mario Party 1, 2 and 3.
 
 ### `characters`
 
 The character each player plays as, overriding what's chosen in the game.
 
-- Type: a list of 4 character names, for players 1 to 4
+- Type: a list of up to 4 character names, for players 1 to 4 (players left off the end are left to the game)
 - Default: `["UNDEFINED", "UNDEFINED", "UNDEFINED", "UNDEFINED"]`
 
 `UNDEFINED` leaves a player's character to the game. Any other name makes that player always be that character: the
@@ -87,7 +90,9 @@ Makes an emulator save state at the start of every player's turn.
 - Default: `false`
 
 Player 1's turns are saved in save state slot 1, player 2's in slot 2, and so on, so each slot holds the start of that
-player's latest turn. They're overwritten every round.
+player's latest turn. They're overwritten every round, so don't keep your own save states in slots 1 to 4. The
+emulator's selected slot changes with each turn too, so a save state you make yourself goes in the current player's
+slot unless you choose another.
 
 ### `bingoURL`
 
@@ -96,10 +101,11 @@ The address of a game on [Mario Party Bingo](https://mp.bingo/) to connect to.
 - Type: text
 - Default: `""` (not connected)
 
-While connected, the plugin sends each player's character, coins, stars, items and mini-game panel color, whether
-they're a computer, and the current turn, so the bingo page can show them. It reconnects every 5 seconds if the
-connection drops. It also receives the bingo cards, which some options use (such as `rankPlayersByBingoScore`), and
-corrections from the bingo game's admins, who can set a player's character, coins, stars and items.
+While connected, the plugin sends each player's character, coins, stars, items and panel color (blue or red, for the
+mini-game teams), whether they're a computer, and the current turn, so the bingo page can show them. If it can't
+connect, or the connection drops, it tries again every 5 seconds. It also receives the bingo cards, which some options
+use (such as `rankPlayersByBingoScore`), and corrections from the bingo game's admins, who can set a player's character,
+coins, stars and items.
 
 ### `rankPlayersByBingoScore`
 
@@ -115,8 +121,8 @@ ranking is by stars and coins as usual.
 
 ## Options several games share
 
-These appear on more than one game's page. Their pages give the details for that game, such as its names and its own
-differences.
+These appear on more than one game's page, and work the same way in each game that has them. Their pages give the
+details for that game, such as its names and its own differences.
 
 - **Teams:** `teams`, `teamScores`, `teamMiniGames`, `teamControl`
 - **Bonus stars:** `randomBonus`, `bonuses`

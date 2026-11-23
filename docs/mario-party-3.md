@@ -56,7 +56,7 @@ Which characters play together, for the other team options.
   `{ "MARIO": 2, "LUIGI": 2, "PEACH": 1, "YOSHI": 1, "WARIO": 1, "DK": 1, "WALUIGI": 1, "DAISY": 1 }`
 
 Players whose characters have the same number are teammates; the numbers themselves don't matter. Teams go by
-character, not by player number. A character left out is on team 0, with every other character left out.
+character, not by player number. Characters left out are all on one team together.
 
 With the default, a game with both Mario and Luigi is Mario and Luigi against the other two. With only one of them, that
 player is alone against the other three.
@@ -71,9 +71,9 @@ Teammates share their coins and stars.
 - Default: `false`
 
 Whenever a player gains or loses coins or stars, their teammates get the same total, so each team has one shared
-wallet. This covers the board, Chance Time, Bowser, the Last Five Turns event, mini-game, Battle and gamble results, and
-the bonus stars. Each team also shares the "Coin Star" record (most coins held at once); the other bonus star records
-stay per player.
+wallet. This covers the board, Chance Time, Bowser, the Last Five Turns event, the results of mini-games, Battles and
+Game Guy mini-games, and the bonus stars. Each team also shares the "Coin Star" record (most coins held at once); the
+other bonus star records stay per player.
 
 - **Duels** can't be against a teammate.
 - **Battles:** each team pays into the pot once.
@@ -89,9 +89,10 @@ Makes the 2 vs 2 mini-games team against team.
 - Type: `true` or `false`
 - Default: `false`
 
-When the panel colors at the end of a round would make a 2 vs 2 mini-game that splits a team up, the panels are
-recolored so each team plays together. 4-player and 1 vs 3 mini-games are left alone. If every player is on one team, a
-2 vs 2 becomes a 4-player mini-game. Players without a teammate are never changed.
+The panels (the colored boxes next to each player, which decide the mini-game's teams) are recolored at the end of a
+round when they would split every team up: a 2 vs 2 that splits both teams becomes team against team, and if every
+player is on one team, a 1 vs 3 or 2 vs 2 becomes a 4-player mini-game. Otherwise the panels are left alone, and the
+option does nothing unless every player has a teammate.
 
 ### `teamControl`
 
@@ -100,9 +101,9 @@ Lets a human play their computer teammates' turns with their own controller.
 - Type: `true` or `false`
 - Default: `false`
 
-A computer player becomes human-controlled when a teammate is human and on a lower-numbered controller, and that
-teammate's controller plays their turns, menus and mini-games. So in a game of one human and one computer per team, each
-human plays for both of their team's characters.
+A player whose teammate is human and on a lower-numbered controller is controlled by that teammate's controller: their
+turns, menus and mini-games. So in a game of one human and one computer per team, each human plays for both of their
+team's characters. A team of two humans doesn't work: the higher-numbered controller's player is taken over too.
 
 ## Board
 
@@ -122,8 +123,8 @@ Gives the player in last place two dice blocks to hit.
 - Type: `true` or `false`
 - Default: `false`
 
-From turn 2, a player in last place (fewest stars, then fewest coins, counting ties) hits two dice blocks instead of
-one. It doesn't reduce a Golden Mushroom's three. Computer players get it too.
+From turn 2, a player in last place (fewest stars, then fewest coins; players tied for last all get it) hits two dice
+blocks instead of one. A Golden Mushroom still gives three. Computer players get it too.
 
 ### `mapScrollSpeedMultiplier`
 
@@ -153,8 +154,8 @@ Makes the Item Shops' stock more varied.
 - Default: `false`
 
 What a shop sells depends on how far into the game it is and the player's place. On each visit, there's a 1 in 3 chance
-the shop sells what it would at a neighbouring stage of the game, and a separate 1 in 3 chance it sells what it would
-for a player in a different place.
+the shop sells what it would at a neighbouring stage of the game, and from the middle of the game on, a separate 1 in 3
+chance it sells what it would for a player in a different place.
 
 ### `increaseItemGameVariety`
 
@@ -201,7 +202,8 @@ Makes Chance Time's "all coins" and "all stars" outcomes swap the two players' t
 - Default: `false`
 
 Instead of one player giving all their coins or stars to the other, the two players exchange totals. The messages say
-so. It applies after `chancePrizeReplace`.
+so. It applies to the outcome after `chancePrizeReplace` has replaced it, so an outcome replaced with an "all coins"
+or "all stars" one swaps too.
 
 ### `chancePrizeReplace`
 
@@ -288,7 +290,8 @@ fraction (a board that already has more of a type keeps them). Star Spaces are n
 The spaces are chosen when a game starts on a board and stay for the whole game, through save states. A new game picks
 new ones.
 
-Space types: `RED`, `HAPPENING` (? Space), `CHANCE` (! Space), `ITEM`, `BANK`, `BATTLE`, `BOWSER`, `GAME_GUY`.
+Space types: `RED`, `HAPPENING` (? Space), `CHANCE` (! Space), `ITEM`, `BANK`, `BATTLE`, `BOWSER`, `GAME_GUY`. Other
+space types aren't supported.
 
 Turning on this option, `luckySpaceRatio` or `revealHiddenBlocksOnRemainingTurns` also moves the hidden blocks (the
 Item, Coin and Star blocks) to random Blue Spaces that aren't Lucky Spaces.
@@ -304,8 +307,8 @@ The number is the fraction of the board's Blue Spaces to make Lucky Spaces. Luck
 board and the map, and landing on one either works as an Item Space or gives more coins than a Blue Space:
 
 - **An Item Space**, with the chance in `luckySpaceItemChance`: Toad's or Baby Bowser's item event, equally likely.
-- **Coins** otherwise: 7, 10, 12, 15 or 20 at random, or 12, 15 or 20 when Blue Spaces give double coins (a Blue Space
-  gives 3, or 6).
+- **Coins** otherwise: 7, 10, 12, 15 or 20 at random, or 12, 15 or 20 when a Blue Space would give 6 coins instead of
+  3.
 
 Landing on a Lucky Space doesn't count as a Blue Space for the Blue bonus star, and counts for the `LUCKY` bonus star
 instead. At the end of the game, the emulator's log lists how many Lucky Spaces each player landed on.
@@ -392,7 +395,8 @@ How a Battle mini-game's pot is shared out by place.
 - Type: a list of 4 fractions, for 1st to 4th place
 - Default: `[0.7, 0.3, 0, 0]` (the game's own: 70% to 1st, 30% to 2nd)
 
-The fractions shouldn't add up to more than 1; if they do, the plugin shows an error and uses the default. Anything left
+The fractions can't be negative or add up to more than 1; if they do, the plugin shows an error and uses the default.
+A list shorter than 4 is filled out with 0s. Anything left
 over goes where the game puts a battle's leftover coins. Players tied for a place share its coins, and a place nobody
 finished in gives its share to the place above it.
 
@@ -434,7 +438,8 @@ Plays the mini-games in Mario Party Superstars instead.
 - Needs: `bingoURL`
 
 The 4-player, 1 vs 3, 2 vs 2, Battle and duel roulettes show Mario Party Superstars mini-games, going through all of
-each kind before repeating, as `preventRepeatMiniGames` does. A roulette shows at most one coin mini-game (in yellow)
+each kind before repeating, as `preventRepeatMiniGames` does. Battles use the 4-player mini-games, in the same order as
+the 4-player roulette. A roulette shows at most one coin mini-game (in yellow)
 and one Bowser mini-game (in red); the duel roulette shows 3. Item, Game Guy and special mini-games stay Mario Party 3's.
 
 When the roulette stops, the game tells the players which mini-game to play in Mario Party Superstars, and who's on
@@ -483,7 +488,7 @@ Plays a character voice when a player presses a button by itself.
 - Type: `true` or `false`
 - Default: `false`
 
-During a game, pressing one of these buttons on its own plays that player's character saying:
+During a game, a human player pressing one of these buttons on its own plays their character saying:
 
 | Button | Voice |
 |--------|-------|
@@ -504,8 +509,9 @@ Starts a new game on the next board when a game ends.
 - Default: `false`
 
 After the final results, the next board starts instead of returning to the castle grounds, in this order: Chilly
-Waters, Deep Bloober Sea, Spiny Desert, Woody Woods, Creepy Cavern, Waluigi's Island, then Chilly Waters again. Every
-player starts with no coins, stars or items.
+Waters, Deep Bloober Sea, Spiny Desert, Woody Woods, Creepy Cavern, Waluigi's Island, then Chilly Waters again. It
+starts like any new game, with the same players and settings: everyone has the usual starting coins and no stars or
+items, and the plugin's options start over too (such as Lucky Spaces and the mini-game order).
 
 ### `finalResultsDoNotProceed`
 

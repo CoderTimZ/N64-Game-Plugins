@@ -29,7 +29,7 @@ How often each kind of dice block is used when a player rolls.
 
 A block's chance is its weight divided by the total of all the weights. The default makes each special block a 1 in 32
 chance and the normal block 27 in 32. A block left out, or with weight 0, is never used, so `{ "NORMAL": 1 }` means only
-the normal dice block. Give at least one block a weight above 0.
+the normal dice block. Give at least one block a weight above 0: with none, the same block is used every time.
 
 Block names: `NORMAL` (the regular dice block), `PLUS`, `MINUS`, `SPEED`, `SLOW`, `WARP`.
 
@@ -43,7 +43,7 @@ Which characters play together, for the other team options.
 - Default: `{ "MARIO": 2, "LUIGI": 2, "PEACH": 1, "YOSHI": 1, "WARIO": 1, "DK": 1 }`
 
 Players whose characters have the same number are teammates; the numbers themselves don't matter. Teams go by
-character, not by player number. A character left out is on team 0, with every other character left out.
+character, not by player number. Characters left out are all on one team together.
 
 With the default, a game with both Mario and Luigi is Mario and Luigi against the other two. With only one of them, that
 player is alone against the other three.
@@ -63,7 +63,7 @@ wallet. This covers the board, board events, Chance Time, Bowser, Boo, mini-game
 - **Chance Time** between teammates changes nothing. Between players of different teams, both teams' players get the
   result.
 - **Boo** can't steal from the player's teammates: they're greyed out under "From whom?". A computer player steals
-  from an opponent instead.
+  from the opponent with the most coins (or stars) instead, or from no one if no opponent has any.
 - **Bowser's** event that sets everyone's coins to the average works as usual (the change isn't counted twice).
 - **Bonus stars:** each player gets their whole team's bonus stars, so teammates finish with the same number of stars.
 - **Bingo corrections** to a player's coins or stars apply to their teammates too.
@@ -78,9 +78,10 @@ Makes the 2 vs 2 mini-games team against team.
 - Type: `true` or `false`
 - Default: `false`
 
-When the panel colors at the end of a round would make a 2 vs 2 mini-game that splits a team up, the panels are
-recolored so each team plays together. 4-player and 1 vs 3 mini-games are left alone. If every player is on one team, a
-1 vs 3 or 2 vs 2 becomes a 4-player mini-game. Players without a teammate are never changed.
+The panels (the colored boxes next to each player, which decide the mini-game's teams) are recolored at the end of a
+round when they would split every team up: a 2 vs 2 that splits both teams becomes team against team, and if every
+player is on one team, a 1 vs 3 or 2 vs 2 becomes a 4-player mini-game. Otherwise the panels are left alone, and the
+option does nothing unless every player has a teammate.
 
 ### `teamControl`
 
@@ -89,9 +90,10 @@ Lets a human play their computer teammates' turns with their own controller.
 - Type: `true` or `false`
 - Default: `false`
 
-A computer player becomes human-controlled when a teammate is human and on a lower-numbered controller, and that
-teammate's controller plays their turns. So in a game of one human and one computer per team, each human plays for
-both of their team's characters.
+A player whose teammate is human and on a lower-numbered controller is controlled by that teammate's controller,
+everywhere but the game setup and the final results: their turns, and their character in mini-games. So in a game of
+one human and one computer per team, each human plays for both of their team's characters. A team of two humans
+doesn't work: the higher-numbered controller's player is taken over too.
 
 ## Bonus stars
 
@@ -102,8 +104,8 @@ Replaces the end-of-game bonus stars (the Game, Coin and Happening Stars) with 3
 - Type: `true` or `false`
 - Default: `false`
 
-The stars are picked from `bonuses` when the bonus stars are given out, from the ones at least one player has done
-anything towards (if fewer than 3 qualify, from all of them). The announcements name each star and what it was for, and
+The stars are picked from `bonuses` when the bonus stars are given out, from the ones at least one player has a count
+above zero for (if fewer than 3 qualify, from all of them). The announcements name each star and what it was for, and
 ties work as usual. If `bonuses` has fewer than 3 stars, the game's own bonus stars are used.
 
 ### `bonuses`
@@ -121,7 +123,8 @@ The bonus stars `randomBonus` can pick, and their names.
   ```
 
 Remove a type to stop it being picked. The name is shown in the game as "the *name* Star", so keep it short (the
-message windows are small). Letters the game's font doesn't have are shown as `?`.
+message windows are small). Stick to letters, digits and spaces: characters outside plain ASCII are shown as `?`, and
+some punctuation doesn't show as typed.
 
 | Type | Awarded to the player who |
 |------|---------------------------|
@@ -156,7 +159,8 @@ Changed spaces work like the board's own: landing on one counts towards that typ
 panel. A changed ! Space starts Chance Time. A changed ? Space counts as a ? Space but has no board happening, since each
 board's happenings belong to particular spaces.
 
-Space types: `RED`, `MINI_GAME`, `HAPPENING` (? Space), `CHANCE` (! Space), `MUSHROOM`, `BOWSER`.
+Space types: `RED`, `MINI_GAME`, `HAPPENING` (? Space), `CHANCE` (! Space), `MUSHROOM`, `BOWSER`. Other space types
+aren't supported.
 
 ## Mini-games
 
@@ -169,7 +173,8 @@ Plays every mini-game of a kind before any of them is played again.
 
 Each kind of mini-game (4-player, 1 vs 3, 2 vs 2, and the 1-player games of Mini-Game Spaces) goes through all of its
 mini-games in a random order before starting again. A mini-game played recently doesn't come up again soon after the
-order starts again either. The roulette still shows several mini-games, but always stops on the next one.
+order starts again either. The roulette still shows several mini-games, but always stops on the next one. Each new game
+starts a new order.
 
 The plugin chooses the mini-game itself, so the game's own rules for it are skipped. Among them is the one that avoids
 mini-games needing more coins than players have.

@@ -17,30 +17,30 @@ The plugins work with the US versions of the games: they rely on where things ar
 
 ## What they do
 
-By default, the options leave the game as it is, so a plugin with an empty config file plays the game unchanged. Some of
-what they can do:
+By default, the options are off, so a plugin with an empty config file plays the game as normal. Some of what they can
+do:
 
-- **Teams:** play 2 vs 2, with teammates sharing coins and stars, team mini-games, and one controller for a human's
-  computer teammate.
+- **Teams:** play 2 vs 2, with teammates sharing coins and stars, team mini-games, and a human controlling their
+  computer teammate too.
 - **Bingo:** send each player's coins, stars and items to a game on [mp.bingo](https://mp.bingo/), rank the final
-  results by bingo score, and (in Mario Party 3) play the Superstars mini-games.
-- **Board changes:** turn blue spaces into other kinds, add Lucky Spaces (Mario Party 2 and 3), pick random bonus stars,
-  and keep the mini-game roulette from repeating mini-games or choosing ones you've blocked.
-- **Quality of life:** faster map scrolling, duels on any turn, and a double roll for the player in last place.
+  results by bingo score, and (in Mario Party 3) have the roulettes pick Mario Party Superstars mini-games.
+- **Spaces, bonus stars and mini-games:** turn blue spaces into other kinds, add Lucky Spaces (Mario Party 2 and 3),
+  pick random bonus stars, and keep the mini-game roulette from repeating mini-games or choosing ones you've blocked.
+- **Board:** faster map scrolling, duels on any turn, and a double roll for the player in last place.
 
 The [configuration documentation](docs/configuration.md) describes every option.
 
 ## Installing
 
-1. Get the plugins: build them (below), or use built ones.
+1. Build the plugins (see [Building](#building)).
 2. Copy `MarioParty1.dll`, `MarioParty2.dll`, `MarioParty3.dll` and `MarioGolf64.dll` (`libMarioParty1.so` and so on,
-   on Linux) into RMG's `Plugin/Execution` folder, along with `libcrypto-3-x64.dll` and `libssl-3-x64.dll` on Windows
-   (they're built next to the plugins, and the bingo connection needs them).
+   on Linux) into RMG's `Plugin/Execution` folder. They use the OpenSSL libraries RMG already comes with
+   (`libssl-3-x64.dll` and `libcrypto-3-x64.dll`, next to `RMG.exe`), or on Linux, the system's.
 3. In RMG, open each game's settings and choose its plugin as the game's execution plugin.
 4. Set RMG's CPU emulator to the cached interpreter or the pure interpreter, for these games or for every game. The
    plugins follow the game's code as it runs, which the dynamic recompiler doesn't allow.
 5. Run the game once: the plugin writes its config file (see the table above) with every option at its default, in
-   RMG's folder. Edit it, then restart the game for the changes to take effect.
+   the folder RMG runs in (normally RMG's own folder). Edit it, then restart the game for the changes to take effect.
 
 ## Configuring
 
@@ -74,7 +74,10 @@ such as Debian 12's). On Linux you also need a C compiler and OpenSSL's developm
 
 ```powershell
 .\build.ps1                   # PowerShell
-build.cmd                     # cmd or a .bat file
+```
+
+```bat
+build.cmd                     :: cmd or a .bat file
 ```
 
 Each builds every plugin into `bin/`. To build only some, name them (`mp1`, `mp2`, `mp3`, `mg64`); to copy the built
@@ -99,7 +102,9 @@ plugins into RMG as well, give its plugin folder:
 .\test\run-tests.ps1 -Game mp2 -Tests teamDuels
 ```
 
-The comments at the top of `test/run-tests.ps1`, `test/driver.d` and each game's test file explain how they work.
+The tests need a portable copy of RMG (with `portable.txt`) set up for testing, and the US ROMs: give their locations
+with `-Rmg` and `-Rom`, since the defaults are the author's own folders. The comments at the top of
+`test/run-tests.ps1`, `test/driver.d` and each game's test file explain how they work.
 
 ## License
 

@@ -12,9 +12,9 @@ how the file works and describes the options every Mario Party plugin has: `char
 | [`teamControl`](#teamcontrol) | `true`/`false` | `false` |
 | [`alwaysDuel`](#alwaysduel) | `true`/`false` | `false` |
 | [`lastPlaceDoubleRoll`](#lastplacedoubleroll) | `true`/`false` | `false` |
+| [`mapScrollSpeedMultiplier`](#mapscrollspeedmultiplier) | number | `1` |
 | [`carryThreeItems`](#carrythreeitems) | `true`/`false` | `false` |
 | [`cheaperAndBetterItems`](#cheaperandbetteritems) | `true`/`false` | `false` |
-| [`randomItemAndDuelMiniGames`](#randomitemandduelminigames) | `true`/`false` | `false` |
 | [`randomBonus`](#randombonus) | `true`/`false` | `false` |
 | [`bonuses`](#bonuses) | object | all eleven bonus stars |
 | [`standardSpaceRatio`](#standardspaceratio) | object | `{}` (off) |
@@ -22,7 +22,7 @@ how the file works and describes the options every Mario Party plugin has: `char
 | [`luckySpaceItemChance`](#luckyspaceitemchance) | number | `0.5` |
 | [`preventRepeatMiniGames`](#preventrepeatminigames) | `true`/`false` | `false` |
 | [`blockedMiniGames`](#blockedminigames) | list | `[]` |
-| [`mapScrollSpeedMultiplier`](#mapscrollspeedmultiplier) | number | `1` |
+| [`randomItemAndDuelMiniGames`](#randomitemandduelminigames) | `true`/`false` | `false` |
 
 ## Teams
 
@@ -34,7 +34,7 @@ Which characters play together, for the other team options.
 - Default: `{ "MARIO": 2, "LUIGI": 2, "PEACH": 1, "YOSHI": 1, "WARIO": 1, "DK": 1 }`
 
 Players whose characters have the same number are teammates; the numbers themselves don't matter. Teams go by
-character, not by player number. A character left out is on team 0, with every other character left out.
+character, not by player number. Characters left out are all on one team together.
 
 With the default, a game with both Mario and Luigi is Mario and Luigi against the other two. With only one of them, that
 player is alone against the other three.
@@ -52,11 +52,12 @@ Whenever a player gains or loses coins or stars, their teammates get the same to
 wallet. This covers the board, Chance Time, Bowser, duels, mini-game and Battle results, and the bonus stars. Each
 team also shares the "Coin Star" record (most coins held at once); the other bonus star records stay per player.
 
-- **Duels** can't be against a teammate. Coins wagered and won go to both teams' players.
+- **Duels** can't be against a teammate. Coins wagered and won are shared within each team, like any other coins.
 - **Boo** can't steal from the player's teammates.
 - **Bingo corrections** to a player's coins or stars apply to their teammates too.
 
-Battle Spaces don't have special team handling yet: each teammate pays into the pot as usual.
+Battle Spaces don't have special team handling yet: each player pays into the pot from the shared wallet, so a team
+pays once for each of its players.
 
 ### `teamMiniGames`
 
@@ -65,9 +66,10 @@ Makes the 2 vs 2 mini-games team against team.
 - Type: `true` or `false`
 - Default: `false`
 
-When the panel colors at the end of a round would make a 2 vs 2 mini-game that splits a team up, the panels are
-recolored so each team plays together. 4-player and 1 vs 3 mini-games are left alone. If every player is on one team, a
-2 vs 2 becomes a 4-player mini-game. Players without a teammate are never changed.
+The panels (the colored boxes next to each player, which decide the mini-game's teams) are recolored at the end of a
+round when they would split every team up: a 2 vs 2 that splits both teams becomes team against team, and if every
+player is on one team, a 1 vs 3 or 2 vs 2 becomes a 4-player mini-game. Otherwise the panels are left alone, and the
+option does nothing unless every player has a teammate.
 
 ### `teamControl`
 
@@ -76,9 +78,9 @@ Lets a human play their computer teammates' turns with their own controller.
 - Type: `true` or `false`
 - Default: `false`
 
-A computer player becomes human-controlled when a teammate is human and on a lower-numbered controller, and that
-teammate's controller plays their turns, menus and mini-games. So in a game of one human and one computer per team, each
-human plays for both of their team's characters.
+A player whose teammate is human and on a lower-numbered controller is controlled by that teammate's controller: their
+turns, menus and mini-games. So in a game of one human and one computer per team, each human plays for both of their
+team's characters. A team of two humans doesn't work: the higher-numbered controller's player is taken over too.
 
 ## Board
 
@@ -98,8 +100,8 @@ Gives the player in last place two dice blocks to hit.
 - Type: `true` or `false`
 - Default: `false`
 
-From turn 2, a player in last place (fewest stars, then fewest coins, counting ties) hits two dice blocks instead of
-one. It doesn't reduce a Golden Mushroom's three. Computer players get it too.
+From turn 2, a player in last place (fewest stars, then fewest coins; players tied for last all get it) hits two dice
+blocks instead of one. It doesn't reduce a Golden Mushroom's three. Computer players get it too.
 
 ### `mapScrollSpeedMultiplier`
 
@@ -137,16 +139,6 @@ Makes items cheaper, and makes every item available from the start of the game.
 - Every item in the Item Shops costs 5 coins less, and players with 5 coins can shop (instead of 10).
 - The Item Shops and Item Spaces offer the items they normally only have near the end of the game, from turn 1.
 
-### `randomItemAndDuelMiniGames`
-
-Picks the Item Space mini-games and duel mini-games from every board, instead of each board's own.
-
-- Type: `true` or `false`
-- Default: `false`
-
-Each board normally has one item mini-game and one duel mini-game. With this, each is a random board's instead,
-skipping any in `blockedMiniGames`.
-
 ## Bonus stars
 
 ### `randomBonus`
@@ -156,8 +148,8 @@ Replaces the end-of-game bonus stars (the Mini-Game, Coin and Happening Stars) w
 - Type: `true` or `false`
 - Default: `false`
 
-The stars are picked from `bonuses` when the bonus stars are given out, from the ones at least one player has done
-anything towards (if fewer than 3 qualify, from all of them). The announcements name each star and what it was for, and
+The stars are picked from `bonuses` when the bonus stars are given out, from the ones at least one player has a count
+above zero for (if fewer than 3 qualify, from all of them). The announcements name each star and what it was for, and
 ties work as usual. If `bonuses` has fewer than 3 stars, the game's own bonus stars are used. It only matters in games
 played with bonus stars on.
 
@@ -176,7 +168,8 @@ The bonus stars `randomBonus` can pick, and their names.
   ```
 
 Remove a type to stop it being picked. The name is shown in the game as "the *name* Star", so keep it short (the
-message windows are small). Letters the game's font doesn't have are shown as `?`.
+message windows are small). Stick to letters, digits and spaces: characters outside plain ASCII are shown as `?`, and
+some punctuation doesn't show as typed.
 
 | Type | Awarded to the player who |
 |------|---------------------------|
@@ -209,7 +202,8 @@ fraction (a board that already has more of a type keeps them). Star Spaces are n
 The spaces are chosen when a game starts on a board and stay for the whole game, through save states. A new game picks
 new ones.
 
-Space types: `RED`, `HAPPENING` (? Space), `CHANCE` (! Space), `ITEM`, `BANK`, `BATTLE`, `BOWSER`. A changed ? Space
+Space types: `RED`, `HAPPENING` (? Space), `CHANCE` (! Space), `ITEM`, `BANK`, `BATTLE`, `BOWSER`; other space types
+aren't supported. A changed ? Space
 counts as a ? Space, but probably has no happening, since each board's happenings belong to particular spaces.
 
 ### `luckySpaceRatio`
@@ -224,7 +218,7 @@ their own picture, on the board and the map), and landing on one gives either a 
 Space:
 
 - **An item**, with the chance in `luckySpaceItemChance`, if the player has room for one. Which items are likely
-  depends on how far into the game it is, like the Item Shops.
+  changes in each third of the game.
 - **Coins** otherwise: 7, 10, 12, 15 or 20 at random, or 12, 15 or 20 in the last 5 turns (a Blue Space gives 3, or 6
   in the last 5 turns).
 
@@ -276,3 +270,13 @@ item mini-games only matters with `randomItemAndDuelMiniGames`: otherwise each b
 | Battle | `GRAB_BAG`, `BUMPER_BALLOON_CARS`, `RAKE_EM_IN`, `DAY_AT_THE_RACES`, `HOT_BOB_OMB`, `FACE_LIFT`, `CRAZY_CUTTERS`, `BOWSERS_BIG_BLAST` |
 | Duel | `QUICK_DRAW_CORKS`, `SABER_SLASHES`, `MUSHROOM_BREW`, `TIME_BOMB`, `PSYCHIC_SAFARI`, `ROCK_PAPER_MARIO` |
 | Item | `BOWSER_SLOTS`, `ROLL_OUT_THE_BARRELS`, `COFFIN_CONGESTION`, `HAMMER_SLAMMER`, `GIVE_ME_A_BRAKE`, `MALLET_GO_ROUND` |
+
+### `randomItemAndDuelMiniGames`
+
+Picks the Item Space mini-games and duel mini-games from every board, instead of each board's own.
+
+- Type: `true` or `false`
+- Default: `false`
+
+Each board normally has one item mini-game and one duel mini-game. With this, each time one is played, it's a random
+board's instead, skipping any in `blockedMiniGames`.
