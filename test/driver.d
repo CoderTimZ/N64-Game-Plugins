@@ -207,8 +207,13 @@ final class TestDriver {
     }
 
     void unlimitSpeed() {
-        int off = 0;
-        command(Command.CORE_STATE_SET, CoreParam.SPEED_LIMITER, &off);
+        setSpeedLimiter(false);
+    }
+
+    // Tests run with the speed limiter off (see onFrame()); a test that measures the frame rate can turn it back on
+    void setSpeedLimiter(bool on) {
+        int value = on;
+        command(Command.CORE_STATE_SET, CoreParam.SPEED_LIMITER, &value);
     }
 
     // Loads an emulator state file (it takes effect at the end of the frame), and waits for it

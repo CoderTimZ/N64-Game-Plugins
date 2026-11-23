@@ -216,6 +216,7 @@ class TestMarioParty3 : MarioParty3 {
             Test("singleUseBattleSpaces", &singleUseBattleSpaces, 60 * 60 * 20),
             Test("autoStartNextBoard", &autoStartNextBoard, 60 * 60 * 30),
             Test("flagReaders", &flagReaders, 60 * 60 * 20),
+            Test("frigidBridgesFps", &frigidBridgesFps, 60 * 60 * 20),
             Test("explore", &explore, 60 * 60 * 30),
             Test("serve", &serve, ulong.max),
         ];
@@ -529,5 +530,61 @@ class TestMarioParty3 : MarioParty3 {
         d.release(0);
         foreach (pc; readers.keys.sort) d.note("READ from ", pc.to!string(16), " x", readers[pc]);
         d.note("Flags now ", 0x800CC158.val!ubyte.to!string(16), " ", 0x800CC159.val!ubyte.to!string(16));
+    }
+
+    // Measures the emulator's speed (frames per wall-clock second, with the speed limiter off and on) on the board and in
+    // Frigid Bridges, a four-way split-screen mini-game (run with test/mp3-config-frigid.json, which blocks every other
+    // 4-player mini-game). Every player is a computer and the panels are held blue, so the round ends with it.
+    void frigidBridgesFps() {
+        import std.datetime.stopwatch : StopWatch, AutoStart;
+        enum CHUNK = 120;
+        // The game's own speed: calls to HuPrcVSleep (each game process calls it once per game frame) per VI
+        ulong sleeps;
+        0x8004F074.onExec({ sleeps++; });
+        double[] measure(ulong chunks, string where) {
+            double[] rates, game;
+            foreach (c; 0..chunks) {
+                auto sw = StopWatch(AutoStart.yes);
+                auto before = sleeps;
+                d.wait(CHUNK);
+                rates ~= CHUNK / (sw.peek.total!"usecs" / 1e6);
+                game ~= cast(double)(sleeps - before) / CHUNK;
+            }
+            d.note(format("FPS %s: %s; mean %.1f, min %.1f", where, rates.map!(r => format("%.1f", r)).join(" "),
+                          rates.sum / rates.length, rates.fold!min));
+            d.note(format("GAME %s: HuPrcVSleep calls per VI %s; mean %.3f", where,
+                          game.map!(r => format("%.2f", r)).join(" "), game.sum / game.length));
+            return rates;
+        }
+
+        setUp(STATE_CHILLY_TURN_1);
+        waitForBoard();
+        players.each!(p => p.data.flags = p.data.flags | 1);
+        d.wait(30);
+        measure(3, "board, limiter off");
+        d.setSpeedLimiter(true);
+        d.wait(30);
+        measure(3, "board, limiter on");
+        d.setSpeedLimiter(false);
+        auto start = d.frame;
+        d.waitUntil(() {
+            if (isBoardScene()) {
+                foreach (p; players) {
+                    p.data.color = PanelColor.BLUE;
+                    p.panel.color = PanelColor.BLUE;
+                }
+            }
+            auto button = data.currentScene == Scene.MINI_GAME_RULES ? Pad.START : Pad.A;
+            d.hold(0, !isBoardScene() && (d.frame - start) % 90 < 10 ? button : 0);
+            return data.currentScene == Scene.FRIGID_BRIDGES;
+        }, "Frigid Bridges to start", 60 * 60 * 15);
+        d.release(0);
+        d.wait(CHUNK);
+        measure(4, "Frigid Bridges, limiter off");
+        d.setSpeedLimiter(true);
+        d.wait(30);
+        measure(8, "Frigid Bridges, limiter on");
+        d.setSpeedLimiter(false);
+        d.check(data.currentScene == Scene.FRIGID_BRIDGES, "Left Frigid Bridges while measuring: " ~ data.currentScene.to!string);
     }
 }
