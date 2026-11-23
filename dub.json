@@ -3,6 +3,7 @@
 		"CoderTim"
 	],
 	"name": "n64-game-plugins",
+	"license": "MIT",
 	"dependencies": {
 		"vibe-d": "~>0.10.3"
 	},
