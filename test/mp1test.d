@@ -311,6 +311,7 @@ class TestMarioParty1 : MarioParty1 {
             Test("smoke", &smoke, 60 * 60),
             Test("jalFromExec", &jalFromExec, 60 * 60),
             Test("customSpaces", &customSpaces, 60 * 60 * 5),
+            Test("staleCustomSpaces", &staleCustomSpaces, 60 * 60),
             Test("landOnCustomSpaces", &landOnCustomSpaces, 60 * 60 * 20),
             Test("bonusStars", &bonusStars, 60 * 60 * 20),
             Test("bonusStarCases", &bonusStarCases, 60 * 60 * 20),
@@ -595,6 +596,34 @@ class TestMarioParty1 : MarioParty1 {
         auto expected = 4.0f * config.mapScrollSpeedMultiplier;
         d.note("Map scroll speed ", speed, " (", before, " before the map), expected ", expected);
         d.check(abs(speed - expected) < 0.001, format("The map scroll speed is %s, not %s", speed, expected));
+    }
+
+    // Custom spaces from another board aren't used: STATE_DK_TURN_1_CUSTOM's State (from before spacesBoard) is taken
+    // as DK's, then a State whose spaces are all ! Spaces, for another board, is replaced. The board's ! Spaces (all
+    // converted ones; DK has none of its own) stay as they were.
+    void staleCustomSpaces() {
+        setUp(STATE_DK_TURN_1_CUSTOM);
+        d.wait(5);
+        auto board = cast(int)data.currentBoard;
+        auto chanceSpaces = () => iota(data.spaceCount).count!(i => data.spaces[i].type == Space.Type.CHANCE);
+        auto chanceBefore = chanceSpaces();
+        d.note("Board ", board, ", custom spaces for board ", state.spacesBoard, ", space 14 ", state.spaces[14],
+               ", ", chanceBefore, " ! Spaces");
+        d.check(state.spacesBoard == board, "The State's spaces weren't taken as this board's");
+        d.check(state.spaces[14] == CustomSpace.CHANCE, "Space 14 isn't a converted ! Space any more");
+        // DK has no ! Spaces of its own, so they're all the State's (and none from the State before the load)
+        auto marked = state.spaces.count!(c => c == CustomSpace.CHANCE);
+        d.check(chanceBefore == marked, format("The board has %d ! Spaces, but the State marks %d", chanceBefore, marked));
+
+        state.spaces[] = CustomSpace.CHANCE;
+        state.spacesBoard = board == 0 ? 1 : 0;
+        d.wait(5);
+        auto stale = state.spaces.count!(c => c == CustomSpace.CHANCE);
+        d.note("After another board's spaces: custom spaces for board ", state.spacesBoard, ", ", stale,
+               " marked ! Spaces, ", chanceSpaces(), " ! Spaces");
+        d.check(state.spacesBoard == board, "The spaces aren't for this board");
+        d.check(stale < state.spaces.length / 2, "Another board's spaces were kept");
+        d.check(chanceSpaces() == chanceBefore, format("The board has %d ! Spaces, not %d", chanceSpaces(), chanceBefore));
     }
 
     // jal() from an onExec hook: the call gets its arguments (GetPlayerStruct(2) returns P3's), and the registers are
