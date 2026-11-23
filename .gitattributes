@@ -1,5 +1,7 @@
 # Raw texture data, compiled into the plugins: never change its bytes
 *.rgba binary
+*.ci4 binary
+*.ci8 binary
 
 # Shell scripts run on Linux and macOS, where a carriage return breaks them
 *.sh text eol=lf

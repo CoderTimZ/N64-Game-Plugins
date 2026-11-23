@@ -1016,17 +1016,6 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
         return changed;
     }
 
-    // Logs how many lucky spaces each player landed on, when the game ends
-    void logLuckySpaces()() {
-        data.currentScene.onWrite((ref Scene scene) {
-            if (scene != Scene.FINAL_RESULTS) return;
-            info("Lucky Spaces:");
-            iota(4).map!(i => players[data.finalPlayerRankOrder[i]]).each!((p) {
-                info(format("    %-8s %2d", p.data.character.to!string ~ ":", p.state.luckySpaceCount));
-            });
-        });
-    }
-
     // Chance Time picks its two players by character, so with two players of the same character it could pick the
     // wrong one, or the same player twice. The game finds the player for the first and second character at pickFirst
     // and pickSecond (a0): these pick a player with that character who isn't the other one instead.

@@ -279,7 +279,8 @@ class TestMarioParty2 : MarioParty2 {
     // RIGHT, CUP, CDOWN, CLEFT, CRIGHT, or several joined with +) pressed on controller 1, "wait<frames>", "shot",
     // "save:<file>" or "load:<file>" (an emulator state), "untilboard" (presses A until a board's first turn starts),
     // "stick:<x>,<y>", "cpu" (makes every player a computer), "spaces" (lists the board's spaces), "turn:<player>",
-    // "coins:<P1>,<P2>,<P3>,<P4>" (or "stars:"), or "test:<name>" (runs a test).
+    // "coins:<P1>,<P2>,<P3>,<P4>" (or "stars:"), "lastturn" (makes the current turn the last), "until:<scene>" (presses
+    // A until a scene), "human:<player>", "lucky:<P1>,<P2>,<P3>,<P4>" (Lucky Space counts), or "test:<name>".
     void runSteps(string stepText, bool shotAfterPress) {
         ushort[string] BUTTONS = ["A": Pad.A, "B": Pad.B, "Z": Pad.Z, "START": Pad.START, "UP": Pad.UP, "DOWN": Pad.DOWN,
                                   "LEFT": Pad.LEFT, "RIGHT": Pad.RIGHT, "L": Pad.L, "R": Pad.R, "CUP": Pad.C_UP,
@@ -336,6 +337,47 @@ class TestMarioParty2 : MarioParty2 {
                 d.release(0);
                 d.note("Stick ", xy, " (scene ", data.currentScene, ")");
                 if (shotAfterPress) d.screenshot(step);
+            } else if (step == "lastturn") { // Makes the current turn the game's last
+                data.totalTurns = data.currentTurn;
+                d.note("Last turn: ", describe());
+            } else if (step.startsWith("until:")) { // until:<scene>: presses A (Start on rules screens) until a scene
+                auto target = step[6..$].to!Scene;
+                auto start = d.frame;
+                while (data.currentScene != target) {
+                    auto rules = data.currentScene == Scene.MINI_GAME_RULES || data.currentScene == Scene.MINI_GAME_RULES_2;
+                    d.hold(0, !isBoardScene() && (d.frame - start) % 90 < 10 ? (rules ? Pad.START : Pad.A) : 0);
+                    watch(1);
+                    d.check(d.frame - start < 60 * 60 * 15, "Timed out waiting for " ~ target.to!string);
+                }
+                d.release(0);
+                d.note("Reached ", target, ": ", describe());
+            } else if (step.startsWith("human:")) { // human:<player>: makes a player (1-4) human
+                auto p = players[step[6..$].to!int - 1];
+                p.data.flags = p.data.flags & ~1;
+                d.note("Human: ", describe());
+            } else if (step.startsWith("lucky:")) { // lucky:<P1>,<P2>,<P3>,<P4>: each player's Lucky Space count
+                foreach (i, v; step[6..$].split(",").map!(v => v.to!int).array) players[i].state.luckySpaceCount = v;
+                saveState();
+                d.note("Lucky Space counts: ", players.map!(p => p.state.luckySpaceCount));
+            } else if (step == "dumpresults") { // Dumps the detailed results' icon files and logs their messages
+                0x80103F5C.onExec({ // DataClose(a0 = s3): the icon file s4 was just made a sprite animation
+                    if (data.currentScene != Scene.FINAL_RESULTS) return;
+                    import std.file : write;
+                    auto bytes = new ubyte[4096];
+                    foreach (k, ref b; bytes) b = (gpr.s3 + cast(uint)k).val!ubyte;
+                    auto name = format("TestLogs/mp2-icon-%02d.bin", cast(int)gpr.s4);
+                    write(name, bytes);
+                    d.note("Dumped icon ", cast(int)gpr.s4, " (", (cast(uint)gpr.s3).to!string(16), ") to ", name);
+                });
+                static ushort dumpId;
+                static uint dumpLength;
+                0x80068CD4.onExec({ dumpId = cast(ushort)gpr.a0; });            // Load message a0
+                0x80068CE8.onExec({ dumpLength = (gpr.sp + 20).val!uint; });   // Its length
+                0x80068D10.onExec({                                            // s0 = the message, read
+                    if (data.currentScene != Scene.FINAL_RESULTS || dumpId < 0x60D || dumpId > 0x618) return;
+                    auto bytes = iota(dumpLength).map!(k => (gpr.s0 + k).val!ubyte);
+                    d.note(format("Message %04X (%d bytes): %(%02X %)", dumpId, dumpLength, bytes));
+                });
             } else if (step == "cpu") {
                 players.each!(p => p.data.flags = p.data.flags | 1);
             } else if (step == "shot") {

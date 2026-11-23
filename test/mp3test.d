@@ -258,7 +258,8 @@ class TestMarioParty3 : MarioParty3 {
     // RIGHT, CUP, CDOWN, CLEFT, CRIGHT, or several joined with +) pressed on controller 1, "wait<frames>", "shot",
     // "save:<file>" or "load:<file>" (an emulator state), "untilboard" (presses A until a board's first turn starts),
     // "stick:<x>,<y>", "cpu" (makes every player a computer), "spaces" (lists the board's spaces), "turn:<player>",
-    // or "test:<name>" (runs a test).
+    // "lastturn" (makes the current turn the last), "until:<scene>" (presses A until a scene), "human:<player>",
+    // "lucky:<P1>,<P2>,<P3>,<P4>" (Lucky Space counts), or "test:<name>".
     void runSteps(string stepText, bool shotAfterPress) {
         ushort[string] BUTTONS = ["A": Pad.A, "B": Pad.B, "Z": Pad.Z, "START": Pad.START, "UP": Pad.UP, "DOWN": Pad.DOWN,
                                   "LEFT": Pad.LEFT, "RIGHT": Pad.RIGHT, "L": Pad.L, "R": Pad.R, "CUP": Pad.C_UP,
@@ -309,6 +310,45 @@ class TestMarioParty3 : MarioParty3 {
                 d.release(0);
                 d.note("Stick ", xy, " (scene ", data.currentScene, ")");
                 if (shotAfterPress) d.screenshot(step);
+            } else if (step == "lastturn") { // Makes the current turn the game's last
+                data.totalTurns = data.currentTurn;
+                d.note("Last turn: ", describe());
+            } else if (step.startsWith("until:")) { // until:<scene>: presses A (Start on rules screens) until a scene
+                auto target = step[6..$].to!Scene;
+                auto start = d.frame;
+                while (data.currentScene != target) {
+                    auto button = data.currentScene == Scene.MINI_GAME_RULES ? Pad.START : Pad.A;
+                    d.hold(0, !isBoardScene() && (d.frame - start) % 90 < 10 ? button : 0);
+                    watch(1);
+                    d.check(d.frame - start < 60 * 60 * 15, "Timed out waiting for " ~ target.to!string);
+                }
+                d.release(0);
+                d.note("Reached ", target, ": ", describe());
+            } else if (step.startsWith("human:")) { // human:<player>: makes a player (1-4) human
+                auto p = players[step[6..$].to!int - 1];
+                p.data.flags = p.data.flags & ~1;
+                d.note("Human: ", describe());
+            } else if (step == "dumpresults") { // Dumps the detailed results' icon files and logs their messages
+                0x80108178.onExec({ // HuSprAnimRead(data): s2 = the icon file DataRead loaded
+                    if (data.currentScene != Scene.FINAL_RESULTS) return;
+                    import std.file : write;
+                    auto bytes = new ubyte[4096];
+                    foreach (k, ref b; bytes) b = (gpr.s2 + cast(uint)k).val!ubyte;
+                    static int dumped;
+                    auto name = format("TestLogs/icon-%02d.bin", dumped++);
+                    write(name, bytes);
+                    d.note("Dumped icon file at ", (cast(uint)gpr.s2).to!string(16), " to ", name);
+                });
+                0x80036574.onExec({ // A message is being loaded: s0 = length, then text
+                    if (data.currentScene != Scene.FINAL_RESULTS) return;
+                    if (messageId < 0x1900 || messageId > 0x190C) return;
+                    auto bytes = iota(cast(short)gpr.s1).map!(k => (gpr.s0 + 2 + k).val!ubyte);
+                    d.note(format("Message %04X: %(%02X %)", messageId, bytes));
+                });
+            } else if (step.startsWith("lucky:")) { // lucky:<P1>,<P2>,<P3>,<P4>: each player's Lucky Space count
+                foreach (i, v; step[6..$].split(",").map!(v => v.to!int).array) players[i].state.luckySpaceCount = v;
+                saveState();
+                d.note("Lucky Space counts: ", players.map!(p => p.state.luckySpaceCount));
             } else if (step == "cpu") {
                 players.each!(p => p.data.flags = p.data.flags | 1);
             } else if (step == "shot") {

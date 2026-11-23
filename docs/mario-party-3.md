@@ -311,7 +311,8 @@ board and the map, and landing on one either works as an Item Space or gives mor
   3.
 
 Landing on a Lucky Space doesn't count as a Blue Space for the Blue bonus star, and counts for the `LUCKY` bonus star
-instead. At the end of the game, the emulator's log lists how many Lucky Spaces each player landed on.
+instead. At the end of the game, the detailed results (Start, at the final results) have a Lucky Spaces column after
+Blue Spaces, with how many Lucky Spaces each player landed on.
 
 Lucky Spaces are chosen with `standardSpaceRatio`'s spaces, from the Blue Spaces it leaves, and stay for the whole game
 in the same way. Hidden blocks are never on a Lucky Space.

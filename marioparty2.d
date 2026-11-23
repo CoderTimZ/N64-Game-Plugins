@@ -341,6 +341,150 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
         return formatText("<CLEAR>" ~ text ~ "<END><NUL>");
     }
 
+    // The detailed results (the final results' Start screen) get a Lucky Spaces column after Blue Spaces. The screen
+    // shows 4 of its 12 columns at a time (0x8010848C = the first one shown, 0x80108490 = the cursor in them), each
+    // with a header icon (sprites 1-12), each player's number in a text window (11 windows: Bank Spaces shares Stars',
+    // which is never shown with it, and the game changes its text as the screen scrolls), and Toad's description of
+    // the cursor's column. With the Lucky Spaces column there are 13: from Red Spaces on, column c is the game's
+    // column c - 1. Its icon is a 14th sprite, made from the Blue Spaces icon, and its numbers share Coins' window,
+    // which is never shown with it either.
+    bool luckyDescription;   // The description being shown is the Lucky Spaces column's (Blue's message, changed)
+    bool luckyDescriptionLoading;
+
+    void setUpLuckyResultsColumn() {
+        enum LUCKY = 5, COLUMNS = 13;
+        enum Address FIRST = 0x8010848C, CURSOR = 0x80108490;
+        enum Address ICONS = 0x80108AA6;      // The icons' sprite group (short)
+        enum Address WINDOWS = 0x80108AE0;    // The columns' text windows (int each)
+        enum Address TEXTS = 0x80108B10;      // Their numbers' text: 32 bytes per column, 8 per row
+        enum Address RANKS = 0x800F8CE4;      // Each row's player (short each), from 1st
+        enum Address SCALES = 0x801084F4;     // Each column's icon scale (float each)
+        enum Address WINDOW_DATA = 0x800F920C; // Pointer to the windows' data, 636 bytes each
+        bool resultsScreen() { return data.currentScene == Scene.FINAL_RESULTS; }
+        // For column c: the game's column (Lucky Spaces: Blue's), its text window, and its icon's sprite
+        static int column(int c) { return c < LUCKY ? c : c == LUCKY ? 4 : c - 1; }
+        static int window(int c) { return c < LUCKY ? c : c == LUCKY ? 1 : c == COLUMNS - 1 ? 0 : c - 1; }
+        static int sprite(int c) { return c == LUCKY ? COLUMNS : column(c) + 1; }
+        int shownColumn(int slot) { return FIRST.val!int + slot; }
+        short luckyIcon = -1;   // The Lucky Spaces icon's sprite animation, freed with the others
+        // The hooks below call the game, which returns to the hooked instruction: these keep them from starting again
+        bool makingIcon, settingUpIcon;
+        bool windowShowsLucky;  // Coins' window has the Lucky Spaces numbers
+
+        // The icons: a sprite group of 14 instead of 13 (func_8007FA6C(count, ...))
+        0x80103EDC.onExec({
+            if (!resultsScreen() || gpr.a0 != 13) return;
+            gpr.a0 = 14;
+            makingIcon = settingUpIcon = false;
+        });
+        // Each icon's file is loaded, made a sprite animation (func_80082800), then freed (DataClose, a0 = s3). Before
+        // the Blue Spaces icon's (s4 = 4) is freed, its pixels and palette become the Lucky Spaces icon's, and it's
+        // made an animation again.
+        0x80103F5C.onExec({
+            if (!resultsScreen() || gpr.s4 != 4 || makingIcon) return;
+            makingIcon = true;
+            foreach (i, b; LUCKY_RESULTS_ICON[0..256]) (gpr.s3 + 0x2C + cast(uint)i).val!ubyte = b;  // Pixels
+            foreach (i, b; LUCKY_RESULTS_ICON[256..$]) (gpr.s3 + 0x12C + cast(uint)i).val!ubyte = b; // Palette
+            0x80082800.jal(gpr.s3, (uint anim) { luckyIcon = cast(short)anim; });
+        });
+        // After the 12 icons, sprite 13 gets the Lucky Spaces icon, set up like the others: its animation
+        // (func_8008218C), then func_8008225C, its priority (func_80082384), its attributes (func_80082418), its
+        // position (func_80081AD0, the first slot's), its scale (func_80082340, 1 like the space icons') and
+        // func_8008221C
+        0x80104004.onExec({
+            if (!resultsScreen() || luckyIcon < 0 || settingUpIcon) return;
+            settingUpIcon = true;
+            auto group = ICONS.val!short;
+            0x8008218C.jal(group, COLUMNS, luckyIcon, 0, {
+                0x8008225C.jal(group, COLUMNS, 1, {
+                    0x80082384.jal(group, COLUMNS, 15, {
+                        0x80082418.jal(group, COLUMNS, 0x9000, {
+                            0x80081AD0.jal(group, COLUMNS, 0x801084A4.val!short, 0x801084A6.val!short, {
+                                0x80082340.jal(group, COLUMNS, 0x3F800000, 0x3F800000, {
+                                    0x8008221C.jal(group, COLUMNS, 0);
+                                });
+                            });
+                        });
+                    });
+                });
+            });
+        });
+        // The screen frees the icons' animations (func_80082660), then the group: the Lucky Spaces icon's too
+        0x80104430.onExec({
+            if (!resultsScreen() || luckyIcon < 0) return;
+            auto anim = luckyIcon;
+            luckyIcon = -1;
+            0x80082660.jal(anim);
+        });
+
+        // Showing the icons: all 13 are hidden, then the 4 shown are shown and positioned (a1 = the column's sprite,
+        // scaled by the game column's scale)
+        0x80102C44.onExecDone({ if (resultsScreen()) gpr.v0 = gpr.s1 < COLUMNS; });
+        0x80102C84.onExec({ if (resultsScreen()) gpr.a1 = sprite(shownColumn(cast(int)gpr.s1)); });
+        0x80102CCC.onExec({ if (resultsScreen()) gpr.v0 = SCALES + 4 * column(shownColumn(cast(int)gpr.s1)); });
+        0x80102D1C.onExec({ if (resultsScreen()) gpr.a1 = sprite(shownColumn(cast(int)gpr.s1)); });
+        // Showing the numbers: the 4 shown columns' windows are shown and positioned (s0 = the column's window entry)
+        0x80102DC4.onExec({ if (resultsScreen()) gpr.s0 = WINDOWS + 4 * window(shownColumn(cast(int)gpr.s1)); });
+
+        // Coins' window has Coins' numbers while it can be shown (the first column shown is 0 or 1), and Lucky
+        // Spaces' otherwise. The game fills the windows (func_80102EB4) when the screen opens, and changes Stars'
+        // window to Bank's and back (func_8010361C) before showing the columns. The numbers are each row's text
+        // ("%3d", spaces as code 0x1A) for func_80089308 (window, text, row), then the window shows them again (its
+        // data + 76 = 8, then func_800890CC(window, 0x61B, 8, 4)).
+        0x80102EB4.onExec({ if (resultsScreen()) windowShowsLucky = false; });
+        0x8010361C.onExec({
+            if (!resultsScreen()) return;
+            auto lucky = FIRST.val!int >= 2;
+            if (lucky == windowShowsLucky) return;
+            windowShowsLucky = lucky;
+            auto id = (WINDOWS + 4).val!int;
+            foreach (row; 0..4) {
+                auto player = (RANKS + row * 2).val!short;
+                auto value = lucky ? players[player].state.luckySpaceCount
+                                   : (0x800FD2C8 + player * 0x34).val!short; // Coins
+                auto text = format("%3d", value).replace(" ", "\x1A") ~ '\0';
+                foreach (i, c; text) (TEXTS + 32 + row * 8 + cast(uint)i).val!char = c;
+            }
+            0x80089308.jal(id, TEXTS + 32, 0, {
+                0x80089308.jal(id, TEXTS + 40, 1, {
+                    0x80089308.jal(id, TEXTS + 48, 2, {
+                        0x80089308.jal(id, TEXTS + 56, 3, {
+                            (WINDOW_DATA.val!uint + id * 636 + 76).val!short = 8;
+                            0x800890CC.jal(id, 0x61B, 8, 4);
+                        });
+                    });
+                });
+            });
+        });
+
+        // Scrolling: the first column shown goes up to 9 instead of 8 (moving right, 0x801042A8 checks it's below 8),
+        // and the right arrow hides at 9 (0x80102BF0 compares it with 8)
+        0x801042A8.onExecDone({ if (resultsScreen()) gpr.v0 = cast(int)gpr.v1 < COLUMNS - 4; });
+        0x80102BF0.onExec({ if (resultsScreen()) gpr.v0 = COLUMNS - 4; });
+
+        // Toad's description of the cursor's column (func_800890CC, a1 = message 0x60D + the game's column): the
+        // Lucky Spaces column shows the Blue Spaces message (0x611), changed as it's loaded. Every message is loaded by
+        // ID through func_80068CD4(id), which reads it from ROM into a newly allocated buffer of its length.
+        0x80102E58.onExec({
+            if (!resultsScreen()) return;
+            auto c = FIRST.val!int + CURSOR.val!int;
+            luckyDescription = c == LUCKY;
+            gpr.a1 = 0x60D + column(c);
+        });
+        ushort loadingId;
+        0x80068CD4.onExec({ loadingId = cast(ushort)gpr.a0; });
+        0x80068CE8.onExec({ // 20(sp) = length; next, it allocates and reads that many bytes
+            if (!resultsScreen() || !luckyDescription || loadingId != 0x611) return;
+            (gpr.sp + 20).val!ushort = cast(ushort)LUCKY_DESCRIPTION.length;
+            luckyDescriptionLoading = true;
+        });
+        0x80068D10.onExec({ // s0 = the buffer, read
+            if (!luckyDescriptionLoading) return;
+            luckyDescriptionLoading = false;
+            foreach (i, b; LUCKY_DESCRIPTION) (gpr.s0 + cast(uint)i).val!ubyte = b;
+        });
+    }
+
     override void onStart() {
         super.onStart();
 
@@ -798,7 +942,9 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
                     gpr.s0 = [7, 10, 12, 15, 20].choice(random);
                 }
             });
-            logLuckySpaces();
+            if (config.luckySpaceRatio > 0) {
+                setUpLuckyResultsColumn();
+            }
         }
 
         if (config.mapScrollSpeedMultiplier != 1.0) {
@@ -1208,4 +1354,14 @@ enum Scene : uint {
 
 // The Lucky Space texture: 32x32 pixels, 4 bytes each (red, green, blue, alpha), from textures/mp2-lucky-space.rgba
 immutable ubyte[] LUCKY_SPACE_TEXTURE = cast(immutable(ubyte)[])import("mp2-lucky-space.rgba");
+
+// The Lucky Spaces column's icon in the detailed results, from textures/mp2-lucky-results-icon.ci8: the Blue Spaces
+// icon (16x16 pixels, a byte each, a palette index) with a white four-leaf clover. Its pixels (256 bytes, for 0x2C in
+// the icon file) then its palette (66 RGBA5551 colors, for 0x12C).
+immutable ubyte[] LUCKY_RESULTS_ICON = cast(immutable(ubyte)[])import("mp2-lucky-results-icon.ci8");
+static assert(LUCKY_RESULTS_ICON.length == 256 + 66 * 2);
+
+// The Lucky Spaces column's description: the Blue Spaces one (message 0x611) for Lucky Spaces, padded to an even length
+immutable ubyte[] LUCKY_DESCRIPTION = cast(immutable(ubyte)[])("\x0BNumber of times player\nlanded on \x02\x0FLucky Spaces" ~
+    "\x16\x19\x85\n\x1A\x1A\x1A\x1A\x2B \xFE Back to Last Screen\0\0\0");
 static assert(LUCKY_SPACE_TEXTURE.length == 32 * 32 * 4);
