@@ -13,7 +13,6 @@ import std.traits;
 import std.stdio;
 import std.typecons;
 import std.math;
-import std.regex;
 import vibe.core.concurrency;
 import vibe.core.task;
 import vibe.vibe;
@@ -93,8 +92,62 @@ mixin template Field(Address A, T, string N) {
     }
 }
 
-string lossyFloats(string json) {
-    return json.replaceAll!(m => m.hit.to!double.to!string)(regex(`-?[0-9]+\.[0-9]+`));
+// JSON text for a value, laid out as std.json's toString/toPrettyString do (sorted keys, the same escaping), but with
+// floats written as D writes them (0.333, 2) rather than std.json's 18 significant digits (0.333000000000000018).
+string toJSONText(const JSONValue value, bool pretty = false) {
+    import std.array : appender;
+    import std.math.traits : isFinite;
+
+    auto json = appender!string;
+    void put(const JSONValue v, size_t indent) {
+        void newLine(size_t level) {
+            if (!pretty) return;
+            json.put('\n');
+            foreach (i; 0..level) json.put("    ");
+        }
+        final switch (v.type) {
+            case JSONType.object:
+                auto obj = v.objectNoRef;
+                if (obj.length == 0) { json.put("{}"); break; }
+                json.put('{');
+                foreach (i, key; obj.keys.sort.release) {
+                    if (i) json.put(',');
+                    newLine(indent + 1);
+                    json.put(JSONValue(key).toString(JSONOptions.doNotEscapeSlashes));
+                    json.put(pretty ? ": " : ":");
+                    put(obj[key], indent + 1);
+                }
+                newLine(indent);
+                json.put('}');
+                break;
+            case JSONType.array:
+                auto arr = v.arrayNoRef;
+                if (arr.length == 0) { json.put("[]"); break; }
+                json.put('[');
+                foreach (i, element; arr) {
+                    if (i) json.put(',');
+                    newLine(indent + 1);
+                    put(element, indent + 1);
+                }
+                newLine(indent);
+                json.put(']');
+                break;
+            case JSONType.float_:
+                if (!v.floating.isFinite) throw new JSONException("Can't write " ~ v.floating.to!string ~ " in JSON");
+                json.put(v.floating.to!string);
+                break;
+            case JSONType.string:
+            case JSONType.integer:
+            case JSONType.uinteger:
+            case JSONType.true_:
+            case JSONType.false_:
+            case JSONType.null_:
+                json.put(v.toString(JSONOptions.doNotEscapeSlashes));
+                break;
+        }
+    }
+    put(value, 0);
+    return json.data;
 }
 
 JSONValue toJSON(T)(const T scl) if (isScalarType!T && !is (T == enum)) { return JSONValue(scl); }
@@ -138,7 +191,9 @@ T fromJSON(T)(const JSONValue scl) if (isScalarType!T && !is (T == enum)) {
         case JSONType.float_:   return cast(T)scl.floating;
         case JSONType.true_:    return cast(T)scl.boolean;
         case JSONType.false_:   return cast(T)scl.boolean;
-        default:                assert(0, "Invalid JSONValue type");
+        default:
+            throw new JSONException("expected " ~ (is(T == bool) ? "true, false or a number" : "a number") ~ ", not " ~
+                                    (scl.type == JSONType.null_ ? "null" : "a " ~ scl.type.to!string.stripRight("_")));
     }
 }
 T fromJSON(T)(const JSONValue enm) if (is (T == enum)) {
@@ -155,12 +210,21 @@ T fromJSON(T)(const JSONValue obj) if (isAssociativeArray!T) {
     }
     return result;
 }
+// A field's value, with errors saying which field they're in (for a config file's options)
+T fromJSONField(T)(const JSONValue value, string field) {
+    try {
+        return value.fromJSON!T;
+    } catch (Exception e) {
+        throw new JSONException(field ~ ": " ~ e.msg);
+    }
+}
+
 T fromJSON(T)(const JSONValue obj) if (is(T == struct)) {
     T result;
     foreach (i, ref v; result.tupleof) {
         auto k = __traits(identifier, result.tupleof[i]);
         if (auto value = k in obj) {
-            v = (*value).fromJSON!(typeof(v));
+            v = (*value).fromJSONField!(typeof(v))(k);
         }
     }
     return result;
@@ -171,7 +235,7 @@ T fromJSON(T)(const JSONValue obj, T result = null) if (is(T == class)) {
     foreach (i, ref v; result.tupleof) {
         auto k = __traits(identifier, result.tupleof[i]);
         if (auto value = k in obj) {
-            v = (*value).fromJSON!(typeof(v));
+            v = (*value).fromJSONField!(typeof(v))(k);
         }
     }
     static if (is(BaseClassesTuple!T[0])) {
@@ -506,7 +570,7 @@ void showError(const(char)[] title, const(char)[] message) {
 static void saveJson(T)(T json, string filename) {
     static if (!is(T == NoState)) {
         try {
-            std.file.write(filename, json.toJSON().toPrettyString(JSONOptions.doNotEscapeSlashes).lossyFloats());
+            std.file.write(filename, json.toJSON().toJSONText(true));
         } catch (Exception e) {
             auto msg = e.classinfo.name ~ ": " ~ e.message;
             error("[" ~ filename ~ "] " ~ msg);
@@ -520,7 +584,7 @@ static void saveJson(T)(T json, string filename) {
 // of a plugin still loads, with missing fields keeping their defaults and unknown fields ignored.
 ubyte[] packState(T)(T state) {
     import std.zlib : compress;
-    return cast(ubyte[])compress(state.toJSON().toString(JSONOptions.doNotEscapeSlashes).lossyFloats(), 9);
+    return cast(ubyte[])compress(state.toJSON().toJSONText(), 9);
 }
 
 T unpackState(T)(const(ubyte)[] data) {
@@ -891,7 +955,7 @@ abstract class Game(Config, State = NoState) : Plugin {
     }
 
     void sendMessage(JSONValue msg) {
-        sendMessage(msg.toString(JSONOptions.doNotEscapeSlashes).lossyFloats());
+        sendMessage(msg.toJSONText());
     }
 
     void onStart() {
