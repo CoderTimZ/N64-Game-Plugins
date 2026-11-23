@@ -1,12 +1,13 @@
 # Sends steps to RMG running a game's "serve" test (.\test\run-tests.ps1 -Game <game> -Serve), waits for them to
-# finish, and prints what they logged. Steps are as in runSteps() in test/mp1test.d or test/mp2test.d, e.g.:
+# finish, and prints what they logged. Steps are as in runSteps() in the game's test file (test/mp1test.d and so on),
+# e.g.:
 #
 #   .\test\send-command.ps1 "load:TestStates/mp1-setup-map.st A wait200 shot"
 #   .\test\send-command.ps1 -Game mp2 "test:teamDuels"
 #   .\test\send-command.ps1 quit
 param(
     [Parameter(Mandatory, Position = 0)][string]$Steps,
-    [ValidateSet("mp1", "mp2")][string]$Game = "mp1",
+    [ValidateSet("mp1", "mp2", "mp3")][string]$Game = "mp1",
     [string]$Rmg = "C:\Users\timzi\Code\RMG-Test",
     [int]$TimeoutSeconds = 600
 )

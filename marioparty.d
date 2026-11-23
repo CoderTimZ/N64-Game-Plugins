@@ -928,7 +928,7 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
     // into other kinds, kept in state.spaces (for the board in state.spacesBoard) for the whole game. These clear them
     // when a game starts.
     void resetCustomSpacesAtStart()() {
-        data.currentScene.onWrite((ref Scene scene) { // Reset lucky spaces at start of game
+        data.currentScene.onWrite((ref Scene scene) { // Clear the custom spaces at the start of a game
             if (scene != Scene.START_BOARD) return;
 
             state.spaces.length = 0;

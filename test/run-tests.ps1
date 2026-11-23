@@ -1,14 +1,16 @@
-# Runs a game's tests (test/mp1test.d, test/mp2test.d) in the test copy of RMG and prints the results.
+# Runs a game's tests (test/mp1test.d, test/mp2test.d, test/mp3test.d) in the test copy of RMG and prints the
+# results.
 #
 #   .\test\run-tests.ps1                              # every Mario Party 1 test
 #   .\test\run-tests.ps1 -Tests smoke,bonusStars
 #   .\test\run-tests.ps1 -Game mp2 -Tests teamDuels
+#   .\test\run-tests.ps1 -Game mp3 -Tests singleUseBattleSpaces -Config test\mp3-config-lucky.json
 #   .\test\run-tests.ps1 -Game mp2 -Serve             # keeps RMG open for test\send-command.ps1
 #
 # It builds the game's test plugin (dub build -c <game>-test), copies it and the config into the test RMG, and runs RMG
 # on the game's ROM. The test plugin stops the emulator when the tests finish; the log is in TestLogs\ in the test RMG.
 param(
-    [ValidateSet("mp1", "mp2")][string]$Game = "mp1",
+    [ValidateSet("mp1", "mp2", "mp3")][string]$Game = "mp1",
     [string[]]$Tests = @(),
     [string]$Config = "",
     [string]$Rmg = "C:\Users\timzi\Code\RMG-Test",
@@ -22,11 +24,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path $PSScriptRoot -Parent
-$plugin = @{ mp1 = "MarioParty1"; mp2 = "MarioParty2" }[$Game]
-$configName = @{ mp1 = "MarioParty"; mp2 = "MarioParty2" }[$Game] # The plugin reads <ROM name>.json
+$plugin = @{ mp1 = "MarioParty1"; mp2 = "MarioParty2"; mp3 = "MarioParty3" }[$Game]
+$configName = @{ mp1 = "MarioParty"; mp2 = "MarioParty2"; mp3 = "MarioParty3" }[$Game] # The plugin reads <ROM name>.json
 if (-not $Config) { $Config = "$PSScriptRoot\$Game-config.json" }
 if (-not $Rom) {
-    $Rom = @{ mp1 = "R:\ROMs\N64\Mario Party (U) [!].z64"; mp2 = "R:\ROMs\N64\Mario Party 2 (U) [!].z64" }[$Game]
+    $Rom = @{
+        mp1 = "R:\ROMs\N64\Mario Party (U) [!].z64"
+        mp2 = "R:\ROMs\N64\Mario Party 2 (U) [!].z64"
+        mp3 = "R:\ROMs\N64\Mario Party 3 (U) [!].z64"
+    }[$Game]
 }
 
 if (-not $NoBuild) {

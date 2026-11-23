@@ -48,6 +48,14 @@
       "sourceFiles": ["plugin.d", "marioparty.d", "marioparty2.d", "test/driver.d", "test/mp2test.d"]
     },
     {
+      "name": "mp3-test",
+      "targetType": "dynamicLibrary",
+      "targetName": "MarioParty3",
+      "targetPath": "test-bin",
+      "versions": ["TestDriver"],
+      "sourceFiles": ["plugin.d", "marioparty.d", "marioparty3.d", "test/driver.d", "test/mp3test.d"]
+    },
+    {
       "name": "mg64",
       "targetType": "dynamicLibrary",
       "targetName": "MarioGolf64",

@@ -893,7 +893,40 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             });
         }
 
-        if (config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 || config.standardSpaceRatio.values.any!(v => v > 0.0)) {
+        immutable customSpaces = config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 ||
+                                 config.standardSpaceRatio.values.any!(v => v > 0.0);
+
+        // The game draws the spaces from lists of each type's spaces, made when the board loads, so a space the plugin
+        // changes would still be drawn as it was: this draws them by their types as they are now instead (with Lucky
+        // Spaces and revealed hidden blocks as types of their own)
+        void drawSpacesByCurrentType() {
+            0x800EAC70.onExecDone({
+                if (!isBoardScene()) return;
+
+                static Array!ubyte[CustomSpace.max+1] spaceLists;
+
+                if (gpr.s3 == Space.Type.BLUE && gpr.s2 == 0) {
+                    spaceLists.each!((ref e) => e.length = 0);
+                    foreach (i; iota(data.spaceCount)) {
+                        if (data.spaces[i].type == Space.Type.BLUE) {
+                            if (remainingTurns() <= config.revealHiddenBlocksOnRemainingTurns &&
+                               (i == data.itemHiddenBlock || i == data.coinHiddenBlock || i == data.starHiddenBlock)) {
+                                spaceLists[CustomSpace.HIDDEN] ~= cast(ubyte)i;
+                                continue;
+                            } else if (i < state.spaces.length && state.spaces[i] == CustomSpace.LUCKY) {
+                                spaceLists[CustomSpace.LUCKY] ~= cast(ubyte)i;
+                                continue;
+                            }
+                        }
+
+                        spaceLists[data.spaces[i].type] ~= cast(ubyte)i;
+                    }
+                }
+
+                gpr.a0 = (gpr.s2 >= spaceLists[gpr.s3].length ? 0xFF : spaceLists[gpr.s3][gpr.s2]);
+            });
+        }
+        if (customSpaces) {
             bool lumasPlaygroundHiddenIndex(ushort index) {
                 if (getCurrentBoardName() != "Luma's Playground") return false;
                 
@@ -960,31 +993,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             0x800EA8AC.onExecDone(selectSpaceTexture);
             0x800EA970.onExecDone(selectSpaceTexture);
             0x800EAA3C.onExecDone(selectSpaceTexture);
-            0x800EAC70.onExecDone({
-                if (!isBoardScene()) return;
-
-                static Array!ubyte[CustomSpace.max+1] spaceLists;
-
-                if (gpr.s3 == Space.Type.BLUE && gpr.s2 == 0) {
-                    spaceLists.each!((ref e) => e.length = 0);
-                    foreach (i; iota(data.spaceCount)) {
-                        if (data.spaces[i].type == Space.Type.BLUE) {
-                            if (remainingTurns() <= config.revealHiddenBlocksOnRemainingTurns &&
-                               (i == data.itemHiddenBlock || i == data.coinHiddenBlock || i == data.starHiddenBlock)) {
-                                spaceLists[CustomSpace.HIDDEN] ~= cast(ubyte)i;
-                                continue;
-                            } else if (state.spaces[i] == CustomSpace.LUCKY) {
-                                spaceLists[CustomSpace.LUCKY] ~= cast(ubyte)i;
-                                continue;
-                            }
-                        }
-
-                        spaceLists[data.spaces[i].type] ~= cast(ubyte)i;
-                    }
-                }
-
-                gpr.a0 = (gpr.s2 >= spaceLists[gpr.s3].length ? 0xFF : spaceLists[gpr.s3][gpr.s2]);
-            });
+            drawSpacesByCurrentType();
             0x800EADB8.onExec({
                 if (!isBoardScene()) return;
                 gpr.v0 = (gpr.s3 <= CustomSpace.max);
@@ -1126,10 +1135,26 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         }
 
         if (config.singleUseBattleSpaces) {
+            // Used Battle Spaces become custom blue spaces, so without the other custom space options, keep track of
+            // the custom spaces here
+            if (!customSpaces) {
+                drawSpacesByCurrentType();
+                resetCustomSpacesAtStart();
+                0x800EA6F4.onExec({ // Space render function
+                    if (!isBoardScene()) return;
+                    if (assignCustomSpaces()) {
+                        saveState();
+                    }
+                });
+            }
+
             data.battleRoutineComplete.addr.onExec({
                 if (!isBoardScene()) return;
                 if (!gpr.v0) return; // Battle cancelled
-                state.spaces[data.currentSpaceIndex] = CustomSpace.BLUE;
+                auto index = data.currentSpaceIndex;
+                if (index >= state.spaces.length || index >= data.spaceCount) return;
+                state.spaces[index] = CustomSpace.BLUE;
+                data.spaces[index].type = Space.Type.BLUE;
                 saveState();
             });
         }
@@ -2124,7 +2149,12 @@ extern (C) {
     }
 
     int startup() {
-        pluginFactory = (name, hash) => new MarioParty3(name, hash);
+        version (TestDriver) {
+            import me.timz.n64.mp3test : TestMarioParty3;
+            pluginFactory = (name, hash) => new TestMarioParty3(name, hash); // The test build (test/mp3test.d)
+        } else {
+            pluginFactory = (name, hash) => new MarioParty3(name, hash);
+        }
 
         return 0;
     }
