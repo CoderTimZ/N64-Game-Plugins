@@ -396,7 +396,14 @@ union Register(T) if (T.sizeof == 4) {
     @property ref U value(U)()  if (U.sizeof == 8) { return *cast(U*)&v; }
     @property ref U lo(U = T)() if (U.sizeof == 4) { return *cast(U*)&l; }
     @property ref U hi(U = T)() if (U.sizeof == 4) { return *cast(U*)&h; }
-    ref T opAssign(T rhs) { return l = rhs; }
+    // A 32-bit integer is kept sign-extended to 64 bits, as the CPU's 32-bit instructions leave it: branches like BGEZ
+    // read all 64 bits, so a positive value over a negative one would still look negative
+    ref T opAssign(T rhs) {
+        static if (__traits(isIntegral, T)) v = cast(long)cast(int)rhs;
+        else l = rhs;
+        return l;
+    }
+    ref T opOpAssign(string op)(T rhs) { return opAssign(mixin("l " ~ op ~ " rhs")); }
     alias l this;
 }
 
@@ -1240,20 +1247,22 @@ extern (C) {
     }
 
     export void Execute(Address pc) {
+        // This address's one-time handlers are taken first: ones the handlers below add are for the next time it runs
+        // (like jal()'s, which restores the registers when the call returns here)
+        auto once = executeOnceHandlers.get(pc, null);
+        if (once) executeOnceHandlers.remove(pc);
+
         if (auto handlers = (pc in executeHandlers)) {
             (*handlers).each!((h) {
                 try { h(pc); }
                 catch (Exception e) { error(e); }
             });
         }
-        
-        if (auto handlers = (pc in executeOnceHandlers)) {
-            executeOnceHandlers.remove(pc);
-            (*handlers).each!((h) {
-                try { h(pc); }
-                catch (Exception e) { error(e); }
-            });
-        }
+
+        once.each!((h) {
+            try { h(pc); }
+            catch (Exception e) { error(e); }
+        });
     }
 
     export void ExecuteDone(Address pc) {
