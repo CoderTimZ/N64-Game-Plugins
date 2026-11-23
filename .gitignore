@@ -5,7 +5,9 @@
 *.lib
 *.lnk
 *.so
+*.dylib
 *.sh
+!/build.sh
 *.o
 .directory
 /.dub

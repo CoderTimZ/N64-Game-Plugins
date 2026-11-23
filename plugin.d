@@ -491,8 +491,15 @@ static T loadJson(T)(string filename) {
     } catch (Exception e) {
         auto msg = e.classinfo.name ~ ": " ~ e.message;
         error("[" ~ filename ~ "] " ~ msg);
-        MessageBoxA(window, msg.toStringz, filename.toStringz, MB_ICONEXCLAMATION);
+        showError(filename, msg);
         return null;
+    }
+}
+
+// Shows an error to the player: a message box on Windows. (It's in the emulator's log everywhere.)
+void showError(const(char)[] title, const(char)[] message) {
+    version (Windows) {
+        MessageBoxA(window, message.toStringz, title.toStringz, MB_ICONEXCLAMATION);
     }
 }
 
@@ -503,7 +510,7 @@ static void saveJson(T)(T json, string filename) {
         } catch (Exception e) {
             auto msg = e.classinfo.name ~ ": " ~ e.message;
             error("[" ~ filename ~ "] " ~ msg);
-            MessageBoxA(window, msg.toStringz, filename.toStringz, MB_ICONEXCLAMATION);
+            showError(filename, msg);
         }
     }
 }
@@ -893,7 +900,7 @@ abstract class Game(Config, State = NoState) : Plugin {
         } catch (Exception e) {
             auto msg = e.classinfo.name ~ ": " ~ e.message;
             error(msg);
-            MessageBoxA(window, msg.toStringz, "loadConfig()", MB_ICONEXCLAMATION);
+            showError("loadConfig()", msg);
         }
 
         try {
@@ -901,7 +908,7 @@ abstract class Game(Config, State = NoState) : Plugin {
         } catch (Exception e) {
             auto msg = e.classinfo.name ~ ": " ~ e.message;
             error(msg);
-            MessageBoxA(window, msg.toStringz, "loadState()", MB_ICONEXCLAMATION);
+            showError("loadState()", msg);
         }
 
         static if (!is(State == NoState)) {

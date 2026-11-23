@@ -1,2 +1,8 @@
 # Raw texture data, compiled into the plugins: never change its bytes
 *.rgba binary
+
+# Shell scripts run on Linux and macOS, where a carriage return breaks them
+*.sh text eol=lf
+
+# cmd scripts keep Windows line endings
+*.cmd text eol=crlf
