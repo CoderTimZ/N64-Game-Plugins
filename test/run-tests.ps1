@@ -65,10 +65,46 @@ $env:N64TEST_ARG = $Arg
 $env:APPDATA = "$Rmg\AppData"
 New-Item -ItemType Directory -Force "$Rmg\AppData" | Out-Null
 
+# RMG shouldn't take the focus or cover other windows: tests get their input from the test plugin, and RMG keeps running
+# without the focus (PauseEmulationOnFocusLoss is off). Once its window shows, it goes behind the others, and the
+# window that had the focus gets it back.
+Add-Type -Namespace Win32 -Name Window -MemberDefinition @'
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr window, IntPtr process);
+[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint thread, uint to, bool attach);
+[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+'@
+$focused = [Win32.Window]::GetForegroundWindow()
+
 # RMG runs portable (portable.txt), so its paths are relative to the folder it starts in
 $process = Start-Process -FilePath "$Rmg\RMG.exe" -ArgumentList @("--debug-messages", "--quit-after-emulation", "`"$Rom`"") `
     -WorkingDirectory $Rmg -PassThru -RedirectStandardOutput "$Rmg\TestLogs\$Game-$stamp.out" `
     -RedirectStandardError "$Rmg\TestLogs\$Game-$stamp.err"
+
+$deadline = (Get-Date).AddSeconds(20)
+while ($process.MainWindowHandle -eq 0 -and -not $process.HasExited -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 100
+    $process.Refresh()
+}
+$window = $process.MainWindowHandle
+if ($window -ne 0) {
+    # Checked for a moment, in case Windows activates it just after it shows
+    foreach ($i in 1..10) {
+        [Win32.Window]::SetWindowPos($window, [IntPtr]1, 0, 0, 0, 0, 0x13) | Out-Null # HWND_BOTTOM; no size, move, activation
+        if ($focused -ne 0 -and [Win32.Window]::GetForegroundWindow() -eq $window) {
+            # Only the foreground window's thread may hand the focus on: share its input state for the call
+            $rmgThread = [Win32.Window]::GetWindowThreadProcessId($window, [IntPtr]::Zero)
+            $thread = [Win32.Window]::GetCurrentThreadId()
+            [Win32.Window]::AttachThreadInput($thread, $rmgThread, $true) | Out-Null
+            [Win32.Window]::SetForegroundWindow($focused) | Out-Null
+            [Win32.Window]::AttachThreadInput($thread, $rmgThread, $false) | Out-Null
+        }
+        Start-Sleep -Milliseconds 100
+    }
+}
+
 if ($Serve) {
     Set-Content "$Rmg\TestCommands\$Game-log.txt" $log # For send-command.ps1
     Write-Host "Serving; log: $Rmg\$log"
