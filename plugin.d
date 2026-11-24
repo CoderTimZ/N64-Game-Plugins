@@ -537,6 +537,8 @@ interface Plugin {
     void onMessage(string msg);
     void onFrame(ulong);
     void onFinish();
+    void onStateLoaded();    // After a save state was loaded
+    void onReset(bool hard); // The game was reset
 }
 
 final class NoState { }
@@ -984,6 +986,10 @@ abstract class Game(Config, State = NoState) : Plugin {
     void onFrame(ulong) {
         reloadStateIfSaveStateLoaded();
     }
+    void onStateLoaded() {
+        reloadStateIfSaveStateLoaded();
+    }
+    void onReset(bool hard) { }
 
     // Switches to the State saved with a save state, if one was loaded since the plugin last wrote the State (the
     // emulator doesn't say when). Each frame checks, but call it before using the State in game code that can run
@@ -1117,6 +1123,20 @@ void jal(Address addr, uint a0, uint a1, uint a2, uint a3, void delegate(uint) c
     });
 }
 
+// Tells the emulator that the code at the address changed: its cached interpreter (and dynarec) would keep running the
+// instructions it already decoded otherwise. The game's own writes do that by themselves, the plugin's don't. Does
+// nothing in an emulator without ExecutionInvalidateCode (it doesn't cache code, or the change isn't seen).
+void invalidateCode(Address address, uint size = 4) {
+    if (invalidateCodeFunction) invalidateCodeFunction(address, size);
+}
+
+// Changes an instruction (or any word the CPU runs or decodes as code)
+void setCode(Address address, Instruction instruction) {
+    if (address.val!Instruction == instruction) return;
+    address.val!Instruction = instruction;
+    invalidateCode(address);
+}
+
 Address[] searchMemory(immutable uint[] data) {
     auto mem = (cast(uint*)memory.ptr)[0..memory.length / uint.sizeof];
     ptrdiff_t[] result;
@@ -1197,6 +1217,7 @@ __gshared {
     void delegate(Address)[][Address] executeOnceHandlers;
     void delegate(Address)[][Address] executeDoneHandlers;
     void delegate(Address)[][Address] executeDoneOnceHandlers;
+    extern (C) void function(uint, uint) invalidateCodeFunction; // The core's ExecutionInvalidateCode, if it has one
     template handlers(int S) {
         void delegate(void*, Address, Address)[][Address] read;
         void delegate(void*, Address, Address)[][Address] write;
@@ -1216,6 +1237,13 @@ extern (C) {
         coreHandle = handle;
         debugContext = context ? fromStringz(context) : "[EXEC]  ";
         debugCallback = callback;
+
+        version (Windows) {
+            invalidateCodeFunction = cast(typeof(invalidateCodeFunction))GetProcAddress(cast(HMODULE)handle, "ExecutionInvalidateCode");
+        } else {
+            import core.sys.posix.dlfcn : dlsym;
+            invalidateCodeFunction = cast(typeof(invalidateCodeFunction))dlsym(handle, "ExecutionInvalidateCode");
+        }
 
         return startup();
     }
@@ -1267,6 +1295,8 @@ extern (C) {
             input.each!((ref b) { b.value = 0; });
             executeHandlers.clear();
             executeOnceHandlers.clear();
+            executeDoneHandlers.clear();
+            executeDoneOnceHandlers.clear();
             handlers!1.read.clear();
             handlers!2.read.clear();
             handlers!4.read.clear();
@@ -1376,6 +1406,22 @@ extern (C) {
                 try { h(value, pc, addr); }
                 catch (Exception e) { error(e); }
             });
+        }
+    }
+
+    export void StateLoaded() {
+        info("Save state loaded");
+        if (plugin) {
+            try { plugin.onStateLoaded(); }
+            catch (Exception e) { error(e); }
+        }
+    }
+
+    export void Reset(int hard) {
+        info(hard ? "Hard reset" : "Soft reset");
+        if (plugin) {
+            try { plugin.onReset(hard != 0); }
+            catch (Exception e) { error(e); }
         }
     }
 

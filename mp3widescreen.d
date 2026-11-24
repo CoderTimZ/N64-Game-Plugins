@@ -181,6 +181,7 @@ void apply(const Move m, Address a) {
             break;
         }
     }
+    invalidateCode(a & ~3, m.kind == DOUBLE ? 8 : 4); // Code, or data in a block of code the emulator has decoded
 }
 
 // Makes the patch's changes at the addresses `where` allows
@@ -189,7 +190,7 @@ void apply(const Patch p, scope bool delegate(Address) where = null) {
     foreach (c; p.changes) {
         if (where && !where(c.address)) continue;
         auto w = c.address.val!uint;
-        if ((w & c.mask) == c.from) c.address.val!uint = (w & ~c.mask) | c.to;
+        if ((w & c.mask) == c.from) c.address.setCode((w & ~c.mask) | c.to);
     }
 }
 

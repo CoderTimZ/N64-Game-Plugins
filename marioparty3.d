@@ -738,10 +738,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             // Populate mini-game roulette
             0x800DFE90.onExec({
                 if (!isPartyBoardScene()) return;
-                0x800DFED4.val!Instruction = NOP;
-                0x800DFF40.val!Instruction = NOP;
-                0x800DFF64.val!Instruction = NOP;
-                0x800DFF78.val!Instruction = NOP;
+                0x800DFED4.setCode(NOP);
+                0x800DFF40.setCode(NOP);
+                0x800DFF64.setCode(NOP);
+                0x800DFF78.setCode(NOP);
                 if (gpr.s0 == 0) {
                     auto type = (cast(MiniGame)gpr.v0).type;
                     auto count = (0x80100E18 + gpr.s2).val!ubyte;

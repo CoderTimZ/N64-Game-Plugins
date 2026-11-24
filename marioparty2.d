@@ -505,10 +505,10 @@ class MarioParty2 : MarioParty!(Config, State, Memory) {
             // Populate mini-game roulette
             0x8004AFA8.onExec({
                 if (!isBoardScene()) return;
-                0x8004AFEC.val!Instruction = NOP;
-                0x8004B044.val!Instruction = NOP;
-                0x8004B0F0.val!Instruction = NOP;
-                0x8004B140.val!Instruction = NOP;
+                0x8004AFEC.setCode(NOP);
+                0x8004B044.setCode(NOP);
+                0x8004B0F0.setCode(NOP);
+                0x8004B140.setCode(NOP);
                 if (gpr.s0 == 0) {
                     auto type = (cast(MiniGame)gpr.v0).type;
                     auto games = [EnumMembers!MiniGame].filter!(g => g.type == type).array;
