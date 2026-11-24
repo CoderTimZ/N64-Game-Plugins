@@ -542,8 +542,7 @@ The game draws a 424x240 picture instead of 320x240: the board, mini-games and m
 HUD moved to fit (like the players' panels, in the corners on the board). Set the video plugin to stretch the picture to
 16:9, or it's squeezed into 4:3. It needs the Expansion Pak (on by default in RMG).
 
-It also works with custom boards made with PartyPlanner64. A custom board's own code (its board events) isn't changed
-for widescreen, so anything it draws itself on the screen is where it would be on a 320-pixel-wide screen.
+It also works with custom boards made with PartyPlanner64.
 
 The option takes effect when the game boots, so restart the game after changing it, and don't load save states made
 with it set the other way.
@@ -564,3 +563,4 @@ What's changed from the patch:
 - Some of the patch's changes were made to the instruction next to the one intended, or with the wrong register, which
   broke a store, a call or a load there (most of them in the Mini-Game Room). They're made where they were meant to be.
 - The patch's changes to ROM offsets (for its own file system) and two changes that aren't for widescreen aren't made.
+- A few values the patch missed are moved too, like where an item being bought appears on the board.

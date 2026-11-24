@@ -17,6 +17,9 @@
  *   which broke a store, a call or a load there. They're made where they were meant to be (marked "fixed").
  * - The patch's changes to ROM offsets (its bigger file system moved the data after it) and two changes that aren't for
  *   widescreen (it removed a hang at 0x8000C2C0 and a branch at 0x8004FD50) aren't made.
+ * - Added: a few values the patch missed (marked "Added"), like where an item being bought goes on the screen.
+ * - Custom boards: their own overlay (which replaces a board's) gets the patch's changes to the code and data it shares
+ *   with the original boards' (like the item shops), found by signatures since they're somewhere else in each.
  */
 module me.timz.n64.mp3widescreen;
 
@@ -204,6 +207,170 @@ uint crc(Address start, Address end, const(Address[2])[] skip = null) {
     return c[0] | c[1] << 8 | c[2] << 16 | c[3] << 24;
 }
 
+// Custom boards made with PartyPlanner64 replace a board's overlay with their own, which has much of the original boards'
+// code and data (like the item shops), assembled somewhere else. The patch's changes to those are found by signatures,
+// made from the original boards: for code, a CRC-32 of the instruction and the 4 on each side, with what assembling
+// somewhere else changes (jump and branch targets, and addresses in the overlay) left out; for data, CRC-32s of the
+// word and the 6 before it, and of it and the 6 after it (either matching). Each also has the word as the original
+// boards have it, and the change.
+struct Signature {
+    uint crc;
+    uint word;
+    Move move;
+}
+
+struct DataSignature {
+    uint before;
+    uint after;
+    uint word;
+    Move move;
+}
+
+enum CODE_REACH = 4;
+enum DATA_REACH = 6;
+
+immutable Signature[] BOARD_CODE = [
+    Signature(0xD97FF3A2, 0x240600A0, shift(HALF, IMM)), // Chilly Waters 0x8010C088: li a2,160
+    Signature(0x18BB4AD0, 0x240600A0, shift(HALF, IMM)), // Chilly Waters 0x8010C438: li a2,160
+    Signature(0x359DDD49, 0x240600A0, shift(HALF, IMM)), // Chilly Waters 0x8010C4A0: li a2,160
+    Signature(0xD8186D99, 0x3C014320, shift(HALF, LUI)), // Chilly Waters 0x80113BA0: lui at,0x4320
+    Signature(0xE0EC31E7, 0x3C014320, shift(HALF, LUI)), // Chilly Waters 0x80113F74: lui at,0x4320
+    Signature(0x7EE04C82, 0x240600A0, shift(HALF, IMM)), // Chilly Waters 0x80113F8C: li a2,160
+    Signature(0x3ACD5FAE, 0x3C014302, shift(HALF, LUI)), // Chilly Waters 0x80114018: lui at,0x4302
+    Signature(0x42F7EC57, 0x240600A0, shift(HALF, IMM)), // Chilly Waters 0x8011402C: li a2,160
+    Signature(0x8B4543C0, 0x3C01433E, shift(HALF, LUI)), // Chilly Waters 0x80114058: lui at,0x433e
+    Signature(0x34956F7E, 0x240600A0, shift(HALF, IMM)), // Chilly Waters 0x80114070: li a2,160
+    Signature(0x5F6F10B5, 0x3C0142DC, shift(HALF, LUI)), // Chilly Waters 0x80114150: lui at,0x42dc
+    Signature(0x50AA2101, 0x240600A0, shift(HALF, IMM)), // Chilly Waters 0x80114168: li a2,160
+    Signature(0x687265AF, 0x3C014352, shift(HALF, LUI)), // Chilly Waters 0x80114194: lui at,0x4352
+    Signature(0x62B5588D, 0x3C014320, shift(HALF, LUI)), // Chilly Waters 0x801141D0: lui at,0x4320
+    Signature(0x4F8BED9D, 0x240600A0, shift(HALF, IMM)), // Chilly Waters 0x801141E8: li a2,160
+    Signature(0x4ABBE9EC, 0x240600B1, shift(HALF, IMM)), // Chilly Waters 0x80115618: li a2,177
+    Signature(0xFEAC54D4, 0x2406007A, shift(HALF, IMM)), // Chilly Waters 0x8011563C: li a2,122
+    Signature(0x388F20FE, 0x240600A0, shift(HALF, IMM)), // Chilly Waters 0x8011565C: li a2,160
+    Signature(0x691676D1, 0x3C014320, shift(HALF, LUI)), // Chilly Waters 0x80115E00: lui at,0x4320
+    Signature(0xDFE1ABE3, 0x3C01434B, shift(HALF, LUI)), // Chilly Waters 0x80115E94: lui at,0x434b
+    Signature(0xC66645CF, 0x240600A0, shift(HALF, IMM)), // Chilly Waters 0x80116228: li a2,160
+    Signature(0x639A66A6, 0x240600A0, shift(HALF, IMM)), // Chilly Waters 0x80119F28: li a2,160
+    Signature(0x1AD221F0, 0x24040066, shift(HALF, IMM)), // Deep Bloober Sea 0x8011A3CC: li a0,102
+    Signature(0xF3240DF9, 0x2404005A, shift(HALF, IMM)), // Woody Woods 0x80118804: li a0,90
+    Signature(0xB7EA016C, 0x2404003C, shift(HALF, IMM)), // Gate Guy 0x8010F230: li a0,60
+    Signature(0xFFDDF105, 0x2405003C, shift(HALF, IMM)), // Gate Guy 0x8010F474: li a1,60
+    Signature(0xA4FE5682, 0x240600A0, shift(HALF, IMM)), // Gate Guy 0x801139BC: li a2,160
+    Signature(0xF03C8BBA, 0x240600A0, shift(HALF, IMM)), // Gate Guy 0x80113ADC: li a2,160
+    Signature(0xC97F06A4, 0x240600A0, shift(HALF, IMM)), // Gate Guy 0x80113BD0: li a2,160
+    Signature(0x2961161F, 0x240600A0, shift(HALF, IMM)), // Gate Guy 0x80113C00: li a2,160
+];
+
+immutable DataSignature[] BOARD_DATA = [
+    DataSignature(0xBD878614, 0x9DD39B36, 0x43740000, shift(MORE, FLOAT)), // Chilly Waters 0x8011E204: 244
+    DataSignature(0x7BBB68E7, 0x97772CA9, 0x43240000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E354: 164
+    DataSignature(0x18D276DA, 0xF475F832, 0x430C0000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E35C: 140
+    DataSignature(0xA87AB44C, 0x7EF72BD9, 0x43240000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E364: 164
+    DataSignature(0x97772CA9, 0xA556404D, 0x430C0000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E36C: 140
+    DataSignature(0xF475F832, 0xD3572752, 0x43040000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E374: 132
+    DataSignature(0x7EF72BD9, 0x03107DBE, 0x435C0000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E37C: 220
+    DataSignature(0xA556404D, 0x469A03F9, 0x43040000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E384: 132
+    DataSignature(0xD3572752, 0x25E8A97B, 0x435C0000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E38C: 220
+    DataSignature(0x03107DBE, 0x2E72F488, 0x43240000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E394: 164
+    DataSignature(0x469A03F9, 0x2E72F488, 0x43240000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E39C: 164
+    DataSignature(0x25E8A97B, 0x8E0C0232, 0x43240000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E3A4: 164
+    DataSignature(0x2E72F488, 0x8F9B3499, 0x43240000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E3AC: 164
+    DataSignature(0x2E72F488, 0x8E0C5060, 0x43240000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E3B4: 164
+    DataSignature(0x8E0C0232, 0xCA839152, 0x43240000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E3BC: 164
+    DataSignature(0x8F9B3499, 0x22C53869, 0x43240000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E3C4: 164
+    DataSignature(0x8E0C5060, 0x4752B541, 0x43240000, shift(HALF, FLOAT)), // Chilly Waters 0x8011E3CC: 164
+    DataSignature(0xB009892F, 0xC943039D, 0x43740000, shift(MORE, FLOAT)), // Deep Bloober Sea 0x8011D5B0: 244
+    DataSignature(0x4FF5A422, 0x97772CA9, 0x43240000, shift(HALF, FLOAT)), // Deep Bloober Sea 0x8011D710: 164
+    DataSignature(0x40DABF2C, 0xF475F832, 0x430C0000, shift(HALF, FLOAT)), // Deep Bloober Sea 0x8011D718: 140
+    DataSignature(0x666528A2, 0x0A2AF306, 0x43200000, shift(HALF, FLOAT)), // Deep Bloober Sea 0x8011EB34: 160
+    DataSignature(0xEF8D3904, 0xC943039D, 0x43740000, shift(MORE, FLOAT)), // Spiny Desert 0x8011D0EC: 244
+    DataSignature(0x0584F188, 0x97772CA9, 0x43240000, shift(HALF, FLOAT)), // Spiny Desert 0x8011D24C: 164
+    DataSignature(0xD8871CF4, 0xF475F832, 0x430C0000, shift(HALF, FLOAT)), // Spiny Desert 0x8011D254: 140
+    DataSignature(0x7EDCBAA0, 0xC943039D, 0x43740000, shift(MORE, FLOAT)), // Woody Woods 0x8011C6A4: 244
+    DataSignature(0xCB41C1F0, 0x97772CA9, 0x43240000, shift(HALF, FLOAT)), // Woody Woods 0x8011C804: 164
+    DataSignature(0x1851EA3E, 0xF475F832, 0x430C0000, shift(HALF, FLOAT)), // Woody Woods 0x8011C80C: 140
+    DataSignature(0x3F9FC647, 0xC943039D, 0x43740000, shift(MORE, FLOAT)), // Creepy Cavern 0x8011EB54: 244
+    DataSignature(0x286ED2B4, 0x97772CA9, 0x43240000, shift(HALF, FLOAT)), // Creepy Cavern 0x8011ECB4: 164
+    DataSignature(0x7A3EAA96, 0xF475F832, 0x430C0000, shift(HALF, FLOAT)), // Creepy Cavern 0x8011ECBC: 140
+    DataSignature(0x675D7509, 0xC943039D, 0x43740000, shift(MORE, FLOAT)), // Waluigi's Island 0x8011C8E4: 244
+    DataSignature(0x8B565F5B, 0x97772CA9, 0x43240000, shift(HALF, FLOAT)), // Waluigi's Island 0x8011CA44: 164
+    DataSignature(0x16A176EF, 0xF475F832, 0x430C0000, shift(HALF, FLOAT)), // Waluigi's Island 0x8011CA4C: 140
+    DataSignature(0x6AFC6DA3, 0x0E95A45E, 0x00A0FFB0, shift(HALF, SHORT)), // Gate Guy 0x80118F60: (160, -80)
+    DataSignature(0xF4F4C9B3, 0x0BD2476C, 0x00A0FF60, shift(HALF, SHORT)), // Gate Guy 0x80118F64: (160, -160)
+    DataSignature(0x47211FC6, 0xE97CE725, 0x00A0FFB0, shift(HALF, SHORT)), // Gate Guy 0x80118F68: (160, -80)
+];
+
+// An instruction without what assembling it somewhere else changes
+uint unplaced(uint w) {
+    auto op = w >> 26;
+    if (op == 2 || op == 3) return w & 0xFC000000;                                     // j, jal
+    if (op == 1 || (op >= 4 && op <= 7) || (op >= 0x14 && op <= 0x17)) return w & 0xFFFF0000; // Branches
+    if (op == 0x11 && ((w >> 21) & 31) == 8) return w & 0xFFFF0000;                    // bc1f, bc1t
+    if (op == 0xF && isOverlayHi(w & 0xFFFF)) return w & 0xFFFF0000;                    // lui of an address
+    return w;
+}
+
+bool isOverlayHi(uint hi) { return hi >= 0x8008 && hi <= 0x8013; }
+
+// unplaced() of each instruction, and the lower halves of the addresses made by a "lui" (in the next 5 instructions,
+// from its register)
+uint[] unplaced(const uint[] code) {
+    auto result = code.map!(w => unplaced(w)).array;
+    foreach (i, w; code) {
+        if (w >> 26 != 0xF || !isOverlayHi(w & 0xFFFF)) continue;
+        auto register = (w >> 16) & 31;
+        foreach (k; 1..6) {
+            if (i + k >= code.length) break;
+            auto x = code[i + k], op = x >> 26;
+            if (((x >> 21) & 31) == register && [9, 0xD, 0x20, 0x21, 0x23, 0x24, 0x25, 0x28, 0x29, 0x2B, 0x31, 0x35, 0x39, 0x3D].canFind(op)) {
+                result[i + k] = x & 0xFFFF0000;
+            }
+        }
+    }
+    return result;
+}
+
+uint crcOf(const uint[] words) {
+    import std.digest.crc : crc32Of;
+    auto bytes = new ubyte[words.length * 4];
+    foreach (i, w; words) {
+        bytes[4 * i] = cast(ubyte)(w >> 24); bytes[4 * i + 1] = cast(ubyte)(w >> 16);
+        bytes[4 * i + 2] = cast(ubyte)(w >> 8); bytes[4 * i + 3] = cast(ubyte)w;
+    }
+    auto c = crc32Of(bytes);
+    return c[0] | c[1] << 8 | c[2] << 16 | c[3] << 24;
+}
+
+uint[] words(Address start, Address end) {
+    uint[] result;
+    for (Address a = start; a < end; a += 4) result ~= a.val!uint;
+    return result;
+}
+
+// Makes the patch's changes in a custom board's code (from `start` to `end`) or data, where the signatures are found
+// (all found first, then changed)
+void applySignatures(Address start, Address end, bool code) {
+    auto ws = words(start, end);
+    Move[size_t] found;
+    if (code) {
+        auto u = unplaced(ws);
+        for (size_t i = CODE_REACH; i + CODE_REACH < ws.length; i++) {
+            foreach (s; BOARD_CODE) {
+                if (ws[i] == s.word && crcOf(u[i - CODE_REACH..i + CODE_REACH + 1]) == s.crc) found[i] = s.move;
+            }
+        }
+    } else {
+        for (size_t i = DATA_REACH; i + DATA_REACH < ws.length; i++) {
+            foreach (s; BOARD_DATA) {
+                if (ws[i] != s.word) continue;
+                if (crcOf(ws[i - DATA_REACH..i + 1]) == s.before || crcOf(ws[i..i + DATA_REACH + 1]) == s.after) found[i] = s.move;
+            }
+        }
+    }
+    foreach (i, m; found) apply(m, start + cast(uint)(i * 4));
+}
+
 const(Patch)* patchFor(uint overlay) {
     foreach (ref p; PATCHES) if (p.overlay == overlay) return &p;
     return null;
@@ -263,8 +430,16 @@ void setUpWidescreen() {
             auto patch = patchFor(n);
             if (!patch) return;
             gpr.ra.onExecOnce({
-                code = code && crc(address, codeEnd, OVERLAY_UNCHECKED) == patch.codeCrc;
-                data = data && crc(codeEnd, dataEnd, OVERLAY_UNCHECKED) == patch.dataCrc;
+                // A board's code or data that isn't the US ROM's is a custom board's (see BOARD_CODE)
+                bool board = n >= 72 && n <= 77 || n >= 91 && n <= 96;
+                if (code && crc(address, codeEnd, OVERLAY_UNCHECKED) != patch.codeCrc) {
+                    code = false;
+                    if (board) applySignatures(address, codeEnd, true);
+                }
+                if (data && crc(codeEnd, dataEnd, OVERLAY_UNCHECKED) != patch.dataCrc) {
+                    data = false;
+                    if (board) applySignatures(codeEnd, dataEnd, false);
+                }
                 apply(*patch, a => code && a < codeEnd || data && a >= codeEnd);
                 if (code) changedOverlays[address] = n;
             });
@@ -1649,10 +1824,8 @@ immutable Patch[] PATCHES = [
         shift(HALF, FLOAT, 0x8011E354, 0x8011E35C, 0x8011E364, 0x8011E36C, 0x8011E374, 0x8011E37C, 0x8011E384,
                            0x8011E38C, 0x8011E394, 0x8011E39C, 0x8011E3A4, 0x8011E3AC, 0x8011E3B4, 0x8011E3BC,
                            0x8011E3C4, 0x8011E3CC),
-        shift(MORE, FLOAT, 0x8011E204),
-    ], join([
-        DF(0x8011E214, 1, 348),
-    ])),
+        shift(MORE, FLOAT, 0x8011E1F4, 0x8011E204), // Fixed: the patch moved a 1.0 at 0x8011E214 instead of 0x8011E1F4
+    ]),
     // Overlay 73: DEEP_BLOOBER_SEA_BOARD
     Patch(73, 0xB17C7D36, 0xD370CB0E, [
         shift(HALF, IMM, 0x8010BBF0, 0x8010BFA0, 0x8010C008, 0x80113AF4, 0x80113B94, 0x80113BD8, 0x80113CD0,
@@ -1681,6 +1854,7 @@ immutable Patch[] PATCHES = [
         shift(HALF, IMM, 0x8010BC28, 0x8010BFD8, 0x8010C040, 0x80113B2C, 0x80113BCC, 0x80113C10, 0x80113D08,
                          0x80113D4C, 0x80113D88, 0x801151B8, 0x801151DC, 0x801151FC, 0x80115DC8, 0x80117F6C,
                          0x80118804),
+        shift(HALF, IMM, 0x801195F0), // Added: the patch moved this window's X in its other copy (0x80118804), not here
         shift(HALF, LUI, 0x80113740, 0x80113B14, 0x80113BB8, 0x80113BF8, 0x80113CF0, 0x80113D34, 0x80113D70,
                          0x801159A0, 0x80115A34),
         shift(HALF, FLOAT, 0x8011C804, 0x8011C80C, 0x8011C814, 0x8011C81C, 0x8011C824, 0x8011C82C, 0x8011C834,
@@ -1702,6 +1876,7 @@ immutable Patch[] PATCHES = [
     ]),
     // Overlay 77: WALUIGIS_ISLAND_BOARD
     Patch(77, 0x7932E39B, 0x6A1ED29A, [
+        shift(HALF, IMM, 0x80108C94), // Added: the item being bought, which the patch moved in the other boards
         shift(HALF, IMM, 0x8010D418, 0x8010D7C8, 0x8010D830, 0x8011531C, 0x801153BC, 0x80115400, 0x801154F8,
                          0x8011553C, 0x80115578, 0x801169A8, 0x801169CC, 0x801169EC, 0x801175B8),
         shift(HALF, LUI, 0x80114F30, 0x80115304, 0x801153A8, 0x801153E8, 0x801154E0, 0x80115524, 0x80115560,
@@ -2091,6 +2266,10 @@ immutable Patch[] PATCHES = [
     ])),
     // Overlay 128 (board code)
     Patch(128, 0x1CFBA996, 0x22B3CA65, [
+        // Added (the patch missed these): where an item being bought or given goes, if it's on the screen (x from 0 to
+        // 320.0): the middle of the screen, x = 160. The patch moved one of the two x's, but neither check's 320.0.
+        shift(MORE, LUI, 0x800DB278, 0x800DBA9C),
+        shift(HALF, IMM, 0x800DBB28),
         shift(HALF, IMM, 0x800DB2F0, 0x800DE070, 0x800DEEC4, 0x800DF074, 0x800DF788, 0x800DFAB8, 0x800E1FCC,
                          0x800E42A8, 0x800E54B0, 0x800E555C, 0x800E55D8, 0x800E5718, 0x800E96C4, 0x800EC098,
                          0x800EC0CC, 0x800EF494, 0x800EF54C, 0x800EF5C4, 0x800EF5DC, 0x800EF64C, 0x800EF97C,
@@ -2164,6 +2343,9 @@ immutable Patch[] PATCHES = [
     ])),
     // Overlay 129 (board code)
     Patch(129, 0xD9A4553E, 0x20066064, [
+        // Added (the patch missed these): the same as in BOARD_A's second check (its first the patch moved)
+        shift(MORE, LUI, 0x800DAFB8),
+        shift(HALF, IMM, 0x800DB044),
         shift(HALF, IMM, 0x800DA834, 0x800DDB70, 0x800DDD20, 0x800DE64C, 0x800DE7F8, 0x800DF430, 0x800E15CC,
                          0x800E32AC, 0x800E3358, 0x800E33D4, 0x800E3514, 0x800E3FB8, 0x800E4A08, 0x800E8500,
                          0x800EAC6C, 0x800EACA0, 0x800F09A4, 0x800F0A78, 0x800F0B00, 0x800F0B18, 0x800F0B7C,

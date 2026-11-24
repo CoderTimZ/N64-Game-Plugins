@@ -349,6 +349,60 @@ class TestMarioParty3 : MarioParty3 {
                 foreach (i, v; step[6..$].split(",").map!(v => v.to!int).array) players[i].state.luckySpaceCount = v;
                 saveState();
                 d.note("Lucky Space counts: ", players.map!(p => p.state.luckySpaceCount));
+            } else if (step.startsWith("untilshop")) { // untilshop[:<state>]: until a player enters an item shop (func_800EC590), which gives them 50 coins (to buy something), then saves a state there
+                bool entered;
+                0x800EC590.onExecOnce({ entered = true; });
+                auto start = d.frame;
+                while (!entered) {
+                    d.check(d.frame - start < 60 * 60 * 30, "No item shop in 30 minutes");
+                    watch(1);
+                }
+                auto p = players[data.currentPlayerIndex];
+                p.data.coins = 50;
+                d.note("Item shop: ", describe());
+                if (step.length > 10) d.saveEmulatorState(step[10..$]);
+            } else if (step.startsWith("buywatch:")) { // buywatch:<shots>: plays (every player getting 50 coins each turn) until someone buys an item, with that many screenshots 10 frames apart
+                int[4] coins;
+                Item[3][4] items;
+                void remember() { foreach (i, p; players) { coins[i] = p.data.coins; foreach (k; 0..3) items[i][k] = p.data.items[k]; } }
+                int turnPlayer = -1;
+                remember();
+                auto start = d.frame;
+                // Sprite positions near the old screen's middle (func_80054904(group, index, x, y)), by caller
+                bool[string] seen;
+                0x80054904.onExec({
+                    auto x = cast(short)gpr.a2;
+                    if (!isBoardScene() || x < 140 || x > 175) return;
+                    auto key = format("ra %08X x %d y %d", cast(uint)gpr.ra, x, cast(short)gpr.a3);
+                    if (key !in seen) { seen[key] = true; d.note("Sprite position: ", key); }
+                });
+                while (true) {
+                    d.check(d.frame - start < 60 * 60 * 60, "No purchase in an hour");
+                    if (isBoardScene() && data.currentPlayerIndex != turnPlayer) {
+                        turnPlayer = data.currentPlayerIndex;
+                        foreach (p; players) p.data.coins = 50;
+                        remember();
+                        // The latest turn's start, to replay a purchase from (load it, then buywatch again)
+                        d.saveEmulatorState("TestStates/mp3-buywatch-turn.st");
+                    }
+                    watch(1);
+                    bool bought;
+                    foreach (i, p; players) {
+                        if (p.data.coins + 5 <= coins[i]) bought = true;
+                        foreach (k; 0..3) if (p.data.items[k] != items[i][k] && p.data.items[k] != Item.NONE) bought = true;
+                    }
+                    remember();
+                    if (bought) break;
+                }
+                d.note("Bought: ", describe(), " items ", players.map!(p => p.data.items[0]));
+                foreach (i; 0..step[9..$].to!int) { watch(10); d.screenshot("buy"); }
+            } else if (step.startsWith("pad:")) { // pad:<player>,<port>: a player's (1-4) controller (0-3)
+                auto v = step[4..$].split(",").map!(x => x.to!int).array;
+                players[v[0] - 1].data.controller = cast(ubyte)v[1];
+                d.note("Controller: P", v[0], " port ", v[1]);
+            } else if (step.startsWith("shots:")) { // shots:<count>,<frames>: screenshots that many frames apart
+                auto v = step[6..$].split(",").map!(x => x.to!int).array;
+                foreach (i; 0..v[0]) { watch(v[1]); d.screenshot("shots"); }
             } else if (step == "cpu") {
                 players.each!(p => p.data.flags = p.data.flags | 1);
             } else if (step == "shot") {
