@@ -42,6 +42,7 @@ how the file works and describes the options every Mario Party plugin has: `char
 | [`autoStartNextBoard`](#autostartnextboard) | `true`/`false` | `false` |
 | [`finalResultsDoNotProceed`](#finalresultsdonotproceed) | `true`/`false` | `false` |
 | [`unlockEverything`](#unlockeverything) | `true`/`false` | `false` |
+| [`widescreen`](#widescreen) | `true`/`false` | `false` |
 
 The plugin also always shows the turn number ("current / total") at the top of the board.
 
@@ -529,3 +530,37 @@ Unlocks the mini-games, the Super Hard computer level and Waluigi's Island.
 - Default: `false`
 
 The save file isn't changed: turning the option off locks them again.
+
+### `widescreen`
+
+Plays the game in 16:9 widescreen.
+
+- Type: `true` or `false`
+- Default: `false`
+
+The game draws a 424x240 picture instead of 320x240: the board, mini-games and menus show more to the sides, with the
+HUD moved to fit (like the players' panels, in the corners on the board). Set the video plugin to stretch the picture to
+16:9, or it's squeezed into 4:3. It needs the Expansion Pak (on by default in RMG).
+
+It also works with custom boards made with PartyPlanner64. A custom board's own code (its board events) isn't changed
+for widescreen, so anything it draws itself on the screen is where it would be on a 320-pixel-wide screen.
+
+The option takes effect when the game boots, so restart the game after changing it, and don't load save states made
+with it set the other way.
+
+#### Credits
+
+This option is an adaptation of [gamemasterplc's widescreen patch for Mario Party 3](https://www.youtube.com/watch?v=DME9IiB77fg),
+licensed under the [Creative Commons Attribution license (CC BY 3.0)](https://creativecommons.org/licenses/by/3.0/).
+The patch changes the ROM; the plugin makes its changes as the game runs ([`mp3widescreen.d`](../mp3widescreen.d)).
+What's changed from the patch:
+
+- The background images the patch widened are made from the game's own images as they're loaded (their sides extended,
+  tiled or mirrored, or the image stretched or zoomed), instead of being the patch's. Most are close to the patch's;
+  a few the patch partly redrew are simpler here, like the castle's hills and the clouds in two mini-game backgrounds,
+  and one board picture, which is stretched.
+- Memory is laid out so that it also works with custom boards (the patch's framebuffers and depth buffer are where they
+  keep their main heap).
+- Some of the patch's changes were made to the instruction next to the one intended, or with the wrong register, which
+  broke a store, a call or a load there (most of them in the Mini-Game Room). They're made where they were meant to be.
+- The patch's changes to ROM offsets (for its own file system) and two changes that aren't for widescreen aren't made.

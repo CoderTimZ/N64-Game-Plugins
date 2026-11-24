@@ -1,6 +1,7 @@
 module me.timz.n64.marioparty3;
 
 import me.timz.n64.marioparty;
+import me.timz.n64.mp3widescreen;
 import me.timz.n64.plugin;
 import core.time;
 import std.algorithm;
@@ -54,6 +55,7 @@ class Config : MarioPartyConfig {
     double[] battleCoinDistribution = DEFAULT_BATTLE_DIST;
     bool superstarsMiniGames = false;
     SuperstarsMiniGame[] blockedSuperstarsMiniGames;
+    bool widescreen = false;
 
     this() {
         bonuses = [
@@ -562,6 +564,8 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
 
     override void onStart() {
         super.onStart();
+
+        if (config.widescreen) setUpWidescreen();
 
         /*
         bool[uint] seen;
@@ -1967,6 +1971,10 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
 
     short windowGroup(short w) { return (windowAddress(w) + 108).val!short; }
 
+    // The width of the game's screen, in pixels: the widescreen code draws a 424x240 picture instead of 320x240
+    int screenWidth() { return config.widescreen ? SCREEN_WIDTH : OLD_SCREEN_WIDTH; }
+
+
     void maintainTurnCounter() {
         if (turnCounterBusy || stateAllocating) return;
         if ((0x8004F074.val!uint & 0xFFFF0000) != 0x27BD0000) return; // HuPrcVSleep isn't "addiu sp, sp, ..."
@@ -1975,13 +1983,13 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         auto exists = turnCounterWindow >= 0 && windowGroup(turnCounterWindow) == turnCounterGroup;
         if (!exists) turnCounterWindow = -1;
 
-        // What it should show. The text is centered on the screen (320 pixels wide, so the same way as a 5-pixel "/" on
-        // pixels 158-162): func_8005A968 takes the window's left side, and the text starts 4 pixels right of it. The
-        // text is from 4 lines above y to 6 below: level with the top players' panels, or on the scrolling map, below
-        // its up arrow (down to line 31).
+        // What it should show. The text is centered on the screen (320 pixels wide, or 424 in widescreen, so the same way
+        // as a 5-pixel "/" on pixels 158-162 or 210-214): func_8005A968 takes the window's left side, and the text starts
+        // 4 pixels right of it. The text is from 4 lines above y to 6 below: level with the top players' panels, or on
+        // the scrolling map, below its up arrow (down to line 31).
         auto wanted = data.currentTurn >= 1 && turnCounterCovered == 0;
         auto text = "<YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET>";
-        auto x = (321 - messageTextWidth(text)) / 2 - 4;
+        auto x = (screenWidth + 1 - messageTextWidth(text)) / 2 - 4;
         auto y = turnCounterLowered > 0 ? 40 : 15;
 
         if (exists) {
@@ -2952,3 +2960,4 @@ static assert(LUCKY_RESULTS_ICON.length == 128 + 32);
 // The gold space (a revealed Hidden Block) texture: 32x32 pixels, 4 bytes each (red, green, blue, alpha), from textures/mp3-gold-space.rgba
 immutable ubyte[] GOLD_SPACE_TEXTURE = cast(immutable(ubyte)[])import("mp3-gold-space.rgba");
 static assert(GOLD_SPACE_TEXTURE.length == 32 * 32 * 4);
+
