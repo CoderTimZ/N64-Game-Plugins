@@ -565,6 +565,36 @@ class TestMarioParty3 : MarioParty3 {
                 auto v = step[5..$].split(",");
                 (cast(Address)v[0].to!uint(16)).val!ubyte = v[1].to!ubyte;
                 d.note("Poked ", v[0], " = ", v[1]);
+            } else if (step.startsWith("roll:")) { // roll:<player>,<steps>[,r]: that player's (1-4) next roll is made
+                                                   // that many steps (r: and backward, as with a Reverse Mushroom,
+                                                   // set as the roll is: the walk checks for it just after)
+                auto v = step[5..$].split(",");
+                auto player = v[0].to!int, count = v[1].to!int;
+                auto reverse = v.length > 2 && v[2] == "r";
+                auto pending = new bool;
+                *pending = true;
+                STEPS_LEFT.val!int.onWrite((ref int steps) {
+                    if (!*pending || data.currentPlayerIndex != player - 1) return;
+                    if (steps <= 0 || steps == stepsLeft - 1) return; // Not a roll: a step's count down
+                    *pending = false;
+                    d.note("P", player, " rolled ", steps, ", made ", count, reverse ? " backward" : "");
+                    steps = count;
+                    if (reverse) playerByte(players[player - 1], 0x17) |= 0x80;
+                });
+            } else if (step == "walklog") { // Logs each step of a move (the walk loop's prev = cur, cur = next at
+                                            // func_800FCA7C + 0xA18): current, previous and next chain positions and
+                                            // +0x17 (0x80: Reverse Mushroom, 0x01: walking backward)
+                0x800FD4DC.onExec({
+                    if (!isBoardScene()) return;
+                    Address p = gpr.s2;
+                    string at(int o) {
+                        auto c = (p + o).val!byte, k = (p + o + 1).val!byte;
+                        return c >= 0 && c < chainCount && k >= 0 && k < chainLength(c)
+                            ? format("%d (%d,%d)", chainSpace(c, k), c, k) : format("INVALID (%d,%d)", c, k);
+                    }
+                    d.note("Walk P", data.currentPlayerIndex + 1, ": at ", at(0x0F), " from ", at(0x15), " next ",
+                           at(0x11), format(" flags %02X", (p + 0x17).val!ubyte), " steps ", stepsLeft);
+                });
             } else if (step == "files") { // Logs the files the game reads from its main file system, with images' sizes
                 auto directory = new uint;
                 0x80009EAC.onExec({ if (gpr.a0 == 47) *directory = gpr.a1; });
