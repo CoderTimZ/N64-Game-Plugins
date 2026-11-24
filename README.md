@@ -37,10 +37,13 @@ The [configuration documentation](docs/configuration.md) describes every option.
    on Linux) into RMG's `Plugin/Execution` folder. They use the OpenSSL libraries RMG already comes with
    (`libssl-3-x64.dll` and `libcrypto-3-x64.dll`, next to `RMG.exe`), or on Linux, the system's.
 3. In RMG, open each game's settings and choose its plugin as the game's execution plugin.
-4. Set RMG's CPU emulator to the cached interpreter or the pure interpreter, for these games or for every game. The
-   plugins follow the game's code as it runs, which the dynamic recompiler doesn't allow.
-5. Run the game once: the plugin writes its config file (see the table above) with every option at its default, in
+4. Run the game once: the plugin writes its config file (see the table above) with every option at its default, in
    the folder RMG runs in (normally RMG's own folder). Edit it, then restart the game for the changes to take effect.
+
+The plugins follow the game's code as it runs, which only RMG's interpreters allow: when a game has an execution
+plugin, RMG uses the cached interpreter for it even if the CPU emulator is set to the dynamic recompiler (the pure
+interpreter also works). This needs an RMG from November 2026 or later; with an older one, set the CPU emulator to the
+cached interpreter or the pure interpreter yourself.
 
 ## Configuring
 
