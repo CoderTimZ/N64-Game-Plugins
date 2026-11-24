@@ -996,7 +996,9 @@ private ubyte[] widenModel(ubyte[] d) {
 // The game reads a file in its main file system by opening its directory (func_80009EAC(47, directory)), reading its
 // header (func_80009B64(46, file, info): info = its data's ROM offset, decompressed size and compression), allocating
 // the size, and decompressing it (func_8000B000(rom, buffer, size, compression)). A widened file says it's bigger, is
-// decompressed as it is, and is widened in its buffer. Only files the size the US ROM's are are widened.
+// decompressed as it is, and is widened in its buffer. Only files the size the US ROM's are are widened. One widened
+// image is smaller than the original (52, 16), so its buffer is the original's size: the original is decompressed
+// into it first (in Log Jam, a buffer of the widened size overflowed into the background's and froze the game).
 private __gshared uint fileDirectory;
 private __gshared uint[uint] widening; // ROM offset of a file's data -> IMAGES index
 
@@ -1015,7 +1017,7 @@ private void setUpImages() {
         gpr.ra.onExecOnce({
             if ((info + 4).val!uint != IMAGES[i].size || (info + 8).val!uint != 1) return;
             widening[info.val!uint] = cast(uint)i;
-            (info + 4).val!uint = IMAGES[i].room;
+            (info + 4).val!uint = max(IMAGES[i].room, IMAGES[i].size); // Room to decompress the original too
         });
     });
 
