@@ -316,6 +316,11 @@ class TestMarioParty1 : MarioParty1 {
         return [
             Test("smoke", &smoke, 60 * 60),
             Test("jalFromExec", &jalFromExec, 60 * 60),
+            Test("jumpTiming", &jumpTiming, 60 * 60),
+            Test("execEventsPaired", &execEventsPaired, 60 * 60),
+            Test("patchedCode", &patchedCode, 60 * 60),
+            Test("delaySlotJump", &delaySlotJump, 60 * 60),
+            Test("newHookTypes", &newHookTypes, 60 * 60),
             Test("customSpaces", &customSpaces, 60 * 60 * 5),
             Test("staleCustomSpaces", &staleCustomSpaces, 60 * 60),
             Test("landOnCustomSpaces", &landOnCustomSpaces, 60 * 60 * 20),
@@ -658,6 +663,257 @@ class TestMarioParty1 : MarioParty1 {
                     before.r[i].v, after.r[i].v));
         }
         d.note("GetPlayerStruct(2) returned ", result.to!string(16), " and the registers were restored");
+    }
+
+    // Free memory for code the tests write: the top of the Expansion Pak's RDRAM, which Mario Party doesn't use
+    enum Address SCRATCH = 0x80700000;
+
+    void writeCode(Address at, const Instruction[] code) {
+        d.check(memory.length >= 0x800000, "The test writes code to the Expansion Pak's RDRAM, which isn't there");
+        foreach (i, w; code) (at + cast(uint)(i * 4)).setCode(w);
+    }
+
+    // Calls code the test wrote (from RenderSpaces, on the board) and returns v0
+    uint callCode(Address address) {
+        bool armed = true, returned;
+        uint result;
+        0x8004BA04.onExec({
+            if (!armed) return;
+            armed = false;
+            address.jal((uint v) { result = v; returned = true; });
+        });
+        d.waitUntil(() => returned, "the call to return", 60);
+        return result;
+    }
+
+    enum Instruction JR_RA = 0x03E00008;
+    static Instruction addiuV0(short v) { return 0x24020000 | cast(ushort)v; } // addiu v0, zero, v
+
+    // jump() keeps the CPU's cycle count (CP0 Count) right. The interpreters count cycles from how far the PC got since
+    // the last branch, so a jump made the next count add the distance jumped: a jump forward added about a cycle per 4
+    // bytes (1.7M from HuPrcVSleep to the scratch code), and one back wrapped around and added about 2^30. Reads Count
+    // (with code the test writes) around a call back to GetPlayerStruct and calls forward to the scratch code.
+    void jumpTiming() {
+        setUp(STATE_DK_TURN_1);
+        enum Address READ_COUNT = SCRATCH + 0x5000;
+        writeCode(READ_COUNT, [0x40024800, JR_RA, NOP]); // mfc0 v0, Count
+        bool armed = true, done;
+        uint c0, c1, c2, result;
+        0x800635B4.onExec({ // HuPrcVSleep: above GetPlayerStruct, below the scratch code
+            if (!armed) return;
+            armed = false;
+            READ_COUNT.jal((uint a) {
+                c0 = a;
+                READ_COUNT.jal((uint b) { // A jump forward (from HuPrcVSleep)
+                    c1 = b;
+                    0x80052A8C.jal(2, (uint v) { // And one back
+                        result = v;
+                        READ_COUNT.jal((uint c) { c2 = c; done = true; });
+                    });
+                });
+            });
+        });
+        d.waitUntil(() => done, "the calls to return", 60);
+        d.note("Count went up by ", c1 - c0, " over a call forward, and ", c2 - c1, " over a call back");
+        d.check(result == 0x800F3310, format("GetPlayerStruct(2) returned %08X, not P3's 800F3310", result));
+        d.check(c1 - c0 < 10_000, format("Count went up by %d over a call that runs a few instructions", c1 - c0));
+        d.check(c2 - c1 < 10_000, format("Count went up by %d over a call back to GetPlayerStruct", c2 - c1));
+    }
+
+    // Execute and ExecuteDone come in pairs: Execute isn't sent twice in a row for an instruction. (The pure interpreter
+    // sent a delay slot's twice. The cached interpreter sent the instruction after the end of its decoded code twice:
+    // the code is decoded up to 0x3F8 bytes into the next 4 KB page, so that takes a long run of code without a jump,
+    // which the test writes.) Also watches all of three busy stretches of the game's code, with their delay slots.
+    void execEventsPaired() {
+        setUp(STATE_DK_TURN_1);
+        bool active = true;
+        Address lastExecute = 0; // The last event was Execute for this address (0: it wasn't an Execute)
+        ulong executes, doubles;
+        Address[] doubled;
+        auto onExecute = (Address pc) {
+            if (!active) return;
+            executes++;
+            if (pc == lastExecute) {
+                doubles++;
+                if (doubled.length < 10 && !doubled.canFind(pc)) doubled ~= pc;
+            }
+            lastExecute = pc;
+        };
+        auto onDone = (Address pc) { if (active) lastExecute = 0; };
+
+        // 0x104 NOPs from 16 bytes before a page to past where its block's decoded code ends, then return
+        enum Address RUN = SCRATCH + 0xFF0, RUN_END = SCRATCH + 0x1400;
+        writeCode(RUN, repeat(NOP, (RUN_END - RUN) / 4).array ~ [JR_RA, NOP]);
+
+        Address[] addresses;
+        foreach (range; [[0x8004B000, 0x8004D000], [0x80052000, 0x80053000], [0x80063000, 0x80064000], [RUN, RUN_END + 8]]) {
+            for (Address a = range[0]; a < range[1]; a += 4) addresses ~= a;
+        }
+        foreach (a; addresses) {
+            a.onExec(onExecute);
+            a.onExecDone(onDone);
+        }
+        d.wait(60);
+        callCode(RUN);
+        d.wait(60);
+        active = false; // The handlers stay (removing them would remove the plugin's own at these addresses)
+        d.note(executes, " Executes, ", doubles, " twice in a row",
+               doubled.empty ? "" : " (at " ~ doubled.map!(a => a.to!string(16)).join(", ") ~ ")");
+        d.check(executes > 1000, "Too few instructions ran to tell");
+        d.check(doubles == 0, format("Execute was sent twice in a row %d times", doubles));
+    }
+
+    // jump() from Execute in a delay slot goes where the plugin says, not where the branch goes, for a branch within
+    // the page (BEQ) and one to another page (J)
+    void delaySlotJump() {
+        setUp(STATE_DK_TURN_1);
+        enum Address BRANCH = SCRATCH + 0x2000, JUMP = SCRATCH + 0x3000, FAR = SCRATCH + 0x4000;
+        writeCode(BRANCH, [
+            0x10000004,  NOP,               // beq zero, zero, +0x14 (always), with its delay slot
+            addiuV0(2),  JR_RA, NOP,        // after the delay slot: 2
+            addiuV0(1),  JR_RA, NOP,        // the branch's target: 1
+            addiuV0(3),  JR_RA, NOP,        // where the plugin jumps: 3
+        ]);
+        writeCode(JUMP, [
+            0x08000000 | ((FAR >> 2) & 0x3FFFFFF), NOP, // j FAR, with its delay slot
+            addiuV0(3),  JR_RA, NOP,        // where the plugin jumps: 3
+        ]);
+        writeCode(FAR, [addiuV0(1), JR_RA, NOP]);
+
+        d.check(callCode(BRANCH) == 1 && callCode(JUMP) == 1, "The code the test wrote doesn't work");
+        (BRANCH + 4).onExec({ jump(BRANCH + 32); });
+        (JUMP + 4).onExec({ jump(JUMP + 8); });
+        auto branch = callCode(BRANCH), far = callCode(JUMP);
+        clearExec(BRANCH + 4);
+        clearExec(JUMP + 4);
+        d.note("After jumping from the delay slots: ", branch, " (BEQ), ", far, " (J)");
+        d.check(branch == 3, format("Jumping from BEQ's delay slot ended up returning %d, not 3", branch));
+        d.check(far == 3, format("Jumping from J's delay slot ended up returning %d, not 3", far));
+    }
+
+    // Reads and writes by the unaligned (LWL, LWR, LDL, LDR, SWL, SWR, SDL, SDR) and FPU (LWC1, LDC1, SWC1, SDC1) loads
+    // and stores reach the handlers: a word's or doubleword's handlers, with its aligned address, see the whole value
+    // (for a store, as the store leaves it) and can change it. Runs code the test writes on words it watches.
+    void newHookTypes() {
+        setUp(STATE_DK_TURN_1);
+        enum Address D = SCRATCH + 0x6000, CODE = SCRATCH + 0x7000;
+        enum Instruction T0_D_HI = 0x3C088070, T0_D_LO = 0x35086000;     // lui t0, 0x8070; ori t0, t0, 0x6000
+        enum Instruction T1_HI = 0x3C099988, T1_LO = 0x35297766;         // lui t1, 0x9988; ori t1, t1, 0x7766
+
+        bool active;
+        int hits0, hits4, hits8;
+        uint seen0, seen4, replace0, replace4;
+        ulong seen8, replace8;
+        bool doReplace0, doReplace4, doReplace8;
+        D.val!uint.onRead((ref uint v) { if (!active) return; hits0++; seen0 = v; if (doReplace0) v = replace0; });
+        (D + 4).val!uint.onRead((ref uint v) { if (!active) return; hits4++; seen4 = v; if (doReplace4) v = replace4; });
+        D.val!ulong.onRead((ref ulong v) { if (!active) return; hits8++; seen8 = v; if (doReplace8) v = replace8; });
+        D.val!uint.onWrite((ref uint v) { if (!active) return; hits0++; seen0 = v; if (doReplace0) v = replace0; });
+        (D + 4).val!uint.onWrite((ref uint v) { if (!active) return; hits4++; seen4 = v; if (doReplace4) v = replace4; });
+        D.val!ulong.onWrite((ref ulong v) { if (!active) return; hits8++; seen8 = v; if (doReplace8) v = replace8; });
+
+        string[] problems;
+        uint run(string name, const Instruction[] body, uint w0 = 0x11223344, uint w4 = 0x55667788) {
+            D.val!uint = w0;
+            (D + 4).val!uint = w4;
+            writeCode(CODE, [T0_D_HI, T0_D_LO, T1_HI, T1_LO] ~ body ~ [JR_RA, NOP]);
+            hits0 = hits4 = hits8 = 0;
+            seen0 = seen4 = 0;
+            seen8 = 0;
+            active = true;
+            auto v0 = callCode(CODE);
+            active = false;
+            return v0;
+        }
+        void expect(string what, bool ok, string detail) {
+            if (!ok) problems ~= what ~ ": " ~ detail;
+            else d.note("ok ", what);
+        }
+        uint word(Address a) { return a.val!uint; }
+
+        // LWL/LWR of the word at D+1: each instruction's word, the first one changed
+        doReplace0 = true; replace0 = 0xAABBCCDD; doReplace4 = false; doReplace8 = false;
+        auto v = run("lwl/lwr", [0x89020001, 0x99020004]);                     // lwl v0, 1(t0); lwr v0, 4(t0)
+        expect("LWL/LWR", v == 0xBBCCDD55 && hits0 == 1 && hits4 == 1 && seen0 == 0x11223344,
+               format("v0 %08X, handlers %d and %d, saw %08X", v, hits0, hits4, seen0));
+
+        // LWC1
+        v = run("lwc1", [0xC5000000, 0x44020000]);                             // lwc1 f0, 0(t0); mfc1 v0, f0
+        expect("LWC1", v == 0xAABBCCDD && hits0 == 1, format("v0 %08X, handler %d", v, hits0));
+
+        // LDC1 and LDL/LDR: the doubleword
+        doReplace0 = false; doReplace8 = true; replace8 = 0x0102030405060708;
+        v = run("ldc1", [0xD5000000, 0x44220000]);                             // ldc1 f0, 0(t0); dmfc1 v0, f0
+        expect("LDC1", v == 0x05060708 && hits8 == 1 && seen8 == 0x1122334455667788,
+               format("v0 %08X, handler %d, saw %016X", v, hits8, seen8));
+        v = run("ldl/ldr", [0x69020000, 0x6D020007]);                          // ldl v0, 0(t0); ldr v0, 7(t0)
+        expect("LDL/LDR", v == 0x05060708 && hits8 == 2, format("v0 %08X, handler %d", v, hits8));
+        doReplace8 = false;
+
+        // SWL/SWR of 99887766 at D+1: each word as the store leaves it, and a change to the second one
+        doReplace4 = true; replace4 = 0xDEADBEEF;
+        run("swl/swr", [0xA9090001, 0xB9090004]);                              // swl t1, 1(t0); swr t1, 4(t0)
+        expect("SWL/SWR", hits0 == 1 && hits4 == 1 && seen0 == 0x11998877 && seen4 == 0x66667788 &&
+                          word(D) == 0x11998877 && word(D + 4) == 0xDEADBEEF,
+               format("handlers %d and %d, saw %08X and %08X, memory %08X %08X", hits0, hits4, seen0, seen4, word(D), word(D + 4)));
+        doReplace4 = false;
+
+        // SWC1, changed
+        doReplace0 = true; replace0 = 0x12345678;
+        run("swc1", [0x44890000, 0xE5000000]);                                 // mtc1 t1, f0; swc1 f0, 0(t0)
+        expect("SWC1", hits0 == 1 && seen0 == 0x99887766 && word(D) == 0x12345678,
+               format("handler %d, saw %08X, memory %08X", hits0, seen0, word(D)));
+        doReplace0 = false;
+
+        // SDC1, changed
+        doReplace8 = true; replace8 = 0x0102030405060708;
+        run("sdc1", [0x44A90000, 0xF5000000]);                                 // dmtc1 t1, f0; sdc1 f0, 0(t0)
+        expect("SDC1", hits8 == 1 && seen8 == 0xFFFFFFFF99887766 && word(D) == 0x01020304 && word(D + 4) == 0x05060708,
+               format("handler %d, saw %016X, memory %08X %08X", hits8, seen8, word(D), word(D + 4)));
+        doReplace8 = false;
+
+        // SDL/SDR of the whole doubleword
+        run("sdl/sdr", [0xB1090000, 0xB5090007]);                              // sdl t1, 0(t0); sdr t1, 7(t0)
+        expect("SDL/SDR", hits8 == 2 && seen8 == 0xFFFFFFFF99887766 && word(D) == 0xFFFFFFFF && word(D + 4) == 0x99887766,
+               format("handlers %d, saw %016X, memory %08X %08X", hits8, seen8, word(D), word(D + 4)));
+
+        d.check(problems.empty, problems.join("; "));
+    }
+
+    // Code changed with setCode() runs at once, even in the cached interpreter (which keeps code it has decoded): here
+    // GetPlayerStruct, which has run every frame, is changed as its first instruction is about to run to return 7, then
+    // changed back, and the original runs again
+    void patchedCode() {
+        setUp(STATE_DK_TURN_1);
+        enum Address F = 0x80052A8C; // GetPlayerStruct(index)
+        immutable Instruction[2] original = [F.val!Instruction, (F + 4).val!Instruction];
+        uint call(bool change) {
+            bool armed = true, returned;
+            uint result;
+            0x8004BA04.onExec({ // RenderSpaces
+                if (!armed) return;
+                armed = false;
+                if (change) {
+                    F.onExecOnce({
+                        F.setCode(0x03E00008);       // jr ra
+                        (F + 4).setCode(0x24020007); // addiu v0, zero, 7
+                    });
+                }
+                F.jal(2, (uint v) {
+                    result = v;
+                    F.setCode(original[0]);
+                    (F + 4).setCode(original[1]);
+                    returned = true;
+                });
+            });
+            d.waitUntil(() => returned, "the call to return", 60);
+            return result;
+        }
+        auto changed = call(true);
+        d.check(changed == 7, format("The changed GetPlayerStruct(2) returned %08X, not 7", changed));
+        auto restored = call(false);
+        d.check(restored == 0x800F3310, format("The restored GetPlayerStruct(2) returned %08X, not P3's 800F3310", restored));
+        d.note("The changed code returned ", changed, ", and the restored code ", restored.to!string(16));
     }
 
     // For finding button sequences: from boot (no state), runs the steps in N64TEST_ARG (see runSteps()), with a
