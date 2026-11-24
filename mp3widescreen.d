@@ -391,7 +391,10 @@ private __gshared bool mainChanged;             // Whether the main code is the 
 private __gshared int[Address] changedOverlays; // The overlay with its changes made at each overlay address (-1: none)
 private __gshared bool extraSkyTile, leftSkyTile; // The end-of-game sky's extra tiles (see setUpHooks())
 private __gshared uint skyGfx;                      // Where the display list was before a sky tile's commands
-private immutable uint[2] SKY_TILES = [0x0128F334, 0x0129145C]; // The ROM range of the sky's tiles (HVQ directory)
+
+// The board code's backgrounds (HVQ) file system: its ROM offset (custom boards move it), its directory count, and its
+// directories' offsets in it (in memory). The sky's tiles are its directory 1.
+enum Address HVQ_ROM = 0x80102D20, HVQ_COUNT = 0x80102D24, HVQ_DIRECTORIES = 0x80100FF0;
 
 // Makes the tile rectangles in the display list from `start` to `end` repeat one column of their texture: the one with
 // the least red (no star's glow). A rectangle (G_TEXRECT, 0xE4) is followed by G_RDPHALF_1 (0xE1: s, t) and
@@ -613,8 +616,10 @@ private void setUpHooks() {
     // (v0 = the slot's address: the board arrays + column (s0) * 48 + row * 4, for 8 columns; a slot holds a tile's
     // entry, with its ROM offset at 16)
     static bool skyTile(Address entry) {
-        auto rom = (entry + 16).val!uint;
-        return rom >= SKY_TILES[0] && rom < SKY_TILES[1];
+        Address directories = HVQ_DIRECTORIES.val!uint;
+        if (HVQ_COUNT.val!uint < 3 || directories < 0x80000000 || directories >= 0x80800000) return false;
+        auto rom = (entry + 16).val!uint - HVQ_ROM.val!uint;
+        return rom >= (directories + 4).val!uint && rom < (directories + 8).val!uint;
     }
     at(129, 0x800E7B68, {
         if (!changed(79) || (cast(Address)gpr.v0).val!uint) return;
