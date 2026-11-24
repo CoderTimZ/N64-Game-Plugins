@@ -564,3 +564,5 @@ What's changed from the patch:
   broke a store, a call or a load there (most of them in the Mini-Game Room). They're made where they were meant to be.
 - The patch's changes to ROM offsets (for its own file system) and two changes that aren't for widescreen aren't made.
 - A few values the patch missed are moved too, like where an item being bought appears on the board.
+- The detailed results (Start, at the final results) scroll to their last column (Game Guy Spaces), which the patch
+  never showed.

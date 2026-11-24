@@ -1774,7 +1774,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
 
     // Text (game bytes) to load instead of message `id`, whose own text is `text`, or null to keep it
     // The detailed results (the final results' Start screen) get a Lucky Spaces column after Blue Spaces. The screen
-    // shows 4 of its 13 columns at a time (0x801097B0 = the first one shown, 0x801097B4 = the cursor in them), each
+    // shows 4 of its 13 columns at a time (6 in widescreen; 0x801097B0 = the first one shown, 0x801097B4 = the cursor in them), each
     // with a header icon, each player's number (the top one in blue) and Toad's description of the cursor's column.
     // With the Lucky Spaces column there are 14: from Red Spaces on, column c is the game's column c - 1. The Lucky
     // Spaces column's icon is a 14th sprite, made from the Blue Spaces icon.
@@ -1848,11 +1848,12 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
 
         // Scrolling: the first column shown goes up to 10 instead of 9 (moving right, 0x8010941C checks it's below 10,
         // and 0x80109428 makes it 9 if not), and the right arrow hides at 10 (0x80108910 and 0x80109554 compare it
-        // with 9)
-        0x8010941C.onExecDone({ if (resultsScreen()) gpr.v0 = FIRST.val!int < COLUMNS - 3; });
-        0x80109428.onExec({ if (resultsScreen()) gpr.v0 = COLUMNS - 4; });
-        0x80108910.onExec({ if (resultsScreen()) gpr.v0 = COLUMNS - 4; });
-        0x80109554.onExec({ if (resultsScreen()) gpr.v0 = COLUMNS - 4; });
+        // with 9). In widescreen, 6 columns are shown: up to 8 instead of 7.
+        auto last = () => COLUMNS - (changed(Scene.FINAL_RESULTS) ? 6 : 4); // The first column shown at the end
+        0x8010941C.onExecDone({ if (resultsScreen()) gpr.v0 = FIRST.val!int < last() + 1; });
+        0x80109428.onExec({ if (resultsScreen()) gpr.v0 = last(); });
+        0x80108910.onExec({ if (resultsScreen()) gpr.v0 = last(); });
+        0x80109554.onExec({ if (resultsScreen()) gpr.v0 = last(); });
 
         // Toad's description of the cursor's column (func_8005B43C, a1 = message 0x1900 + the game's column): the
         // Lucky Spaces column shows the Blue Spaces message, changed as it's loaded (see replaceMessage())

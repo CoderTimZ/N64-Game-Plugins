@@ -1938,11 +1938,16 @@ immutable Patch[] PATCHES = [
         I(0x80108208, 64, 96), // li a0, 64
         I(0x801082DC, 64, 96), // slti v0, s3, 64
         I(0x80108740, 64, 96), // slti v0, s0, 64
+        // The detailed results show 6 of their 13 columns instead of 4: the cursor goes up to 5 instead of 3, and the
+        // first column shown up to 7 instead of 9 (fixed: the patch made it 6, so the last column was never shown)
         I(0x801093F4, 4, 6), // slti v0, v0, 4
         I(0x801093FC, 3, 5), // li v0, 3
-        I(0x8010941C, 10, 7), // slti v0, v0, 10
-        I(0x80109424, 9, 6), // li v0, 9
-        I(0x80109550, 9, 6), // li v0, 9
+        I(0x8010941C, 10, 8), // slti v0, v0, 10
+        I(0x80109424, 9, 7), // li v0, 9
+        // The right arrow hides at the end (fixed to match: the patch changed only one of these two checks)
+        I(0x8010890C, 9, 7), // li v0, 9
+        I(0x80108914, 3, 5), // li v0, 3
+        I(0x80109550, 9, 7), // li v0, 9
         I(0x80109558, 3, 5), // li v0, 3
     ])),
     // Overlay 88: OPENING_CREDITS

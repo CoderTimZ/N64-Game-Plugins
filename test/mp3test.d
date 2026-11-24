@@ -320,7 +320,8 @@ class TestMarioParty3 : MarioParty3 {
                     auto button = data.currentScene == Scene.MINI_GAME_RULES ? Pad.START : Pad.A;
                     d.hold(0, !isBoardScene() && (d.frame - start) % 90 < 10 ? button : 0);
                     watch(1);
-                    d.check(d.frame - start < 60 * 60 * 15, "Timed out waiting for " ~ target.to!string);
+                    if ((d.frame - start) % 1800 == 1799) d.screenshot("until"); // To see where it's stuck, if it is
+                    d.check(d.frame - start < 60 * 60 * 6, "Timed out waiting for " ~ target.to!string);
                 }
                 d.release(0);
                 d.note("Reached ", target, ": ", describe());
