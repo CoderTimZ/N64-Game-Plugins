@@ -85,6 +85,11 @@ final class TestDriver {
     // Call from the plugin's onFrame()
     void onFrame() {
         frame++;
+        // A heartbeat for test\send-command.ps1, which reports the emulator stalled if it stops changing
+        if (frame % 60 == 0) {
+            import std.file : write;
+            try write("TestCommands/heartbeat.txt", frame.to!string); catch (Exception) {}
+        }
         if (finished) return;
         if (frame == 1) unlimitSpeed();
 

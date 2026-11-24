@@ -566,3 +566,4 @@ What's changed from the patch:
 - A few values the patch missed are moved too, like where an item being bought appears on the board.
 - The detailed results (Start, at the final results) scroll to their last column (Game Guy Spaces), which the patch
   never showed.
+- The night sky at the end of a game (where the results are announced) fills the wider screen.

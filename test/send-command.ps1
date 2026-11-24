@@ -27,10 +27,21 @@ $before = @(Get-Content $log).Count
 Set-Content "$Rmg\TestCommands\$Game.txt" "# $id`n$Steps"
 
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+$heartbeat = "$Rmg\TestCommands\heartbeat.txt" # Rewritten every 60 frames by the test plugin
+$stalled = $false
 while ((Get-Date) -lt $deadline) {
     $lines = @(Get-Content $log)
     if ($lines | Select-Object -Skip $before | Where-Object { $_ -match "READY $id|DONE " }) { break }
     if ($Steps.Trim() -eq "quit" -and ($lines | Select-Object -Skip $before | Where-Object { $_ -match "COMMAND $id" })) { break }
+    # The emulator stalled or crashed: no frames for 15 seconds, or RMG isn't running
+    $beat = if (Test-Path $heartbeat) { (Get-Item $heartbeat).LastWriteTime } else { Get-Date }
+    $running = Get-Process | Where-Object { $_.Path -like "$Rmg\*" }
+    if ($Steps.Trim() -ne "quit" -and (((Get-Date) - $beat).TotalSeconds -gt 15 -or -not $running)) { $stalled = $true; break }
     Start-Sleep -Milliseconds 250
 }
 Get-Content $log | Select-Object -Skip $before
+if ($stalled) {
+    $frame = if (Test-Path $heartbeat) { (Get-Content $heartbeat -Raw).Trim() } else { "?" }
+    Write-Host "STALLED: the emulator ran no frames for 15 seconds (last heartbeat at frame $frame), or RMG exited"
+    exit 1
+}

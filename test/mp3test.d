@@ -254,6 +254,48 @@ class TestMarioParty3 : MarioParty3 {
         }
     }
 
+    // Logs a0-a3 each time `address` runs in `inScene` (the first 20)
+    void hitAddress(Scene inScene, uint address) {
+        auto count = new int;
+        address.onExec({
+            if (data.currentScene != inScene || (*count)++ >= 20) return;
+            d.note("hit ", address.to!string(16), ": ", (cast(uint)gpr.a0).to!string(16), " ", (cast(uint)gpr.a1).to!string(16), " ",
+                   (cast(uint)gpr.a2).to!string(16), " ", (cast(uint)gpr.a3).to!string(16), " ra ", (cast(uint)gpr.ra).to!string(16));
+        });
+    }
+
+    // A model's vertices' X stretched by 424/320 as it loads (for finding which model is which)
+    void stretchModel(uint dir, uint file) {
+        auto directory = new uint;
+        0x80009EAC.onExec({ if (gpr.a0 == 47) *directory = gpr.a1; });
+        0x80009B64.onExec({
+            if (gpr.a0 != 46 || *directory != dir || (gpr.a1 & 0xFFFF) != file) return;
+            Address info = gpr.a2;
+            gpr.ra.onExecOnce({
+                auto rom = info.val!uint, size = (info + 4).val!uint;
+                0x8000B000.onExecOnce({
+                    if (gpr.a0 != rom) return;
+                    Address buffer = gpr.a1;
+                    gpr.ra.onExecOnce({
+                        foreach (i; 0..size - 4) {
+                            if ((buffer + i).val!ubyte != 'V' || (buffer + i + 1).val!ubyte != 'T') continue;
+                            Address o = buffer + i + 8;
+                            auto count = (o.val!ubyte << 8) | (o + 1).val!ubyte;
+                            foreach (k; 0..count) {
+                                Address p = o + 8 + 9 * k;
+                                auto x = cast(short)((p.val!ubyte << 8) | (p + 1).val!ubyte);
+                                auto w = cast(short)(x * 424 / 320);
+                                p.val!ubyte = cast(ubyte)(w >> 8); (p + 1).val!ubyte = cast(ubyte)w;
+                            }
+                            d.note("Stretched (", dir, ", ", file, "): ", count, " vertices");
+                            break;
+                        }
+                    });
+                });
+            });
+        });
+    }
+
     // Runs steps separated by spaces, logging scene changes. A step is a button (A, B, Z, START, L, R, UP, DOWN, LEFT,
     // RIGHT, CUP, CDOWN, CLEFT, CRIGHT, or several joined with +) pressed on controller 1, "wait<frames>", "shot",
     // "save:<file>" or "load:<file>" (an emulator state), "untilboard" (presses A until a board's first turn starts),
@@ -404,6 +446,87 @@ class TestMarioParty3 : MarioParty3 {
             } else if (step.startsWith("shots:")) { // shots:<count>,<frames>: screenshots that many frames apart
                 auto v = step[6..$].split(",").map!(x => x.to!int).array;
                 foreach (i; 0..v[0]) { watch(v[1]); d.screenshot("shots"); }
+            } else if (step == "noduels") { // No duels on shared spaces (the check setUpAlwaysDuel() forces on)
+                0x800FA854.onExec({ if (isBoardScene()) gpr.v0 = 0; });
+                d.note("No duels");
+            } else if (step == "skipgames") { // Mini-games are skipped (like Superstars' results): the rules screen goes
+                                              // straight to the results, with no coins won
+                0x80048128.onExec({
+                    if (gpr.a0 != Scene.MINI_GAME_RULES) return;
+                    players.each!((p) { p.data.gameCoinsExtra = 0; p.data.gameCoinsMain = 0; });
+                    gpr.a0 = Scene.MINI_GAME_RESULTS;
+                    d.note("Skipped a mini-game");
+                });
+            } else if (step.startsWith("stretchmodel:")) { // stretchmodel:<dir>,<file>: a model's X stretched by 424/320 as it loads
+                auto v = step[13..$].split(",").map!(x => x.to!uint).array;
+                stretchModel(v[0], v[1]);
+            } else if (step == "decompressions") { // Logs every decompression (func_8000B000(rom, buffer, size, type)) and dumps it
+                0x8000B000.onExec({
+                    auto rom = cast(uint)gpr.a0, size = cast(uint)gpr.a2, type = cast(uint)gpr.a3;
+                    Address buffer = gpr.a1;
+                    gpr.ra.onExecOnce({
+                        import std.file : mkdirRecurse, write;
+                        auto bytes = new ubyte[size];
+                        foreach (i, ref b; bytes) b = (buffer + cast(uint)i).val!ubyte;
+                        mkdirRecurse("TestLogs/decomp");
+                        write(format("TestLogs/decomp/%08X.bin", rom), bytes);
+                        d.note("Decompressed ", rom.to!string(16), " size ", size, " type ", type, " first ",
+                               buffer.val!uint.to!string(16), " in ", data.currentScene);
+                    });
+                });
+            } else if (step.startsWith("dumpram:")) { // dumpram:<file>: writes the 8 MB of RDRAM (big-endian)
+                import std.file : write;
+                auto bytes = new ubyte[0x800000];
+                foreach (i; 0..0x200000) {
+                    auto w = (0x80000000 + i * 4).val!uint;
+                    bytes[4 * i] = cast(ubyte)(w >> 24); bytes[4 * i + 1] = cast(ubyte)(w >> 16);
+                    bytes[4 * i + 2] = cast(ubyte)(w >> 8); bytes[4 * i + 3] = cast(ubyte)w;
+                }
+                write(step[8..$], bytes);
+                d.note("Dumped RDRAM to ", step[8..$]);
+            } else if (step.startsWith("watchwrite:")) { // watchwrite:<hex address>: logs the first writes to a byte, with pc and ra
+                Address address = step[11..$].to!uint(16);
+                auto count = new int;
+                address.val!ubyte.onWrite((ref ubyte v, Address pc) {
+                    if ((*count)++ < 6) d.note("Write ", address.to!string(16), " = ", v, " from ", pc.to!string(16),
+                                               " ra ", (cast(uint)gpr.ra).to!string(16), " in ", data.currentScene);
+                });
+            } else if (step.startsWith("watchread:")) { // watchread:<hex address>: logs the first reads of a byte, with pc and ra
+                Address address = step[10..$].to!uint(16);
+                auto count = new int;
+                address.val!ubyte.onRead((ref ubyte v, Address pc) {
+                    if ((*count)++ < 6) d.note("Read ", address.to!string(16), " = ", v, " from ", pc.to!string(16),
+                                               " ra ", (cast(uint)gpr.ra).to!string(16), " in ", data.currentScene);
+                });
+            } else if (step.startsWith("hit:")) { // hit:<scene>,<hex address>: logs a0-a3 each time the address runs in that scene (the first 20)
+                auto v = step[4..$].split(",");
+                hitAddress(v[0].to!Scene, v[1].to!uint(16));
+            } else if (step == "files") { // Logs the files the game reads from its main file system, with images' sizes
+                auto directory = new uint;
+                0x80009EAC.onExec({ if (gpr.a0 == 47) *directory = gpr.a1; });
+                0x80009B64.onExec({
+                    if (gpr.a0 != 46) return;
+                    auto file = gpr.a1 & 0xFFFF, dir = *directory;
+                    Address info = gpr.a2;
+                    gpr.ra.onExecOnce({
+                        auto rom = info.val!uint, size = (info + 4).val!uint;
+                        d.note("File (", dir, ", ", file, ") size ", size, " in ", data.currentScene);
+                        0x8000B000.onExecOnce({
+                            if (gpr.a0 != rom) return;
+                            Address buffer = gpr.a1;
+                            gpr.ra.onExecOnce({
+                                import std.file : mkdirRecurse, write;
+                                auto bytes = new ubyte[size];
+                                foreach (i, ref b; bytes) b = (buffer + cast(uint)i).val!ubyte;
+                                mkdirRecurse("TestLogs/files");
+                                write(format("TestLogs/files/%d-%d.bin", dir, file), bytes);
+                                if (buffer.val!uint != 0x20) return; // Not an image
+                                d.note("  image (", dir, ", ", file, "): ", (buffer + 0x24).val!ushort, "x",
+                                       (buffer + 0x26).val!ushort, " format ", (buffer + 0x19).val!ubyte);
+                            });
+                        });
+                    });
+                });
             } else if (step == "cpu") {
                 players.each!(p => p.data.flags = p.data.flags | 1);
             } else if (step == "shot") {

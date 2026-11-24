@@ -388,6 +388,34 @@ enum Address MAIN_END = 0x800A8AF0;
 
 private __gshared bool mainChanged;             // Whether the main code is the US ROM's (or a custom board's), changed
 private __gshared int[Address] changedOverlays; // The overlay with its changes made at each overlay address (-1: none)
+private __gshared bool extraSkyTile, leftSkyTile; // The end-of-game sky's extra tiles (see setUpHooks())
+private __gshared uint skyGfx;                      // Where the display list was before a sky tile's commands
+private immutable uint[2] SKY_TILES = [0x0128F334, 0x0129145C]; // The ROM range of the sky's tiles (HVQ directory)
+
+// Makes the tile rectangles in the display list from `start` to `end` repeat one column of their texture: the one with
+// the least red (no star's glow). A rectangle (G_TEXRECT, 0xE4) is followed by G_RDPHALF_1 (0xE1: s, t) and
+// G_RDPHALF_2 (0xF1: dsdx, dtdy), and its texture (RGBA16, 64 wide) is the last G_SETTIMG's (0xFD).
+private void repeatSkyColumn(Address start, Address end) {
+    if (end < start || end - start > 0x800) return; // A tile's commands are a few hundred bytes
+    Address texture;
+    for (Address p = start; p + 24 <= end; p += 8) {
+        auto op = p.val!uint >> 24;
+        if (op == 0xFD) texture = (p + 4).val!uint | 0x80000000;
+        if (op != 0xE4 || !texture || (p + 8).val!uint >> 24 != 0xE1 || (p + 16).val!uint >> 24 != 0xF1) continue;
+        auto w0 = p.val!uint, w1 = (p + 4).val!uint;
+        int height = (cast(int)(w0 & 0xFFF) - cast(int)(w1 & 0xFFF)) / 4;
+        if (height <= 0 || height > 48 || texture < 0x80000000 || texture >= 0x80800000) continue;
+        uint best, bestRed = uint.max;
+        foreach (x; 0..64) {
+            uint red;
+            foreach (y; 0..height) red += (texture + (y * 64 + x) * 2).val!ushort >> 11 & 31;
+            if (red < bestRed) { bestRed = red; best = x; }
+        }
+        auto st = (p + 12).val!uint;
+        (p + 12).val!uint = best << 5 << 16 | (st & 0xFFFF);           // s: the column (10.5 fixed point)
+        (p + 20).val!uint = (p + 20).val!uint & 0xFFFF;               // dsdx: 0
+    }
+}
 
 // Whether `overlay` is loaded, with its changes made
 bool changed(uint overlay) {
@@ -574,6 +602,52 @@ private void setUpHooks() {
     at(124, 0x80107C4C, { savedA1 = gpr.a1; });
     at(124, 0x80107C8C, { gpr.v1 = savedA1 % (SCREEN_WIDTH / 2) + (savedA1 >> 5) % (SCREEN_WIDTH / 2); });
     at(124, 0x80107CC8, { gpr.v0 = gpr.a1 % SCREEN_WIDTH; });
+
+    // Added: the end-of-game scene's sky (FINISH_BOARD) is a 320x240 background (5 x 5 tiles of 64x48), drawn by the
+    // board code's tile drawing, which skips the grid's empty slots: the sides of the wider screen. There, the nearest
+    // of the sky's tiles in the same row is drawn instead, and left of its first column (x = 52) the row's first tile
+    // again, 64 to the left. These extra tiles repeat one column of their tile's pixels (the one with the least red:
+    // no star's glow), so the sky's vertical gradient continues to the screen's edges. Other backgrounds the scene
+    // shows (like the cannon's) are left alone.
+    // (v0 = the slot's address: the board arrays + column (s0) * 48 + row * 4, for 8 columns; a slot holds a tile's
+    // entry, with its ROM offset at 16)
+    static bool skyTile(Address entry) {
+        auto rom = (entry + 16).val!uint;
+        return rom >= SKY_TILES[0] && rom < SKY_TILES[1];
+    }
+    at(129, 0x800E7B68, {
+        if (!changed(79) || (cast(Address)gpr.v0).val!uint) return;
+        auto column = cast(short)gpr.s0;
+        foreach (distance; 1..8) {
+            foreach (c; [column - distance, column + distance]) {
+                if (c < 0 || c >= 8) continue;
+                Address slot = gpr.v0 + (c - column) * 48;
+                if (!slot.val!uint) continue;
+                if (skyTile(slot.val!uint)) { gpr.v0 = slot; extraSkyTile = true; }
+                return;
+            }
+        }
+    });
+    // The draw (func_800E5FB0(gfx, tile, x, y): y is s1 >> 16, set in the call's delay slot; v0 = the tile's entry).
+    // For the extra tile on the left, this hook runs again when the call it makes returns, and lets the game's happen.
+    at(129, 0x800E7B8C, {
+        if (!changed(79)) return;
+        if (leftSkyTile) { leftSkyTile = false; return; } // Back from the left one
+        Address gfx = gpr.a0;
+        Address before = gfx.val!uint;
+        skyGfx = before;
+        if (extraSkyTile) return;                         // A substituted tile (fixed at 0x800E7B94)
+        if (cast(short)gpr.s0 != 0 || !skyTile(gpr.v0)) return;
+        leftSkyTile = true;
+        0x800E5FB0.jal(gfx, gpr.a1, cast(uint)(cast(short)gpr.a2 - 64), cast(uint)(cast(int)gpr.s1 >> 16), {
+            repeatSkyColumn(before, gfx.val!uint);
+        });
+    });
+    at(129, 0x800E7B94, {
+        if (!changed(79) || !extraSkyTile) return;
+        extraSkyTile = false;
+        repeatSkyColumn(skyGfx, (cast(Address)gpr.s2).val!uint);
+    });
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
