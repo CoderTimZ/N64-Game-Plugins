@@ -27,6 +27,7 @@ $before = @(Get-Content $log).Count
 Set-Content "$Rmg\TestCommands\$Game.txt" "# $id`n$Steps"
 
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+$sent = Get-Date
 $heartbeat = "$Rmg\TestCommands\heartbeat.txt" # Rewritten every 60 frames by the test plugin
 $stalled = $false
 while ((Get-Date) -lt $deadline) {
@@ -34,7 +35,8 @@ while ((Get-Date) -lt $deadline) {
     if ($lines | Select-Object -Skip $before | Where-Object { $_ -match "READY $id|DONE " }) { break }
     if ($Steps.Trim() -eq "quit" -and ($lines | Select-Object -Skip $before | Where-Object { $_ -match "COMMAND $id" })) { break }
     # The emulator stalled or crashed: no frames for 15 seconds, or RMG isn't running
-    $beat = if (Test-Path $heartbeat) { (Get-Item $heartbeat).LastWriteTime } else { Get-Date }
+    $beat = if (Test-Path $heartbeat) { (Get-Item $heartbeat).LastWriteTime } else { $sent }
+    if ($beat -lt $sent) { $beat = $sent } # A heartbeat from before this command (RMG may still be starting)
     $running = Get-Process | Where-Object { $_.Path -like "$Rmg\*" }
     if ($Steps.Trim() -ne "quit" -and (((Get-Date) - $beat).TotalSeconds -gt 15 -or -not $running)) { $stalled = $true; break }
     Start-Sleep -Milliseconds 250

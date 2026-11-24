@@ -6,6 +6,7 @@ version (TestDriver):
 
 import me.timz.n64.marioparty;
 import me.timz.n64.marioparty3;
+import me.timz.n64.mp3map;
 import me.timz.n64.plugin;
 import me.timz.n64.testdriver;
 import std.algorithm;
@@ -264,6 +265,51 @@ class TestMarioParty3 : MarioParty3 {
         });
     }
 
+    // See the hvqdump step
+    void hvqDump(uint directory, string file) {
+        import std.file : read, write;
+        auto rom = cast(ubyte[])read(d.arg);
+        uint be(size_t o) { return rom[o] << 24 | rom[o + 1] << 16 | rom[o + 2] << 8 | rom[o + 3]; }
+        auto count = be(directory);                 // Files: the info, the HVQ-MPS, the tiles and an end offset
+        auto tiles = count - 3;
+        // The board code's work buffer (overlay 128's or 129's, whichever is loaded)
+        // and its decoder setup (func_80069E68(the HVQ-MPS file), switched to this directory's and back)
+        uint work, boardMps;
+        if (0x800E6E58.val!uint == 0x0C01A63A) { work = 0x80102DCC.val!uint; boardMps = 0x80103138.val!uint; }
+        else if (0x800E57F0.val!uint == 0x0C01A63A) { work = 0x80102D3C.val!uint; boardMps = 0x801031C0.val!uint; }
+        auto mpsStart = directory + be(directory + 8), mpsEnd = directory + be(directory + 12);
+        d.note("HVQ directory ", directory.to!string(16), ": ", tiles, " tiles, work buffer ", work.to!string(16));
+        if (!work) return;
+        auto output = new ubyte[tiles * 0x1800];
+        auto done = new bool;
+        // Started from HuPrcVSleep, a safe point in a game process (HuMemMemoryAllocTemp for the buffers)
+        0x8004F074.onExecOnce({ 0x80035934.jal(0x4000, (uint input) {
+            0x80035934.jal(0x1800, (uint pixels) {
+                void decodeTile(uint t) {
+                    if (t == tiles) {
+                        write(file, output);
+                        d.note("Wrote ", tiles, " tiles to ", file);
+                        0x80069E68.jal(boardMps, { *done = true; });
+                        return;
+                    }
+                    auto start = directory + be(directory + 4 + 4 * (t + 2)), end = directory + be(directory + 4 + 4 * (t + 3));
+                    foreach (i; 0..end - start) (cast(Address)(input + i)).val!ubyte = rom[start + i];
+                    0x800698E8.jal(input + 4, pixels, 64, work, {
+                        foreach (i; 0..0x1800) output[t * 0x1800 + i] = (cast(Address)(pixels + i)).val!ubyte;
+                        decodeTile(t + 1);
+                    });
+                }
+                foreach (i; 0..mpsEnd - mpsStart) (cast(Address)(input + i)).val!ubyte = rom[mpsStart + i];
+                0x80035934.jal(mpsEnd - mpsStart, (uint mps) {
+                    foreach (i; 0..mpsEnd - mpsStart) (cast(Address)(mps + i)).val!ubyte = rom[mpsStart + i];
+                    0x80069E68.jal(mps, { decodeTile(0); });
+                });
+            });
+        }); });
+        foreach (frame; 0..600) { if (*done) return; d.wait(); }
+        d.note("STEP FAILED: the decoding didn't finish in 600 frames (the game's main thread may be stuck)");
+    }
+
     // A model's vertices' X stretched by 424/320 as it loads (for finding which model is which)
     void stretchModel(uint dir, uint file) {
         auto directory = new uint;
@@ -501,6 +547,23 @@ class TestMarioParty3 : MarioParty3 {
             } else if (step.startsWith("hit:")) { // hit:<scene>,<hex address>: logs a0-a3 each time the address runs in that scene (the first 20)
                 auto v = step[4..$].split(",");
                 hitAddress(v[0].to!Scene, v[1].to!uint(16));
+            } else if (step.startsWith("hvqdump:")) { // hvqdump:<hex ROM offset of an HVQ directory>,<file>: decodes its
+                // tiles with the game's decoder (func_800698E8(data + 4, out, 64, work), which the board code sets up
+                // for the board's background: run it on that board) and writes them as RGBA5551, in the directory's order
+                // (the ROM is N64TEST_ARG)
+                auto v = step[8..$].split(",");
+                hvqDump(v[0].to!uint(16), v[1]);
+            } else if (step.startsWith("mapbg:")) { // mapbg:<background dir>,<map dir>: sharperCustomBoardMaps' map from that background
+                auto v = step[6..$].split(",").map!(x => x.to!uint).array;
+                0x8004F074.onExecOnce({ useCustomBoardMapBackground(v[0], v[1]); }); // From HuPrcVSleep
+                auto start = d.frame;
+                watch(2);
+                while (customBoardMapPreparing() && d.frame - start < 1800) watch(1);
+                d.note("Map background: ", v[0], " (made in ", d.frame - start, " frames)");
+            } else if (step.startsWith("poke:")) { // poke:<hex address>,<byte>: writes a byte
+                auto v = step[5..$].split(",");
+                (cast(Address)v[0].to!uint(16)).val!ubyte = v[1].to!ubyte;
+                d.note("Poked ", v[0], " = ", v[1]);
             } else if (step == "files") { // Logs the files the game reads from its main file system, with images' sizes
                 auto directory = new uint;
                 0x80009EAC.onExec({ if (gpr.a0 == 47) *directory = gpr.a1; });

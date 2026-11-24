@@ -43,6 +43,7 @@ how the file works and describes the options every Mario Party plugin has: `char
 | [`finalResultsDoNotProceed`](#finalresultsdonotproceed) | `true`/`false` | `false` |
 | [`unlockEverything`](#unlockeverything) | `true`/`false` | `false` |
 | [`widescreen`](#widescreen) | `true`/`false` | `false` |
+| [`sharperCustomBoardMaps`](#sharpercustomboardmaps) | `true`/`false` | `false` |
 
 The plugin also always shows the turn number ("current / total") at the top of the board.
 
@@ -567,3 +568,15 @@ What's changed from the patch:
 - The detailed results (Start, at the final results) scroll to their last column (Game Guy Spaces), which the patch
   never showed.
 - The night sky at the end of a game (where the results are announced) fills the wider screen.
+
+### `sharperCustomBoardMaps`
+
+On boards made with PartyPlanner64, the zoomed-out map (Z on a turn) is made from the board's own background shrunk to
+640x480 instead of the 320x240 copy PartyPlanner64 saves. It's sharper when the emulator
+renders above the N64's resolution (like Parallel's upscaling).
+
+The map is also made from the background the board is showing that turn. PartyPlanner64 boards can change their
+background between turns, like Seasonal Woodland's four seasons, but their map always showed the first one; now it
+shows the current one.
+
+The original boards keep their own maps, which are drawn by hand (their routes and arrows over a darkened board).

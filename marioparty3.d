@@ -1,6 +1,7 @@
 module me.timz.n64.marioparty3;
 
 import me.timz.n64.marioparty;
+import me.timz.n64.mp3map;
 import me.timz.n64.mp3widescreen;
 import me.timz.n64.plugin;
 import core.time;
@@ -56,6 +57,7 @@ class Config : MarioPartyConfig {
     bool superstarsMiniGames = false;
     SuperstarsMiniGame[] blockedSuperstarsMiniGames;
     bool widescreen = false;
+    bool sharperCustomBoardMaps = false;
 
     this() {
         bonuses = [
@@ -566,6 +568,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         super.onStart();
 
         if (config.widescreen) setUpWidescreen();
+        if (config.sharperCustomBoardMaps) setUpCustomBoardMaps();
 
         /*
         bool[uint] seen;
