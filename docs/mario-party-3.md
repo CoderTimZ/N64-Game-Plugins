@@ -44,6 +44,7 @@ how the file works and describes the options every Mario Party plugin has: `char
 | [`unlockEverything`](#unlockeverything) | `true`/`false` | `false` |
 | [`widescreen`](#widescreen) | `true`/`false` | `false` |
 | [`sharperCustomBoardMaps`](#sharpercustomboardmaps) | `true`/`false` | `false` |
+| [`customCPUJunctionArrowFix`](#customcpujunctionarrowfix) | `true`/`false` | `false` |
 
 The plugin also always shows the turn number ("current / total") at the top of the board.
 
@@ -580,3 +581,10 @@ background between turns, like Seasonal Woodland's four seasons, but their map a
 shows the current one.
 
 The original boards keep their own maps, which are drawn by hand (their routes and arrows over a darkened board).
+
+### `customCPUJunctionArrowFix`
+
+On boards made with PartyPlanner64 that pick a computer's direction at a junction with their own event (like
+Seasonal Woodland, whose computers head for the star), the arrow the computer chooses points the way it goes.
+PartyPlanner64's junction has the computer pick an arrow at random, and the board's event then picks again and the
+computer often walks the other way. With this option, the board's event chooses first and the arrow follows it.

@@ -58,6 +58,7 @@ class Config : MarioPartyConfig {
     SuperstarsMiniGame[] blockedSuperstarsMiniGames;
     bool widescreen = false;
     bool sharperCustomBoardMaps = false;
+    bool customCPUJunctionArrowFix = false;
 
     this() {
         bonuses = [
@@ -569,6 +570,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
 
         if (config.widescreen) setUpWidescreen();
         if (config.sharperCustomBoardMaps) setUpCustomBoardMaps();
+        if (config.customCPUJunctionArrowFix) setUpCustomCPUJunctionArrowFix();
 
         /*
         bool[uint] seen;
@@ -1773,6 +1775,90 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             return 0x1B10 + ch;
         }
         return 0;
+    }
+
+    // customCPUJunctionArrowFix: at a junction on a board made with PartyPlanner64, its junction event (a process,
+    // first in the space's events) shows the arrows, has a computer pick one at random (func_800DA190, the board
+    // code's AI decision), moves the cursor to it and sets the next space. Some boards add their own event to the space
+    // that picks the computer's direction smarter (toward the star, and so on) by setting the next space again
+    // (SetNextChainAndSpace, func_800ED998), after the arrows: the computer often walks the other way from its arrow.
+    // Here, on a computer's turn, those events run before the junction event (once: they're skipped when the loop
+    // reaches them), and the AI decision picks the arrow toward the direction they set.
+    void setUpCustomCPUJunctionArrowFix() {
+        // The board code's ExecSpaceEvents(space, activation) loop: s1 = the event list (8-byte entries of
+        // activation, execution type (1: direct, 2: process) and function), s3 = the activation
+        enum Address EXEC_LIST = 0x800EBBA0, EXEC_DIRECT = 0x800EBC10, EXEC_NEXT = 0x800EBC58, EXEC_END = 0x800EBC84;
+        enum Address AI_DECISION = 0x800DA190, SET_NEXT = 0x800ED998;
+        enum uint SET_NEXT_JAL = 0x0C000000 | (SET_NEXT & 0x0FFFFFFF) >> 2;
+        Address[] alreadyRun; // The events run early, skipped when the loop reaches them
+        bool running;         // Running them early
+        bool chosen;          // They chose (choiceChain, choiceIndex)
+        short choiceChain, choiceIndex;
+
+        bool boardCode() { return isBoardScene() && 0x800E6E58.val!uint == 0x0C01A63A; } // Overlay 128 (see mp3map.d)
+
+        // Whether an event's code calls SetNextChainAndSpace (up to its return, or its helpers' after it)
+        bool setsNextSpace(Address f) {
+            if (f < 0x80000000 || f >= 0x80800000) return false;
+            foreach (i; 0..1024) {
+                auto w = (f + i * 4).val!uint;
+                if (w == SET_NEXT_JAL) return true;
+                if (w == 0x03E00008 && (f + i * 4 + 8).val!uint == 0) return false; // jr ra, then nothing
+            }
+            return false;
+        }
+
+        // The space's events about to run: on a computer's turn, the ones after a process (the junction event) that
+        // set the next space run now (jal() comes back to this instruction: running and alreadyRun say it's that)
+        EXEC_LIST.onExec({
+            auto player = currentPlayer;
+            if (running || alreadyRun.length || !player || !player.isCPU || !boardCode()) return;
+            chosen = false;
+            Address list = gpr.s1;
+            if (list < 0x80000000 || list >= 0x80800000) return;
+            auto activation = cast(short)gpr.s3;
+            Address[] early;
+            bool afterProcess;
+            for (Address e = list; e.val!short != 0 && early.length < 8; e += 8) {
+                if (e.val!short != activation) continue;
+                Address f = (e + 4).val!uint;
+                if ((e + 2).val!short == 2) afterProcess = true;
+                else if ((e + 2).val!short == 1 && afterProcess && setsNextSpace(f)) early ~= f;
+            }
+            if (early.empty) return;
+            alreadyRun = early;
+            running = true;
+            void run(size_t i) {
+                if (i == early.length) { running = false; return; }
+                early[i].jal({ run(i + 1); });
+            }
+            run(0);
+        });
+        SET_NEXT.onExec({ // While they run early: the direction they set
+            if (!running) return;
+            chosen = true;
+            choiceChain = cast(short)gpr.a1;
+            choiceIndex = cast(short)gpr.a2;
+        });
+        EXEC_DIRECT.onExec({ // Skipped when the loop reaches them
+            if (alreadyRun.canFind((cast(Address)gpr.s1 + 4).val!uint)) jump(EXEC_NEXT);
+        });
+        EXEC_END.onExec({ alreadyRun = null; chosen = false; });
+
+        // The junction event's AI decision: the arrow toward their direction (its caller's s3 has the chain and index
+        // of choice 0, then of choice 1 6 bytes later)
+        AI_DECISION.onExec({
+            if (!chosen || !boardCode()) return;
+            Address choices = gpr.s3;
+            if (choices < 0x80000000 || choices >= 0x80800000) return;
+            foreach (uint choice; 0..2) {
+                Address c = choices + choice * 6;
+                if (c.val!short != choiceChain || (c + 2).val!short != choiceIndex) continue;
+                chosen = false;
+                gpr.ra.onExecOnce({ gpr.v0 = choice; });
+                return;
+            }
+        });
     }
 
     // Text (game bytes) to load instead of message `id`, whose own text is `text`, or null to keep it
