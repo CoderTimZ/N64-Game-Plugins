@@ -1327,10 +1327,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
                     if (difficulty != CPUDifficulty.SUPER_HARD) return;
 
                     switch (data.currentScene) {
-                        case Scene.LOG_JAM:
-                            difficulty = CPUDifficulty.EASY;
-                            break;
-
                         case Scene.TOADSTOOL_TITAN:
                             difficulty = CPUDifficulty.NORMAL;
                             break;
@@ -1349,6 +1345,39 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
                             break;
                     }
                 });
+            });
+
+            // In Log Jam, a computer only presses a wrong button if its teammate is a computer too: its two press
+            // decisions check the teammate's computer flag (0x1E in the teammate's Log Jam data), so a human's
+            // partner never makes a mistake. Make the check read as a computer, so it plays like a computer's partner.
+            foreach (address; [0x8010896C, 0x80108BCC]) {
+                address.onExecDone({ if (data.currentScene == Scene.LOG_JAM) gpr.v0 = 1; });
+            }
+
+            // In Slot Synch, a computer teamed with a human ignores its level: it never misses, and stops on whatever
+            // symbol the human stopped on, even -1. Make it play like a computer's partner (its level sets how long it
+            // waits and its chance to miss), aiming for +3, or for the human's symbol once the human has stopped,
+            // unless that's -1 (then it stays off -1, so the round scores nothing instead of -1).
+            // Each player's Slot Synch data (s1, and the teammate's in s2): 0x00 reel, 0x22 computer flag, 0x2C the
+            // symbol it aims for (0: +3, 1: +1, 2: +2, 3: -1).
+            auto humanPartner = () => data.currentScene == Scene.SLOT_SYNCH && (gpr.s2 + 0x22).val!short == 0;
+            auto partnerSymbol = () { // The symbol the teammate's reel stopped on, or -1 while it's spinning
+                Address reel = 0x8010DF7C.val!uint + (gpr.s2 + 0x00).val!short * 0x3C;
+                if ((reel + 0x0C).val!short != 0) return -1;
+                auto angle = (reel + 0x30).val!float + 45;
+                if (angle > 360) angle -= 360; else if (angle < 0) angle += 360;
+                return cast(int)(0x8010D854 + (reel + 0x03).val!ubyte * 4 + cast(int)(angle / 90)).val!ubyte;
+            };
+            0x801071DC.onExecDone({ if (humanPartner()) gpr.v0 = 1; }); // Round setup: take the computer-partner path
+            0x801073AC.onExecDone({ if (humanPartner()) gpr.v0 = 0; }); // The symbol it picks for the team: +3
+            0x80107500.onExecDone({ if (humanPartner()) gpr.v0 = 1; }); // Don't wait to copy the human
+            0x8010746C.onExec({ // Before deciding whether to stop: aim for the human's symbol, unless it's -1
+                if (!humanPartner()) return;
+                auto symbol = partnerSymbol();
+                if (symbol >= 0) (gpr.s1 + 0x2C).val!short = cast(short)(symbol == 3 ? 0 : symbol);
+            });
+            0x801074D4.onExec({ // A miss stops on a symbol other than the one it aims for: not on the human's -1 either
+                if (humanPartner() && gpr.v0 == 3 && partnerSymbol() == 3) gpr.v1 = 3;
             });
         }
 

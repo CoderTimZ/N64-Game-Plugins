@@ -413,10 +413,17 @@ Makes Super Hard computer players easier in the mini-games where they're hardest
 
 In these mini-games, a Super Hard computer plays at a lower level:
 
-- Easy: Log Jam
 - Normal: Toadstool Titan
 - Hard: Baby Bowser Broadside, Hyper Hydrants, The Beat Goes On, Cheep Cheep Chase, Popgun Pick-Off, Bowser Toss,
   Silly Screws
+
+In Log Jam, a computer teamed with a human makes mistakes like one teamed with a computer. Without this, a human's
+computer partner never presses a wrong button, at any level.
+
+In Slot Synch, a computer teamed with a human plays at its level, like one teamed with a computer: its level sets how
+quickly it stops and how often it misses. It aims for +3, or for the human's symbol once the human has stopped, unless
+that's -1 (then it stays off -1, so the round scores nothing). Without this, a human's computer partner never misses,
+and stops on whatever symbol the human stopped on, even -1.
 
 ### `mpiqPermadeath`
 

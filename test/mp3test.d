@@ -219,6 +219,7 @@ class TestMarioParty3 : MarioParty3 {
             Test("flagReaders", &flagReaders, 60 * 60 * 20),
             Test("balanceSuperHardCPU", &balanceSuperHardCPU, 60 * 60 * 20),
             Test("logJamMistakes", &logJamMistakes, 60 * 60 * 20),
+            Test("slotSynchHumanPartner", &slotSynchHumanPartner, 60 * 60 * 40),
             Test("frigidBridgesFps", &frigidBridgesFps, 60 * 60 * 20),
             Test("explore", &explore, 60 * 60 * 30),
             Test("serve", &serve, ulong.max),
@@ -818,7 +819,7 @@ class TestMarioParty3 : MarioParty3 {
     // balanceSuperHardCPU in Log Jam (run with test/mp3-config-logjam.json, which blocks every other 2 vs 2
     // mini-game): every player is a Super Hard computer, and the panels are kept 2 blue and 2 red so the round ends
     // with Log Jam. Logs the code that reads each player's difficulty, by scene, and the value it gets (after the
-    // plugin's change); in Log Jam, every read should get Easy.
+    // plugin's change); in Log Jam, every read should stay Super Hard (the option fixes its teammate check instead).
     void balanceSuperHardCPU() {
         d.check(config.balanceSuperHardCPU, "Run this with test/mp3-config-logjam.json");
         int[string] reads;
@@ -828,7 +829,7 @@ class TestMarioParty3 : MarioParty3 {
                 auto key = format("%s from %08X: %s", data.currentScene, pc, cast(CPUDifficulty)v);
                 if (key !in reads) d.note("READ P", p.index + 1, " ", key);
                 reads[key]++;
-                if (data.currentScene == Scene.LOG_JAM && v != CPUDifficulty.EASY) {
+                if (data.currentScene == Scene.LOG_JAM && v != CPUDifficulty.SUPER_HARD) {
                     problems ~= format("Log Jam read P%d's difficulty as %s (from %08X)", p.index + 1,
                                        cast(CPUDifficulty)v, pc);
                 }
@@ -867,8 +868,8 @@ class TestMarioParty3 : MarioParty3 {
     }
 
     // Counts the computers' right and wrong presses in Log Jam, with every player a Super Hard computer (run with
-    // test/mp3-config-logjam.json for balanceSuperHardCPU, which makes them Easy, or test/mp3-config-logjam-off.json
-    // without it). Log Jam's two press decisions store the right button at 0x801089B8 and 0x80108C18, and a wrong one
+    // test/mp3-config-logjam.json for balanceSuperHardCPU, which lets a human's partner make mistakes too, or
+    // test/mp3-config-logjam-off.json without it). Log Jam's two press decisions store the right button at 0x801089B8 and 0x80108C18, and a wrong one
     // at 0x80108A04 and 0x80108C64 (for the player whose data is in s1 and s0 there).
     void logJamMistakes() {
         string[Address] presses; // By player data: "R" or "W" for each press, in order
@@ -953,6 +954,132 @@ class TestMarioParty3 : MarioParty3 {
                       100.0 * wrong / (right + wrong), longest));
         foreach (key; checks.keys.sort) d.note("  ", key, " x", checks[key]);
         d.check(right + wrong > 0, "No presses counted");
+    }
+
+    // Slot Synch with balanceSuperHardCPU (run with test/mp3-config-slotsynch.json, which blocks every other 2 vs 2
+    // mini-game), the players in N64TEST_ARG (like "1") human and the rest Easy computers, P1 and P2 one team and P3 and
+    // P4 the other, until Slot Synch has been played 3 times. Humans press A every 240 frames, so they stop their reel at
+    // a random time (before or after the computer), on a random symbol. For each round it logs each team's symbols, who
+    // stopped first and the computers' miss rolls, and checks that a human's computer partner plays like the plugin
+    // makes it: when it doesn't roll a miss it stops on +3, or on the human's symbol if the human stopped first (unless
+    // that's -1), and it never matches a -1 the human stopped on first. A rolled miss presses A when the symbol coming
+    // up isn't its target, but the reel can still land on the target (computer-only teams do that too), so misses are
+    // only counted.
+    void slotSynchHumanPartner() {
+        d.check(config.balanceSuperHardCPU, "Run this with test/mp3-config-slotsynch.json");
+        enum string[] NAMES = ["+3", "+1", "+2", "-1"]; // Symbols 0-3
+        // Each team's data (s0 at 0x80106AEC, where a round's result is decided): its two players' Slot Synch data at
+        // 0x08 and 0x0C (0x00 reel, 0x22 computer flag, 0x28 miss roll, 0x2C the symbol it aims for). Each reel:
+        // 0x3C bytes from *0x8010DF7C, 0x0C nonzero while it's spinning.
+        Address reel(Address player) { return 0x8010DF7C.val!uint + (player + 0x00).val!short * 0x3C; }
+        bool[4] spinning;
+        ulong[4] stoppedAt, pressedAt; // When each reel stopped, and when a computer pressed A to stop it
+        // A computer's press (0x801074DC, its data in s1): its reel keeps turning for a few frames after it
+        0x801074DC.onExec({
+            if (data.currentScene != Scene.SLOT_SYNCH) return;
+            auto r = (gpr.s1 + 0x00).val!short;
+            if (r >= 0 && r < 4 && pressedAt[r] == ulong.max) pressedAt[r] = d.frame;
+        });
+        int humanRounds, misses, missesOnTarget, wrong, plays;
+        int[string] counts;
+        string[] problems;
+        0x80106AEC.onExec({
+            if (data.currentScene != Scene.SLOT_SYNCH) return;
+            Address[2] members = [(gpr.s0 + 0x08).val!uint, (gpr.s0 + 0x0C).val!uint];
+            short[2] symbols = [cast(short)gpr.s1, cast(short)gpr.s2];
+            auto result = (gpr.s0 + 0x1A).val!short;
+            string describeMember(int k) {
+                auto m = members[k];
+                auto r = (m + 0x00).val!short;
+                return format("reel %d %s %s at %d%s", r, (m + 0x22).val!short ? "computer" : "human",
+                              NAMES[symbols[k] & 3], stoppedAt[r],
+                              (m + 0x22).val!short ? format(" (pressed at %d, aims %s, miss %d)", pressedAt[r],
+                                                          NAMES[(m + 0x2C).val!short & 3], (m + 0x28).val!short) : "");
+            }
+            d.note("ROUND ", describeMember(0), " | ", describeMember(1), " -> ",
+                   result == 4 ? "no match" : NAMES[result & 3]);
+            foreach (k; 0..2) {
+                auto cpu = members[k], human = members[1 - k];
+                if (!(cpu + 0x22).val!short || (human + 0x22).val!short) continue;
+                humanRounds++;
+                auto miss = (cpu + 0x28).val!short != 0;
+                if (miss) misses++;
+                // Whether the human's reel had stopped when the computer pressed A
+                auto humanFirst = stoppedAt[(human + 0x00).val!short] < pressedAt[(cpu + 0x00).val!short];
+                auto target = humanFirst && symbols[1 - k] != 3 ? symbols[1 - k] : 0;
+                if (miss && symbols[k] == target) missesOnTarget++;
+                counts[format("%s, human %s %s", miss ? "miss" : "aim", humanFirst ? "first" : "second",
+                              NAMES[symbols[1 - k] & 3])]++;
+                string problem;
+                if (!miss && symbols[k] != target) {
+                    problem = format("aimed and stopped on %s, not %s", NAMES[symbols[k] & 3], NAMES[target]);
+                } else if (humanFirst && symbols[1 - k] == 3 && symbols[k] == 3) {
+                    problem = "matched the human's -1";
+                }
+                if (problem) {
+                    wrong++;
+                    problems ~= problem;
+                    d.note("PROBLEM ", problem);
+                }
+            }
+        });
+
+        setUp(STATE_CHILLY_TURN_1);
+        waitForBoard();
+        players.each!(p => p.data.cpuDifficulty = CPUDifficulty.EASY);
+        // N64TEST_ARG: the players (1-4) to make human, like "1"
+        foreach (n; d.arg.split(",").filter!(a => !a.empty).map!(a => a.strip.to!int)) {
+            players[n - 1].data.flags = players[n - 1].data.flags & ~1;
+        }
+        d.note("Players: ", players.map!(p => format("P%d port %d %s", p.index + 1, p.data.controller,
+                                                       p.isCPU ? "computer" : "human")).join(", "));
+        auto start = d.frame;
+        auto scene = data.currentScene;
+        d.waitUntil(() {
+            if (data.currentScene != scene) {
+                if (scene == Scene.SLOT_SYNCH) plays++;
+                scene = data.currentScene;
+            }
+            if (isBoardScene()) {
+                foreach (p; players) {
+                    auto color = p.index < 2 ? PanelColor.BLUE : PanelColor.RED;
+                    p.data.color = color;
+                    p.panel.color = color;
+                }
+            }
+            // When each reel stops
+            if (data.currentScene == Scene.SLOT_SYNCH && valid(0x8010DF7C.val!uint)) {
+                foreach (r; 0..4) {
+                    auto now = (0x8010DF7C.val!uint + r * 0x3C + 0x0C).val!short != 0;
+                    if (spinning[r] && !now) stoppedAt[r] = d.frame;
+                    if (now) stoppedAt[r] = ulong.max;
+                    if (now && !spinning[r]) pressedAt[r] = ulong.max;
+                    spinning[r] = now;
+                }
+            }
+            auto press = (!isBoardScene() || !players.find!(p => p.data.controller == 0).front.isCPU) &&
+                         (d.frame - start) % 90 < 10;
+            // On the rules screen, A only pages through the rules: Start starts the mini-game
+            auto button = data.currentScene == Scene.MINI_GAME_RULES ? Pad.START : Pad.A;
+            d.hold(0, press ? button : 0);
+            foreach (p; players.filter!(p => !p.isCPU && p.data.controller != 0)) {
+                d.hold(p.data.controller, (d.frame - start) % 90 < 10 ? button : 0);
+            }
+            // In Slot Synch, humans press A every 240 frames
+            if (data.currentScene == Scene.SLOT_SYNCH) {
+                foreach (p; players.filter!(p => !p.isCPU)) d.hold(p.data.controller, d.frame % 240 < 4 ? Pad.A : 0);
+            }
+            if ((d.frame - start) % (60 * 60) == 0) d.screenshot(format("slotsynch-%s", data.currentScene));
+            return plays >= 3 && isBoardScene();
+        }, "Slot Synch to be played 3 times", 60 * 60 * 35);
+        foreach (port; 0..4) d.release(port);
+
+        foreach (key; counts.keys.sort) d.note("  ", key, " x", counts[key]);
+        d.note(format("Human's partner: %d rounds, %d misses rolled (%.0f%%, %d still on the target), %d problems",
+                      humanRounds, misses, humanRounds ? 100.0 * misses / humanRounds : 0, missesOnTarget, wrong));
+        d.check(plays >= 1, "Slot Synch wasn't played");
+        d.check(humanRounds > 0, "No rounds with a human's computer partner");
+        d.check(problems.empty, problems.uniq.join("; "));
     }
 
     // Measures the emulator's speed (frames per wall-clock second, with the speed limiter off and on) on the board and in

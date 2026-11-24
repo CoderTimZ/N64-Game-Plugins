@@ -1,0 +1,7 @@
+{
+    "balanceSuperHardCPU": true,
+    "blockedMiniGames": [
+        "EATSA_PIZZA", "BABY_BOWSER_BROADSIDE", "PUMP_PUMP_AND_AWAY", "HYPER_HYDRANTS", "PICKING_PANIC",
+        "COSMIC_COASTER", "PUDDLE_PADDLE", "ETCH_N_CATCH", "LOG_JAM"
+    ]
+}
