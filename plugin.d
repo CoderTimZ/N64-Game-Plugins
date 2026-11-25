@@ -532,6 +532,7 @@ union InputData {
 
 interface Plugin {
     void loadConfig();
+    string netplayExport();  // The settings and State, for the other players in a netplay session (see NetplayStart)
     void onStart();
     void onInput(int, InputData*);
     void onMessage(string msg);
@@ -662,8 +663,28 @@ abstract class Game(Config, State = NoState) : Plugin {
     }
 
     void loadConfig() {
+        // A netplay guest plays with the host's settings, not its own file
+        if (netplayRole == NetplayRole.guest && netplayImport.type == JSONType.object) {
+            if (auto imported = "config" in netplayImport) {
+                config = (*imported).fromJSON!Config();
+                if (!config) config = new Config;
+                return;
+            }
+        }
+
         config = loadJson!Config(romName ~ ".json");
         if (!config) config = new Config;
+    }
+
+    // The settings and State as JSON, for netplay guests. Written with std.json rather than toJSONText, since its
+    // floats keep every digit: a rounded float would make a guest's game run differently.
+    string netplayExport() {
+        JSONValue result = parseJSON("{}");
+        result["config"] = config ? config.toJSON() : JSONValue(null);
+        static if (!is(State == NoState)) {
+            result["state"] = state ? state.toJSON() : JSONValue(null);
+        }
+        return result.toString();
     }
 
     // The State's backup file, used when the State isn't in memory (e.g. when continuing a game from the game's
@@ -689,6 +710,19 @@ abstract class Game(Config, State = NoState) : Plugin {
 
     void loadState() {
         static if (!is(State == NoState)) {
+            // A netplay guest starts with the host's State, not its own backup
+            if (netplayRole == NetplayRole.guest && netplayImport.type == JSONType.object) {
+                if (auto imported = "state" in netplayImport) {
+                    if (imported.type == JSONType.object) {
+                        state = (*imported).fromJSON!State();
+                        if (!state) state = new State;
+                        stateError = false;
+                        stateLoaded();
+                        return;
+                    }
+                }
+            }
+
             state = loadJson!State(stateBackupFile());
             if (state) {
                 stateError = false;
@@ -703,7 +737,7 @@ abstract class Game(Config, State = NoState) : Plugin {
     void saveState() {
         static if (!is(State == NoState)) {
             if (!writeStateBlock()) return; // A save state was loaded, so the State was reloaded instead
-            state.saveJson(stateBackupFile());
+            if (netplayRole != NetplayRole.guest) state.saveJson(stateBackupFile()); // Only the host keeps it
             stateError = false;
         }
     }
@@ -776,7 +810,8 @@ abstract class Game(Config, State = NoState) : Plugin {
 
             auto check = crc32Of(data);
             uint crc = check[0] | check[1] << 8 | check[2] << 16 | check[3] << 24;
-            ulong stamp = max(cast(ulong)Clock.currStdTime, stateStamp + 1);
+            // During netplay the stamp is a counter, so every player's memory stays the same
+            ulong stamp = netplayRole != NetplayRole.none ? stateStamp + 1 : max(cast(ulong)Clock.currStdTime, stateStamp + 1);
 
             foreach (i, b; data) Ptr!ubyte(block + STATE_HEADER_SIZE + cast(uint)i)[0] = b;
             (block +  0).val!uint = STATE_MAGIC_1;
@@ -837,7 +872,7 @@ abstract class Game(Config, State = NoState) : Plugin {
             }
 
             stateLoaded();
-            state.saveJson(stateBackupFile());
+            if (netplayRole != NetplayRole.guest) state.saveJson(stateBackupFile()); // Only the host keeps it
             stateError = false;
         }
 
@@ -1222,7 +1257,13 @@ struct ExecutionInfo {
     void function(int) setSaveStateSlot;
 }
 
+// A netplay session's role (see NetplayStart)
+enum NetplayRole { none, host, guest }
+
 __gshared {
+    NetplayRole netplayRole;
+    JSONValue netplayImport;   // The host's settings and State, on a guest
+    string netplayExported;    // What NetplayExport handed out last (it has to stay valid)
     const(char)* name;
     Xoshiro256pp random;
     void* window;
@@ -1302,6 +1343,47 @@ extern (C) {
             }
         } catch (Exception e) {
             error(e);
+        }
+
+        netplayRole = NetplayRole.none;
+        netplayImport = JSONValue.init;
+        netplayExported = null;
+    }
+
+    // Peer-to-peer netplay: every player needs the same settings and State, or their games drift apart. The emulator
+    // calls NetplayStart before InitiateExecution. The host's plugin then starts as usual and NetplayExport hands its
+    // settings and State over; each guest's plugin gets them with NetplayImport, before its InitiateExecution, and uses
+    // them instead of its own files. Until RomClosed, the plugin does nothing that differs between players (like
+    // talking to a bingo server), and only the host writes the State backup.
+    export void NetplayStart(int isHost) {
+        netplayRole = isHost ? NetplayRole.host : NetplayRole.guest;
+        netplayImport = JSONValue.init;
+        netplayExported = null;
+        info(isHost ? "Netplay: hosting, sharing the settings and State with the other players"
+                    : "Netplay: playing with the host's settings and State");
+    }
+
+    export int NetplayExport(const(void)** data, uint* size) {
+        try {
+            if (!plugin || !data || !size) return 1;
+            netplayExported = plugin.netplayExport();
+            *data = netplayExported.ptr;
+            *size = cast(uint)netplayExported.length;
+            return 0;
+        } catch (Exception e) {
+            error(e);
+            return 1;
+        }
+    }
+
+    export int NetplayImport(const(void)* data, uint size) {
+        try {
+            netplayImport = (cast(const(char)*)data)[0..size].idup.parseJSON();
+            return 0;
+        } catch (Exception e) {
+            error(e);
+            netplayImport = JSONValue.init;
+            return 1;
         }
     }
 

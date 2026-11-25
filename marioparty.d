@@ -445,7 +445,10 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
     override void onStart() {
         super.onStart();
 
-        if (!config.bingoURL.empty) {
+        // Bingo messages change the game when they arrive, which differs between netplay players
+        if (!config.bingoURL.empty && netplayRole != NetplayRole.none) {
+            warning("Bingo is off during netplay");
+        } else if (!config.bingoURL.empty) {
             connect(config.bingoURL);
         }
 
