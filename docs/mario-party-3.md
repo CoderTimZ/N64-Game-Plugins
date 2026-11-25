@@ -46,6 +46,7 @@ how the file works and describes the options every Mario Party plugin has: `char
 | [`sharperCustomBoardMaps`](#sharpercustomboardmaps) | `true`/`false` | `false` |
 | [`customCPUJunctionArrowFix`](#customcpujunctionarrowfix) | `true`/`false` | `false` |
 | [`customReverseMovementFix`](#customreversemovementfix) | `true`/`false` | `false` |
+| [`customExtraItemShopFix`](#customextraitemshopfix) | `true`/`false` | `false` |
 
 The plugin also always shows the turn number ("current / total") at the top of the board.
 
@@ -608,3 +609,15 @@ paths join at the end of a reverse move, then uses another Reverse Mushroom, has
 With this option, a player who bounces off a dead end turns around. A Reverse Mushroom used on a space where paths join
 asks which way to go back. Any other step to a space that doesn't exist turns the player around. The original boards
 are unchanged.
+
+### `customExtraItemShopFix`
+
+On boards made with PartyPlanner64 that have more than two item shops (like Kaos Kore), every shop works like a shop.
+PartyPlanner64's item shop only knows the board's first two (by their order in the board). Any other shop runs like a Cellular Shopper call: the camera doesn't go to the shop, the shopkeeper
+doesn't come out, and "View Map" closes the map as soon as it opens, then leaves the board stopped for the rest of the
+turn. The camera stays on the shop while the player walks away, and the game can crash.
+
+With this option, those shops are paired with their closest shop building, the way PartyPlanner64 pairs the first two,
+and play out like them: the shopkeeper comes out, and View Map can be scrolled. Computers shopping there use the first
+two shops' buying choices in turn. Shops made with other events (a board's own custom shop), the Cellular Shopper and
+the original boards are unchanged.

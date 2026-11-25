@@ -486,6 +486,16 @@ class TestMarioParty3 : MarioParty3 {
                 }
                 d.note("Bought: ", describe(), " items ", players.map!(p => p.data.items[0]));
                 foreach (i; 0..step[9..$].to!int) { watch(10); d.screenshot("buy"); }
+            } else if (step.startsWith("tap:")) { // tap:<button>: pressed for 2 frames only, then 30 frames
+                d.hold(0, BUTTONS[step[4..$]]);
+                watch(2);
+                d.hold(0, 0);
+                watch(30);
+                d.release(0);
+                d.note("Tapped ", step[4..$], " (scene ", data.currentScene, ")");
+            } else if (step.startsWith("before:")) { // before:<player>,<space>: puts a player (1-4) one step before a space
+                auto v = step[7..$].split(",").map!(x => x.to!int).array;
+                moveBefore(players[v[0] - 1], cast(short)v[1]);
             } else if (step.startsWith("pad:")) { // pad:<player>,<port>: a player's (1-4) controller (0-3)
                 auto v = step[4..$].split(",").map!(x => x.to!int).array;
                 players[v[0] - 1].data.controller = cast(ubyte)v[1];

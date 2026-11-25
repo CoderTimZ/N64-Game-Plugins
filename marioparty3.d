@@ -60,6 +60,7 @@ class Config : MarioPartyConfig {
     bool sharperCustomBoardMaps = false;
     bool customCPUJunctionArrowFix = false;
     bool customReverseMovementFix = false;
+    bool customExtraItemShopFix = false;
 
     this() {
         bonuses = [
@@ -573,6 +574,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         if (config.sharperCustomBoardMaps) setUpCustomBoardMaps();
         if (config.customCPUJunctionArrowFix) setUpCustomCPUJunctionArrowFix();
         if (config.customReverseMovementFix) setUpCustomReverseMovementFix();
+        if (config.customExtraItemShopFix) setUpCustomExtraItemShopFix();
 
         /*
         bool[uint] seen;
@@ -1892,6 +1894,122 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         });
     }
 
+    // On a board made with PartyPlanner64: the board code (overlay 128) is loaded, and the board's own code and data
+    // (file 19/618) are at 0x807B0000, starting "PP64"
+    bool customBoard() {
+        return isBoardScene() && 0x800E6E58.val!uint == 0x0C01A63A && 0x807B0000.val!uint == 0x50503634;
+    }
+
+    // customExtraItemShopFix: PartyPlanner64 pairs each item shop event's space with the closest item shop space (where
+    // the shop's model stands, made for every one of them when the board is set up). But its shop event, the first
+    // original board's shop code, has room for two pairs: the first two spaces with the event, in the board's order.
+    // It looks the player's space up among those two, and a shop on any other space (a board's third, like one of Kaos
+    // Kore's) gets no shop space. That's the code for the Cellular Shopper, which runs while the board is
+    // paused: the camera doesn't go to the shop and its shopkeeper doesn't come out, a computer buys with whichever
+    // shop's choices were used last, and "View Map" closes the map at once and leaves the board paused
+    // (func_80049FB8) until the turn ends, so the camera stops following the player.
+    // Here, a shop the lookup doesn't know gets its closest item shop space (as PartyPlanner64 pairs them) and goes on
+    // the way the two it knows do. The extra shops alternate between the two shops' choices for computers. The shop
+    // event is in each board's own code, at different addresses, so its code is recognized by its instructions.
+    void setUpCustomExtraItemShopFix() {
+        enum Address GET_SPACE_INDEX = 0x800EB184; // GetAbsSpaceIndexFromChainSpaceIndex(chain, index)
+        enum Address SPACE_COUNT = 0x80105210, SPACES = 0x80105214, BOARD_PAUSED = 0x800D6A90;
+        enum uint SPACE_SIZE = 0x24;
+        static bool valid(Address a) { return a >= 0x80000000 && a < 0x80800000 && a % 4 == 0; }
+        // Whether the code at `a` is `words`, each compared where its mask is set
+        static bool code(Address a, const uint[2][] words) {
+            if (!valid(a) || !valid(a + cast(uint)words.length * 4 - 4)) return false;
+            foreach (i, w; words) if (((a + cast(uint)i * 4).val!uint & w[1]) != w[0]) return false;
+            return true;
+        }
+        static short immediate(Address a) { return cast(short)(a.val!uint & 0xFFFF); }
+
+        // The shop event after the lookup of the player's space (in v0): sll v0, v0, 16; sra v1, v0, 16;
+        // li v0, <shop 1>; beq v1, v0, FIRST; li v0, <shop 2>; beq v1, v0, SECOND; li t5, <its shop space>;
+        // j NONE; li t5, -1; FIRST: li t5, <shop 1's shop space>; sh t5, ...(sp); ...; lui at, ...; sw zero, ...(at)
+        // (the shop's number for computers, at FIRST + 0x1C and 0x20). NONE: sh t5, ...(sp), then on as the two do.
+        static immutable uint[2][] LOOKUP = [
+            [0x00021400, ~0], [0x00021C03, ~0], [0x24020000, 0xFFFF0000], [0x10620000, 0xFFFF0000],
+            [0x24020000, 0xFFFF0000], [0x10620000, 0xFFFF0000], [0x240D0000, 0xFFFF0000], [0x08000000, 0xFC000000],
+            [0x240DFFFF, ~0], [0x240D0000, 0xFFFF0000], [0xA7AD0000, 0xFFFF0000],
+        ];
+        static immutable uint[2][] STORE_T5 = [[0xA7AD0000, 0xFFFF0000]];
+        static immutable uint[2][] SHOP_NUMBER = [[0x3C010000, 0xFFFF0000], [0xAC200000, 0xFFFF0000]];
+        enum uint SHOP_1 = 0x08, SHOP_2 = 0x10, JUMP_NONE = 0x1C, FIRST = 0x24, SHOP_NUMBER_AT = FIRST + 0x1C;
+        // The board setup's loop making each item shop space's model: lui s1, <list>; addiu s1, s1, <list>;
+        // sll v0, s0, 1; addu v0, v0, s1; jal GetSpaceData; lh a0, 0(v0); sll v1, s0, 2; li a0, 9; ...;
+        // slti v0, s0, <count>
+        static immutable uint[2][] MODELS = [
+            [0x3C110000, 0xFFFF0000], [0x26310000, 0xFFFF0000], [0x00101040, ~0], [0x00511021, ~0],
+            [0x0C03AC58, ~0], [0x84440000, ~0], [0x00101880, ~0], [0x24040009, ~0],
+        ];
+
+        Address spaceData(int space) { return SPACES.val!uint + space * SPACE_SIZE; }
+        // Whether one of a space's events is the shop event (a jump to the function `at` is in)
+        bool shopEventSpace(int space, Address at) {
+            Address list = (spaceData(space) + 0x20).val!uint;
+            for (Address e = list; valid(e) && e.val!short != 0; e += 8) {
+                Address f = (e + 4).val!uint;
+                if (!valid(f) || f.val!uint >> 26 != 2) continue; // j
+                Address target = (f & 0xF0000000) | (f.val!uint & 0x03FFFFFF) << 2;
+                if (target <= at && at < target + 0x400) return true;
+            }
+            return false;
+        }
+        // The item shop spaces (PartyPlanner64's list, from the board setup's loop near the shop event)
+        short[] shopSpaces(Address near) {
+            for (Address a = max(near, 0x80020000) - 0x20000; a < min(near + 0x20000, 0x80800000); a += 4) {
+                if (!code(a, MODELS)) continue;
+                Address list = (immediate(a) << 16) + immediate(a + 4);
+                foreach (k; 0..16) {
+                    auto w = (a + cast(uint)(MODELS.length + k) * 4).val!uint;
+                    if (w >> 16 != 0x2A02) continue; // slti v0, s0, <count>
+                    short[] spaces;
+                    foreach (i; 0..min(w & 0xFFFF, 64)) spaces ~= (list + i * 2).val!short;
+                    return spaces;
+                }
+            }
+            return null;
+        }
+
+        GET_SPACE_INDEX.onExec({
+            Address ret = gpr.ra;
+            if (!valid(ret) || ret.val!uint != LOOKUP[0][0] || !customBoard() || BOARD_PAUSED.val!ubyte) return;
+            if (!code(ret, LOOKUP)) return;
+            ret.onExecOnce({
+                auto space = cast(short)gpr.v0;
+                auto shop1 = immediate(ret + SHOP_1), shop2 = immediate(ret + SHOP_2);
+                if (space == shop1 || space == shop2) return; // One of the two it knows
+                auto count = SPACE_COUNT.val!ushort;
+                if (space < 0 || space >= count || !shopEventSpace(space, ret)) return;
+                Address none = (ret & 0xF0000000) | ((ret + JUMP_NONE).val!uint & 0x03FFFFFF) << 2;
+                if (!code(none, STORE_T5) || !code(ret + SHOP_NUMBER_AT, SHOP_NUMBER)) return;
+
+                // The closest item shop space (PartyPlanner64 measures the board's x and y: the game's x and z)
+                Address at = spaceData(space);
+                short closest = -1;
+                float best = float.max;
+                foreach (s; shopSpaces(ret)) {
+                    if (s < 0 || s >= count) continue;
+                    Address p = spaceData(s);
+                    auto dx = (p + 8).val!float - (at + 8).val!float, dz = (p + 16).val!float - (at + 16).val!float;
+                    if (dx * dx + dz * dz < best) { best = dx * dx + dz * dz; closest = s; }
+                }
+                if (closest < 0) return;
+                // Which extra shop it is (the shop event's other spaces, in order)
+                int extra;
+                foreach (s; 0..space) if (s != shop1 && s != shop2 && shopEventSpace(s, ret)) extra++;
+                Address shopNumber = (immediate(ret + SHOP_NUMBER_AT) << 16) + immediate(ret + SHOP_NUMBER_AT + 4);
+                shopNumber.val!uint = extra % 2;
+                gpr.t5 = closest;
+                gpr.s5 = spaceData(closest);
+                gpr.s3 = at;
+                info("Item shop on space ", space, ": its shop is on space ", closest);
+                jump(none);
+            });
+        });
+    }
+
     // customReverseMovementFix: on boards made with PartyPlanner64, a player walking backward (with a Reverse
     // Mushroom) can be sent to a chain position that doesn't exist. The game doesn't check: it reads a space from
     // whatever follows the chain's list of spaces, and can crash.
@@ -1917,10 +2035,6 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         bool resolving; // Running the junction's event at the start of a reverse move
 
         static bool valid(Address a) { return a >= 0x80000000 && a < 0x80800000; }
-        // A PartyPlanner64 board: its code and data (file 19/618) are at 0x807B0000, starting "PP64"
-        bool customBoard() {
-            return isBoardScene() && 0x800E6E58.val!uint == 0x0C01A63A && 0x807B0000.val!uint == 0x50503634;
-        }
 
         // The space at a chain position, or -1 if there's no such position
         short spaceAt(int chain, int index) {
