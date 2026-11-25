@@ -518,7 +518,7 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
                     auto booRoutinePtrHandler = delegate void(ref Ptr!Instruction routinePtr) {
                         if (!routinePtr || routinePtr == previousRoutinePtr || !isBoardScene()) return;
                         if (previousRoutinePtr) {
-                            executeHandlers.remove(previousRoutinePtr);
+                            clearExec(previousRoutinePtr);
                         }
                         routinePtr.onExec({
                             teammates(currentPlayer).each!((t) {
@@ -537,7 +537,7 @@ class MarioParty(Config : MarioPartyConfig, State, Memory) : Game!(Config, State
                     data.booRoutinePtr.onWrite(booRoutinePtrHandler);
                     data.currentScene.onWrite((ref Scene scene) {
                         if (!isBoardScene(scene) && previousRoutinePtr) {
-                            executeHandlers.remove(previousRoutinePtr);
+                            clearExec(previousRoutinePtr);
                             previousRoutinePtr = 0;
                         }
                     });

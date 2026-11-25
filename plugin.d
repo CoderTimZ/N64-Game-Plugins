@@ -1010,14 +1010,43 @@ abstract class Game(Config, State = NoState) : Plugin {
     }
 }
 
-void addAddress(Address addr) {
-    addrMask[(addr & 0b111111111100000) >> 5] |= (1 << ((addr & 0b11100) >> 2));
+// The kinds of hook the emulator calls the plugin for (m64p_execution_hook in its m64p_plugin.h)
+enum HookKind : int { EXECUTE, READ, WRITE } // EXECUTE has Execute() and ExecuteDone()
+
+// The emulator has a bit per word of RDRAM for each kind of hook, which addresses that agree in bits 2..22 share (a KSEG0
+// address and its KSEG1 mirror, or the bytes of a word). hookedWords counts the hooked addresses on each, so the bit is
+// turned off only once none is left.
+uint hookedWord(Address addr) { return (addr >> 2) & 0x1FFFFF; }
+
+void hookAdded(HookKind kind, Address addr) {
+    if (hookedWords[kind].require(hookedWord(addr), 0)++ == 0) setHook(addr, kind, 1);
+}
+
+void hookRemoved(HookKind kind, Address addr) {
+    auto word = hookedWord(addr);
+    auto count = word in hookedWords[kind];
+    if (count && --*count == 0) {
+        hookedWords[kind].remove(word);
+        setHook(addr, kind, 0);
+    }
+}
+
+// Adds a handler for an address, turning on its hook if it's the address's first
+void addHandler(H)(ref H[][Address] table, HookKind kind, Address addr, H handler) {
+    if (addr !in table) hookAdded(kind, addr);
+    table[addr] ~= handler;
+}
+
+// Removes an address's handlers, turning off its hook if nothing else has it
+bool removeHandlers(H)(ref H[][Address] table, HookKind kind, Address addr) {
+    if (!table.remove(addr)) return false;
+    hookRemoved(kind, addr);
+    return true;
 }
 
 void onExec(Address address, void delegate(Address) callback) {
     assert(address % 4 == 0);
-    executeHandlers[address] ~= callback;
-    addAddress(address);
+    addHandler(executeHandlers, HookKind.EXECUTE, address, callback);
 }
 
 void onExec(Address address, void delegate() callback) {
@@ -1026,13 +1055,12 @@ void onExec(Address address, void delegate() callback) {
 
 bool clearExec(Address address) {
     assert(address % 4 == 0);
-    return executeHandlers.remove(address);
+    return removeHandlers(executeHandlers, HookKind.EXECUTE, address);
 }
 
 void onExecOnce(Address address, void delegate(Address) callback) {
     assert(address % 4 == 0);
-    executeOnceHandlers[address] ~= callback;
-    addAddress(address);
+    addHandler(executeOnceHandlers, HookKind.EXECUTE, address, callback);
 }
 
 void onExecOnce(Address address, void delegate() callback) {
@@ -1041,13 +1069,12 @@ void onExecOnce(Address address, void delegate() callback) {
 
 bool clearExecOnce(Address address) {
     assert(address % 4 == 0);
-    return executeOnceHandlers.remove(address);
+    return removeHandlers(executeOnceHandlers, HookKind.EXECUTE, address);
 }
 
 void onExecDone(Address address, void delegate(Address) callback) {
     assert(address % 4 == 0);
-    executeDoneHandlers[address] ~= callback;
-    addAddress(address);
+    addHandler(executeDoneHandlers, HookKind.EXECUTE, address, callback);
 }
 
 void onExecDone(Address address, void delegate() callback) {
@@ -1056,13 +1083,12 @@ void onExecDone(Address address, void delegate() callback) {
 
 bool clearExecDone(Address address) {
     assert(address % 4 == 0);
-    return executeDoneHandlers.remove(address);
+    return removeHandlers(executeDoneHandlers, HookKind.EXECUTE, address);
 }
 
 void onExecDoneOnce(Address address, void delegate(Address) callback) {
     assert(address % 4 == 0);
-    executeDoneOnceHandlers[address] ~= callback;
-    addAddress(address);
+    addHandler(executeDoneOnceHandlers, HookKind.EXECUTE, address, callback);
 }
 
 void onExecDoneOnce(Address address, void delegate() callback) {
@@ -1071,23 +1097,23 @@ void onExecDoneOnce(Address address, void delegate() callback) {
 
 bool clearExecDoneOnce(Address address) {
     assert(address % 4 == 0);
-    return executeDoneOnceHandlers.remove(address);
+    return removeHandlers(executeDoneOnceHandlers, HookKind.EXECUTE, address);
 }
 
 void onRead(T)(ref T r, void delegate() callback)               { onRead!T(r, (ref T v, Address p, Address a) { callback(); }); }
 void onRead(T)(ref T r, void delegate(ref T) callback)          { onRead!T(r, (ref T v, Address p, Address a) { callback(v); }); }
 void onRead(T)(ref T r, void delegate(ref T, Address) callback) { onRead!T(r, (ref T v, Address p, Address a) { callback(v, p); }); }
 void onRead(T)(ref T r, void delegate(ref T, Address, Address) callback) {
-    handlers!(T.sizeof).read[r.addr] ~= (v, p, a) { callback(*cast(T*)v, p, a); };
-    addAddress(r.addr);
+    addHandler(handlers!(T.sizeof).read, HookKind.READ, r.addr,
+               (void* v, Address p, Address a) { callback(*cast(T*)v, p, a); });
 }
 
 void onWrite(T)(ref T r, void delegate() callback)               { onWrite!T(r, (ref T v, Address p, Address a) { callback(); }); }
 void onWrite(T)(ref T r, void delegate(ref T) callback)          { onWrite!T(r, (ref T v, Address p, Address a) { callback(v); }); }
 void onWrite(T)(ref T r, void delegate(ref T, Address) callback) { onWrite!T(r, (ref T v, Address p, Address a) { callback(v, p); }); }
 void onWrite(T)(ref T r, void delegate(ref T, Address, Address) callback) {
-    handlers!(T.sizeof).write[r.addr] ~= (v, p, a) { callback(*cast(T*)v, p, a); };
-    addAddress(r.addr);
+    addHandler(handlers!(T.sizeof).write, HookKind.WRITE, r.addr,
+               (void* v, Address p, Address a) { callback(*cast(T*)v, p, a); });
 }
 
 void jal(Address addr)                                                                   { jal(addr,  0,  0,  0,  0, (res) { }); }
@@ -1185,7 +1211,7 @@ struct ExecutionInfo {
     void* window;
     const char* romName;
     const char* romHash;
-    ubyte* addrMask;
+    extern (C) void function(uint, int, int) setHook;
     uint function() pc;
     void function(uint) jump;
     GPR* gpr;
@@ -1201,7 +1227,8 @@ __gshared {
     Xoshiro256pp random;
     void* window;
     Plugin plugin;
-    ubyte* addrMask;
+    extern (C) void function(uint, int, int) setHook; // The emulator's set_hook
+    uint[uint][3] hookedWords; // By HookKind (see hookAdded())
     uint function() pc;
     void function(uint) jump;
     GPR* gpr;
@@ -1283,7 +1310,7 @@ extern (C) {
             info("Initializing...");
             random.seed(0);
             window = ei.window;
-            addrMask = ei.addrMask;
+            setHook = ei.setHook;
             pc = ei.pc;
             jump = ei.jump;
             gpr = ei.gpr;
@@ -1305,6 +1332,7 @@ extern (C) {
             handlers!2.write.clear();
             handlers!4.write.clear();
             handlers!8.write.clear();
+            foreach (ref words; hookedWords) words.clear(); // The emulator turned the hooks off
 
             if (pluginFactory) {
                 string romName = ei.romName.to!string().strip();
@@ -1359,7 +1387,7 @@ extern (C) {
         // This address's one-time handlers are taken first: ones the handlers below add are for the next time it runs
         // (like jal()'s, which restores the registers when the call returns here)
         auto once = executeOnceHandlers.get(pc, null);
-        if (once) executeOnceHandlers.remove(pc);
+        if (once) removeHandlers(executeOnceHandlers, HookKind.EXECUTE, pc);
 
         if (auto handlers = (pc in executeHandlers)) {
             (*handlers).each!((h) {
@@ -1382,9 +1410,9 @@ extern (C) {
             });
         }
         
-        if (auto handlers = (pc in executeDoneOnceHandlers)) {
-            executeDoneOnceHandlers.remove(pc);
-            (*handlers).each!((h) {
+        if (auto once = executeDoneOnceHandlers.get(pc, null)) {
+            removeHandlers(executeDoneOnceHandlers, HookKind.EXECUTE, pc);
+            once.each!((h) {
                 try { h(pc); }
                 catch (Exception e) { error(e); }
             });
