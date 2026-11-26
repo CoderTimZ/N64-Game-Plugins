@@ -1271,11 +1271,15 @@ class TestMarioParty1 : MarioParty1 {
         int counterChange;      // In the game's count for the space's type, over the turn
         int coinChange;         // Over the turn
         ubyte panelColor;       // turn_status (PlayerData +0x17) at the end of the turn: 1 blue, 2 red, 4 green
-        Scene[] scenes;         // Until the next player's turn (without the transitions between scenes)
+        // What the landing led to, until the next player's turn or the player moving again (without the transitions
+        // between scenes). A Mushroom space's red mushroom moves them again in the same turn, and what they pass or land
+        // on then (Boo, another space) comes from that roll, not from the space.
+        Scene[] scenes;
+        bool movedAgain;
 
         string describe() {
-            return format("landed on %d, count %+d, coins %d%+d, panel %d, scenes %s", landedOn, counterChange,
-                          coinsBefore, coinChange, panelColor, scenes);
+            return format("landed on %d, count %+d, coins %d%+d, panel %d, scenes %s%s", landedOn, counterChange,
+                          coinsBefore, coinChange, panelColor, scenes, movedAgain ? ", then moved again" : "");
         }
     }
 
@@ -1304,9 +1308,12 @@ class TestMarioParty1 : MarioParty1 {
         Scene scene = data.currentScene;
         auto start = d.frame;
         while ((data.currentPlayerIndex == player || !isBoardScene()) && d.frame - start < 60 * 60 * 3) {
+            if (isBoardScene() && data.currentPlayerIndex == player && stepsLeft > 0) result.movedAgain = true;
             if (data.currentScene != scene) {
                 scene = data.currentScene;
-                if (!isBoardScene(scene) && scene != cast(Scene)53) result.scenes ~= scene; // 53: transitions
+                if (!isBoardScene(scene) && scene != cast(Scene)53 && !result.movedAgain) {
+                    result.scenes ~= scene; // 53: transitions
+                }
             }
             if (isBoardScene()) {
                 result.counterChange = counter(p, type) - counterBefore;

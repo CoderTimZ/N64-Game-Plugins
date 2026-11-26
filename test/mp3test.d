@@ -1002,6 +1002,9 @@ class TestMarioParty3 : MarioParty3 {
     // test/mp3-config-logjam-off.json without it). Log Jam's two press decisions store the right button at 0x801089B8 and 0x80108C18, and a wrong one
     // at 0x80108A04 and 0x80108C64 (for the player whose data is in s1 and s0 there).
     void logJamMistakes() {
+        // (it waits for the 2 vs 2 roulette to land on Log Jam, which only those configs make sure of)
+        d.check(config.blockedMiniGames.canFind(MiniGame.SLOT_SYNCH),
+                "Run this with test/mp3-config-logjam.json or test/mp3-config-logjam-off.json");
         string[Address] presses; // By player data: "R" or "W" for each press, in order
         auto record = (Address player, string press) {
             if (data.currentScene == Scene.LOG_JAM) presses[player] ~= press;
