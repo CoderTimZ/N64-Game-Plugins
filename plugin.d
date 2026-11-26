@@ -16,6 +16,7 @@ import std.string;
 import std.traits;
 
 public import me.timz.n64.util;
+import me.timz.n64.state : Fixed;
 
 alias Address     = uint;
 alias Instruction = uint;
@@ -498,7 +499,9 @@ struct GameCall {
     bool revisit;     // It started in at's Execute hooks: the game was at `at` already, so they don't run again
     Then next;        // What runs when it returns (see startCall() and afterReturn!m)
     int fiber = -1;
-    ulong run;        // The run of the hooks it started in (see hookRun)
+    // The run of the hooks it started in (see hookRun). Not state: hookRun only counts up (rollback doesn't bring it
+    // back, and it differs between machines), so the state would differ when a frame is run again with a call in progress
+    @Fixed ulong run;
     Resume[] queued;
 
     // Whether the game is back from it: at `at`, with the registers a function keeps (gp, sp, s0-s7, fp) as they were
@@ -1043,9 +1046,10 @@ extern (C) {
                 mix(c.queued.length);
             }
             foreach (k; 0..3) foreach (word; hooks.hooked[k].keys.sort) { mix(word); mix(hooks.hooked[k][word]); }
-            // (not the hooks' stacks: their unused slots hold whatever was there before, so they can differ when a frame
-            // is run again; what a hook does shows in the game's state and memory)
-            foreach (fiber; hookFibers) mix(fiber.state);
+            // The hooks that wait, by fiber. Not the fibers that don't: they're kept to be used again, so a frame run again
+            // can have more of them than its first run had. And not the hooks' stacks: their unused slots hold whatever
+            // was there before; what a hook does shows in the game's state and memory.
+            foreach (fiber; hookFibers) if (fiber.state != Fiber.State.TERM) { mix(fiber.index); mix(fiber.state); }
             return h;
         } catch (Exception e) {
             error(e);

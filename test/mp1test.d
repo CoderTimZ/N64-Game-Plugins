@@ -783,7 +783,11 @@ class TestMarioParty1 : MarioParty1 {
         d.wait(60);
         callCode(RUN);
         d.wait(60);
-        active = false; // The handlers stay (removing them would remove the plugin's own at these addresses)
+        active = false;
+        foreach (a; addresses) {
+            removeExec(a, onExecute);
+            removeExecDone(a, onDone);
+        }
         d.note(executes, " Executes, ", doubles, " twice in a row",
                doubled.empty ? "" : " (at " ~ doubled.map!(a => a.to!string(16)).join(", ") ~ ")");
         d.check(executes > 1000, "Too few instructions ran to tell");

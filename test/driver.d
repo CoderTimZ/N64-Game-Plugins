@@ -307,15 +307,18 @@ final class TestDriver {
 
 // Hooks for tests: any delegate (a test build doesn't roll back, so closures are fine here; the games' own hooks are
 // methods, see game.d)
-void onExec(Address address, void delegate(Address) callback) { addHandler(hooks.exec, HookKind.EXECUTE, address, ExecHandler([null, null], callback)); }
+void onExec(Address address, void delegate(Address) callback) { addHandler(hooks.exec, HookKind.EXECUTE, address, ExecHandler([callback.ptr, callback.funcptr], callback)); }
 void onExec(Address address, void delegate() callback) { onExec(address, (Address) { callback(); }); }
 void onExecOnce(Address address, void delegate(Address) callback) { addHandler(hooks.execOnce, HookKind.EXECUTE, address, ExecHandler([null, null], callback)); }
 void onExecOnce(Address address, void delegate() callback) { onExecOnce(address, (Address) { callback(); }); }
-void onExecDone(Address address, void delegate(Address) callback) { addHandler(hooks.execDone, HookKind.EXECUTE, address, ExecHandler([null, null], callback)); }
+void onExecDone(Address address, void delegate(Address) callback) { addHandler(hooks.execDone, HookKind.EXECUTE, address, ExecHandler([callback.ptr, callback.funcptr], callback)); }
 void onExecDone(Address address, void delegate() callback) { onExecDone(address, (Address) { callback(); }); }
 void onExecDoneOnce(Address address, void delegate(Address) callback) { addHandler(hooks.execDoneOnce, HookKind.EXECUTE, address, ExecHandler([null, null], callback)); }
 void onExecDoneOnce(Address address, void delegate() callback) { onExecDoneOnce(address, (Address) { callback(); }); }
 void clearExec(Address address) { removeHandlers(hooks.exec, HookKind.EXECUTE, address); }
+// Removes a test's hook (only that one: the plugin's own at the address stay)
+void removeExec(Address address, void delegate(Address) callback) { removeHandlers(hooks.exec, HookKind.EXECUTE, address, [callback.ptr, callback.funcptr]); }
+void removeExecDone(Address address, void delegate(Address) callback) { removeHandlers(hooks.execDone, HookKind.EXECUTE, address, [callback.ptr, callback.funcptr]); }
 
 void onRead(T)(ref T field, void delegate() callback)               { onRead!T(field, (ref T v, Address p, Address a) { callback(); }); }
 void onRead(T)(ref T field, void delegate(ref T) callback)          { onRead!T(field, (ref T v, Address p, Address a) { callback(v); }); }
