@@ -57,13 +57,9 @@ that never plays Tipsy Tourney, and picks the bonus stars at random from three:
 ## The plugin's saved state
 
 Some options need the plugin to remember things during a game, like which spaces it changed or which mini-games have
-been played. The plugin keeps this in the game's own memory, so it's saved and loaded with the emulator's save states. It
-also keeps a backup file, used when a game is continued from the game's own save file rather than a save state:
-
-- Windows: `%APPDATA%\N64-Game-Plugins`
-- Linux and macOS: `$XDG_STATE_HOME/N64-Game-Plugins` (`~/.local/state/N64-Game-Plugins` by default)
-
-These files aren't settings: you don't need to edit them. Mario Golf keeps no saved state.
+been played. The plugin keeps this in the game's own memory, so it's saved and loaded with the emulator's save states
+(and netplay's rollback). It isn't kept anywhere else: a game continued from the game's own save file, rather than a save
+state, starts with nothing remembered (for example, the changed spaces are picked again).
 
 ## Options for every Mario Party game
 

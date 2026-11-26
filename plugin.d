@@ -1,51 +1,42 @@
+// The execution plugin's side of the emulator: the N64's memory and registers, the hooks the emulator calls the plugin
+// for (which can wait for the game, like for a game function they call), netplay, and the functions the emulator calls
+// (the exports at the end). The game classes are in game.d.
 module me.timz.n64.plugin;
 
 import core.sys.windows.windows;
 import core.sys.windows.dll;
+import core.sync.mutex;
+import core.thread.fiber;
 import std.algorithm;
-import std.random;
-import std.range;
-import std.string;
-import std.json;
-import std.file;
 import std.conv;
-import std.traits;
+import std.json;
+import std.range;
 import std.stdio;
-import std.typecons;
-import std.math;
-import vibe.core.concurrency;
-import vibe.core.task;
-import vibe.vibe;
+import std.string;
+import std.traits;
+
+public import me.timz.n64.util;
 
 alias Address     = uint;
 alias Instruction = uint;
 
 enum Instruction NOP = 0;
 
-ulong flip(ulong value) pure nothrow @nogc @safe {
-    import core.bitop;
-    return ror(value, 32);
-}
+// --- The N64's memory ---
 
-double fixRoundingError(double x) pure nothrow @nogc @safe {
-    auto f = cast(float)x;
-    return f == cast(long)f ? f : x;
-}
-
+// The emulator keeps memory as 32-bit words in the host's byte order, so a byte or a halfword is at its address with
+// the low bits flipped
 size_t swapAddrEndian(T)(size_t address) pure nothrow @nogc @safe {
-    static if (T.sizeof == 1) {
-        return address ^ 0b11;
-    } else static if (T.sizeof == 2) {
-        return address ^ 0b10;
-    } else {
-        return address;
-    }
+    static if (T.sizeof == 1) return address ^ 0b11;
+    else static if (T.sizeof == 2) return address ^ 0b10;
+    else return address;
 }
 
 T* swapAddrEndian(T)(T* ptr) pure nothrow @nogc {
     return cast(T*)swapAddrEndian!T(cast(size_t)ptr);
 }
 
+// The N64 address of a field in memory (like data.currentScene.addr)
 Address addr(T)(ref T v) {
     return cast(Address)swapAddrEndian!T(cast(ubyte*)&v - memory.ptr) + 0x80000000;
 }
@@ -54,6 +45,7 @@ ref T val(T)(Address address) {
     return *Ptr!T(address);
 }
 
+// A pointer in the N64's memory, as the game keeps it
 struct Ptr(T) {
     Address address;
 
@@ -68,23 +60,23 @@ struct Ptr(T) {
     alias address this;
 }
 
+// An array in the N64's memory
 align (1) struct Arr(T, size_t S = 0) {
     T front;
-    
+
     @property size_t length() const { return S; }
     @property bool empty() const { return S == 0; }
     ref T opIndex(size_t i) { return *swapAddrEndian(swapAddrEndian(&front) + i); }
 
     int opApply(scope int delegate(ref T) dg) {
         foreach (i; 0..S) {
-            if (int result = dg(this[i])) {
-                return result;
-            }
+            if (int result = dg(this[i])) return result;
         }
         return 0;
     }
 }
 
+// A field of a struct in the N64's memory, at its offset (structs are unions of these)
 mixin template Field(Address A, T, string N) {
     align (1) struct {
         ubyte[swapAddrEndian!T(A) & 0x7FFFFF] _pad;
@@ -92,367 +84,37 @@ mixin template Field(Address A, T, string N) {
     }
 }
 
-// JSON text for a value, laid out as std.json's toString/toPrettyString do (sorted keys, the same escaping), but with
-// floats written as D writes them (0.333, 2) rather than std.json's 18 significant digits (0.333000000000000018).
-string toJSONText(const JSONValue value, bool pretty = false) {
-    import std.array : appender;
-    import std.math.traits : isFinite;
-
-    auto json = appender!string;
-    void put(const JSONValue v, size_t indent) {
-        void newLine(size_t level) {
-            if (!pretty) return;
-            json.put('\n');
-            foreach (i; 0..level) json.put("    ");
-        }
-        final switch (v.type) {
-            case JSONType.object:
-                auto obj = v.objectNoRef;
-                if (obj.length == 0) { json.put("{}"); break; }
-                json.put('{');
-                foreach (i, key; obj.keys.sort.release) {
-                    if (i) json.put(',');
-                    newLine(indent + 1);
-                    json.put(JSONValue(key).toString(JSONOptions.doNotEscapeSlashes));
-                    json.put(pretty ? ": " : ":");
-                    put(obj[key], indent + 1);
-                }
-                newLine(indent);
-                json.put('}');
-                break;
-            case JSONType.array:
-                auto arr = v.arrayNoRef;
-                if (arr.length == 0) { json.put("[]"); break; }
-                json.put('[');
-                foreach (i, element; arr) {
-                    if (i) json.put(',');
-                    newLine(indent + 1);
-                    put(element, indent + 1);
-                }
-                newLine(indent);
-                json.put(']');
-                break;
-            case JSONType.float_:
-                if (!v.floating.isFinite) throw new JSONException("Can't write " ~ v.floating.to!string ~ " in JSON");
-                json.put(v.floating.to!string);
-                break;
-            case JSONType.string:
-            case JSONType.integer:
-            case JSONType.uinteger:
-            case JSONType.true_:
-            case JSONType.false_:
-            case JSONType.null_:
-                json.put(v.toString(JSONOptions.doNotEscapeSlashes));
-                break;
-        }
-    }
-    put(value, 0);
-    return json.data;
+// Whether an address and the bytes after it are in the N64's memory (and the address is word-aligned)
+bool inMemory(Address address, size_t size) {
+    return address >= 0x80000000 && address % 4 == 0 && address - 0x80000000 + size <= memory.length;
 }
 
-JSONValue toJSON(T)(const T scl) if (isScalarType!T && !is (T == enum)) { return JSONValue(scl); }
-JSONValue toJSON(T)(const T enm) if (is (T == enum)) { return JSONValue(enm.to!string); }
-JSONValue toJSON(T)(const T str) if (isSomeString!T) { return JSONValue(str); }
-JSONValue toJSON(T)(const T arr) if (isArray!T && !isSomeString!T) {
-    return JSONValue(arr.map!(e => e.toJSON()).array);
+// Tells the emulator that the code at the address changed: its cached interpreter (and dynarec) would keep running the
+// instructions it already decoded otherwise. The game's own writes do that by themselves, the plugin's don't. Does
+// nothing in an emulator without ExecutionInvalidateCode (it doesn't cache code, or the change isn't seen).
+void invalidateCode(Address address, uint size = 4) {
+    if (invalidateCodeFunction) invalidateCodeFunction(address, size);
 }
-JSONValue toJSON(T)(const T asc) if (isAssociativeArray!T) {
-    auto result = parseJSON("{}");
-    foreach (ref k, ref v; asc) {
-        result[k.to!string] = v.toJSON();
+
+// Changes an instruction (or any word the CPU runs or decodes as code)
+void setCode(Address address, Instruction instruction) {
+    if (address.val!Instruction == instruction) return;
+    address.val!Instruction = instruction;
+    invalidateCode(address);
+}
+
+Address[] searchMemory(immutable uint[] data) {
+    auto mem = (cast(uint*)memory.ptr)[0..memory.length / uint.sizeof];
+    Address[] result;
+    ptrdiff_t start = 0, index;
+    while (start < mem.length && (index = mem[start..$].countUntil(data)) != -1) {
+        result ~= cast(Address)(0x80000000 + (start + index) * uint.sizeof);
+        start += index + 1;
     }
     return result;
 }
-JSONValue toJSON(T)(const ref T agg) if (is(T == struct)) {
-    auto result = parseJSON("{}");
-    foreach (i, ref v; agg.tupleof) {
-        auto k = __traits(identifier, agg.tupleof[i]);
-        result[k] = v.toJSON();
-    }
-    return result;
-}
-JSONValue toJSON(T)(const T agg, JSONValue result = parseJSON("{}")) if (is(T == class)) {
-    if (agg is null) return JSONValue(null);
-    foreach (i, ref v; agg.tupleof) {
-        auto k = __traits(identifier, agg.tupleof[i]);
-        result[k] = v.toJSON();
-    }
-    static if (is(BaseClassesTuple!T[0])) {
-        return agg.toJSON!(BaseClassesTuple!T[0])(result);
-    } else {
-        return result;
-    }
-}
 
-T fromJSON(T)(const JSONValue scl) if (isScalarType!T && !is (T == enum)) {
-    switch (scl.type) {
-        case JSONType.integer:  return cast(T)scl.integer;
-        case JSONType.uinteger: return cast(T)scl.uinteger;
-        case JSONType.float_:   return cast(T)scl.floating;
-        case JSONType.true_:    return cast(T)scl.boolean;
-        case JSONType.false_:   return cast(T)scl.boolean;
-        default:
-            throw new JSONException("expected " ~ (is(T == bool) ? "true, false or a number" : "a number") ~ ", not " ~
-                                    (scl.type == JSONType.null_ ? "null" : "a " ~ scl.type.to!string.stripRight("_")));
-    }
-}
-T fromJSON(T)(const JSONValue enm) if (is (T == enum)) {
-    return enm.type == JSONType.integer ? cast(T)enm.integer : enm.str.to!T;
-}
-T fromJSON(T)(const JSONValue str) if (isSomeString!T) { return str.str; }
-T fromJSON(T)(const JSONValue arr) if (isArray!T && !isSomeString!T) {
-    return arr.array.map!(e => e.fromJSON!(ElementType!T)).array;
-}
-T fromJSON(T)(const JSONValue obj) if (isAssociativeArray!T) {
-    T result;
-    foreach (ref k, ref v; obj.object) {
-        result[k.to!(KeyType!T)] = v.fromJSON!(ValueType!T);
-    }
-    return result;
-}
-// A field's value, with errors saying which field they're in (for a config file's options)
-T fromJSONField(T)(const JSONValue value, string field) {
-    try {
-        return value.fromJSON!T;
-    } catch (Exception e) {
-        throw new JSONException(field ~ ": " ~ e.msg);
-    }
-}
-
-T fromJSON(T)(const JSONValue obj) if (is(T == struct)) {
-    T result;
-    foreach (i, ref v; result.tupleof) {
-        auto k = __traits(identifier, result.tupleof[i]);
-        if (auto value = k in obj) {
-            v = (*value).fromJSONField!(typeof(v))(k);
-        }
-    }
-    return result;
-}
-T fromJSON(T)(const JSONValue obj, T result = null) if (is(T == class)) {
-    if (obj.type == JSONType.null_) return null;
-    if (!result) result = new T;
-    foreach (i, ref v; result.tupleof) {
-        auto k = __traits(identifier, result.tupleof[i]);
-        if (auto value = k in obj) {
-            v = (*value).fromJSONField!(typeof(v))(k);
-        }
-    }
-    static if (is(BaseClassesTuple!T[0])) {
-        return cast(T)obj.fromJSON!(BaseClassesTuple!T[0])(result);
-    } else {
-        return result;
-    }
-}
-
-struct SplitMix64 {
-    enum isUniformRandom = true;
-    enum hasFixedRange = true;
-    enum min = ulong.min;
-    enum max = ulong.max;
-    enum empty = false;
-
-    ulong state;
-
-    this(ulong s) @safe nothrow @nogc { seed(s); }
-    void seed(ulong s) @safe nothrow @nogc { state = s; }
-    auto save() const @safe nothrow @nogc { return this; }
-    @property ulong front() const @safe nothrow @nogc { return hash(state); }
-    void popFront() @safe nothrow @nogc { state += 0x9e3779b97f4a7c15; }
-    ulong next() @safe nothrow @nogc { popFront(); return front; }
-
-    static ulong hash(ulong z) @safe nothrow @nogc pure {
-        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
-        z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
-        return z ^ (z >> 31);
-    }
-}
-
-struct Xoshiro256pp {
-    import core.bitop;
-
-    enum isUniformRandom = true;
-    enum hasFixedRange = true;
-    enum min = ulong.min;
-    enum max = ulong.max;
-    enum empty = false;
-
-    ulong[4] state;
-    
-    this(ulong[4] s) @safe nothrow @nogc { seed(s); }
-    this(ulong s) @safe nothrow @nogc { seed(s); }
-    void seed(ulong[4] s) @safe nothrow @nogc { state = s; }
-    void seed(ulong s) @safe nothrow @nogc { seed([0, 0, 0, 0]); reseed(s); }
-    void reseed(ulong s) @safe nothrow @nogc { auto r = SplitMix64(s); state.each!((ref e) => e ^= r.next); }
-    auto save() const @safe nothrow @nogc { return this; }
-    @property ulong front() const @safe nothrow @nogc { return rol(state[0] + state[3], 23) + state[0]; }
-    void popFront() @safe nothrow @nogc {
-        auto temp = state[1] << 17;
-        state[2] ^= state[0];
-        state[3] ^= state[1];
-        state[1] ^= state[2];
-        state[0] ^= state[3];
-        state[2] ^= temp;
-        state[3] = rol(state[3], 45);
-    }
-    ulong next() @safe nothrow @nogc { popFront(); return front; }
-}
-
-double normal(Random)(ref Random r) @safe {
-    import std.math;
-
-    double u = r.uniform01();
-    double v = r.uniform01();
-    return sqrt(-2 * log(u)) * cos(2 * PI * v);
-}
-
-T weighted(T, W, Random)(ref const W[T] options, ref Random r) {
-    auto keys = options.keys;
-    double random = r.uniform01() * options.values.sum();
-    double weight = 0;
-    foreach (ref const T e; keys) {
-        if ((weight += options[e]) > random) {
-            return e;
-        }
-    }
-    return keys.back;
-}
-
-Range distanceShuffleFast(Range, RandomGen)(Range r, size_t d, ref RandomGen gen) if (isRandomAccessRange!Range && isUniformRNG!RandomGen) {
-    if (r.length <= 1 || d == 0) return r;
-    if (d >= r.length - 1) return r.randomShuffle(gen);
-
-    void dS(Range)(Range r) {
-        auto w = min(d+1, r.length);
-        auto cpy = cycle(r.take(w).array);
-        auto src = cycle(new bool[w]);
-        auto dst = cycle(new bool[w]);
-
-        foreach (size_t i; iota(r.length)) {
-            size_t j;
-
-            if (!src[i]) {
-                do { j = i + uniform(0, min(r.length-i, w), gen); } while (dst[j]);
-                r[j] = cpy[i];
-                dst[j] = true;
-            }
-
-            if (!dst[i]) {
-                do { j = i + uniform(1, min(r.length-i, w), gen); } while (src[j]);
-                r[i] = cpy[j];
-                src[j] = true;
-            }
-
-            if (i+w < r.length) {
-                cpy[i+w] = r[i+w];
-                src[i+w] = false;
-                dst[i+w] = false;
-            }
-        }
-    }
-
-    if (uniform!"[]"(0, 1, gen)) {
-        dS(r);
-    } else {
-        dS(retro(r));
-    }
-    
-    return r;
-}
-
-Range distanceShuffleUniform(Range, RandomGen)(Range r, size_t d, ref RandomGen gen) if (isRandomAccessRange!Range && isUniformRNG!RandomGen) {
-    if (r.length <= 1 || d == 0) return r;
-    if (d >= r.length - 1) return r.randomShuffle(gen);
-
-    auto p = iota(r.length).array; // Positions
-    auto q = iota(r.length).array; // Inverse Positions
-
-    void s(size_t i, size_t j) {
-        swap(r[i], r[j]);
-        swap(p[i], p[j]);
-        swap(q[p[i]], q[p[j]]);
-    }
-    
-    for (auto i = 0; i < r.length-1; i++) {
-        auto j = uniform(i, min(i+d+1, r.length), gen);
-        if (i >= d && q[i-d] >= i && q[i-d] != j) { // Dead End
-            while (--i >= 0) s(i, q[i]);            // Reset
-        } else {
-            s(i, j);
-        }
-    }
-
-    return r;
-}
-
-Range distanceShuffle(Range, RandomGen)(Range r, size_t d, ref RandomGen gen) if (isRandomAccessRange!Range && isUniformRNG!RandomGen) {
-    if (r.length < 50) {
-        return distanceShuffleUniform(r, d, gen);
-    } else {
-        return distanceShuffleFast(r, d, gen);
-    }
-}
-
-// An endless shuffled sequence of a set of elements, where next() can skip elements without losing them.
-//
-// It behaves as if it were an endless list of cycles, each a distance shuffle of the one before (the first is a
-// full shuffle), and next(pred) takes the earliest element in that list that hasn't been taken yet and satisfies
-// pred. Skipped elements stay where they are, to be taken later. Cycles are only generated once a draw reaches
-// them, which gives the same result as generating them all in advance.
-struct ShuffleStream(T) {
-    T[][] cycles;    // The cycles that still have elements left to take (always at least the latest one)
-    bool[][] taken;  // Which elements of each cycle have been taken
-
-    this(Range, RandomGen)(Range r, ref RandomGen gen) {
-        initialize(r, gen);
-    }
-
-    void initialize(Range, RandomGen)(Range r, ref RandomGen gen) {
-        auto first = r.array.dup;
-        first.randomShuffle(gen);
-        cycles = [first];
-        taken = [new bool[first.length]];
-    }
-
-    bool empty() const {
-        return cycles.empty || cycles[0].empty;
-    }
-
-    void clear() {
-        cycles = null;
-        taken = null;
-    }
-
-    T next(RandomGen)(ref RandomGen gen, scope bool delegate(T) pred = null) {
-        assert(!empty);
-
-        // Every cycle has the same elements, so if none satisfies pred, no cycle ever will
-        if (pred && !cycles[$-1].any!(e => pred(e))) pred = null;
-
-        for (size_t c = 0; ; c++) {
-            if (c == cycles.length) {
-                auto cycle = cycles[$-1].dup;
-                distanceShuffle(cycle, (cycle.length - 1) / 2, gen);
-                cycles ~= cycle;
-                taken ~= new bool[cycle.length];
-            }
-
-            foreach (i, e; cycles[c]) {
-                if (taken[c][i] || (pred && !pred(e))) continue;
-
-                taken[c][i] = true;
-
-                // Forget fully taken cycles, except the latest (the next cycle is made from it)
-                while (cycles.length > 1 && taken[0].all) {
-                    cycles = cycles[1..$];
-                    taken = taken[1..$];
-                }
-
-                return e;
-            }
-        }
-    }
-}
+// --- The CPU's registers ---
 
 union Register(T) if (T.sizeof == 4) {
     ulong v;
@@ -480,7 +142,7 @@ union GPR {
                       s0, s1, s2, s3, s4, s5, s6, s7,
                       t8, t9, k0, k1, gp, sp, fp, ra;
     }
-};
+}
 
 union FPR {
     Register!float[32] r;
@@ -491,7 +153,19 @@ union FPR {
                        f16, f17, f18, f19, f20, f21, f22, f23,
                        f24, f25, f26, f27, f28, f29, f30, f31;
     }
-};
+}
+
+// The index of a register by its name (for options that name the register a game keeps a value in)
+int registerIndex(string name)() {
+    static immutable names = ["r0", "at", "v0", "v1", "a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3", "t4", "t5",
+                              "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1",
+                              "gp", "sp", "fp", "ra"];
+    enum i = names.countUntil(name);
+    static assert(i >= 0, "No register " ~ name);
+    return cast(int)i;
+}
+
+// --- Controllers ---
 
 enum Button : ushort {
     C_R = 0x0001,
@@ -510,14 +184,6 @@ enum Button : ushort {
     A   = 0x8000
 }
 
-enum MsgLevel {
-    ERROR   = 1,
-    WARNING = 2,
-    INFO    = 3,
-    STATUS  = 4,
-    VERBOSE = 5
-}
-
 union InputData {
     struct {
         ushort buttons;
@@ -530,37 +196,26 @@ union InputData {
     alias value this;
 }
 
-interface Plugin {
-    void loadConfig();
-    string netplayExport();  // The settings and State, for the other players in a netplay session (see NetplayStart)
-    void onStart();
-    void onInput(int, InputData*);
-    void onMessage(string msg);
-    void onFrame(ulong);
-    void onFinish();
-    void onStateLoaded();    // After a save state was loaded
-    void onReset(bool hard); // The game was reset
-}
+// --- Logging ---
 
-final class NoState { }
+enum MsgLevel { ERROR = 1, WARNING = 2, INFO = 3, STATUS = 4, VERBOSE = 5 }
 
-static T loadJson(T)(string filename) {
-    try {
-        T json = readText(filename).parseJSON().fromJSON!T();
-        if (!json) json = new T;
-        json.saveJson(filename);
-        return json;
-    } catch (FileException e) {
-        warning("[" ~ e.classinfo.name ~ "] " ~ e.message);
-        T json = new T;
-        json.saveJson(filename);
-        return json;
-    } catch (Exception e) {
-        auto msg = e.classinfo.name ~ ": " ~ e.message;
-        error("[" ~ filename ~ "] " ~ msg);
-        showError(filename, msg);
-        return null;
+void info(T...)(T args)    { msg(MsgLevel.INFO, args); }
+void warning(T...)(T args) { msg(MsgLevel.WARNING, args); }
+void error(T...)(T args)   { msg(MsgLevel.ERROR, args); }
+
+void msg(T...)(MsgLevel level, T args) {
+    string message;
+    foreach (arg; args) message ~= arg.to!string;
+
+    version (Windows) { } else {
+        (level <= MsgLevel.WARNING ? stderr : stdout).writeln(message);
     }
+    if (!debugCallback) return;
+    // (during netplay once the frame is final: a rollback mustn't log the same thing twice)
+    auto callback = debugCallback;
+    auto context = debugContext.toStringz;
+    afterFinal({ callback(context, level, message.toStringz); });
 }
 
 // Shows an error to the player: a message box on Windows. (It's in the emulator's log everywhere.)
@@ -570,676 +225,554 @@ void showError(const(char)[] title, const(char)[] message) {
     }
 }
 
-static void saveJson(T)(T json, string filename) {
-    static if (!is(T == NoState)) {
-        try {
-            std.file.write(filename, json.toJSON().toJSONText(true));
-        } catch (Exception e) {
-            auto msg = e.classinfo.name ~ ": " ~ e.message;
-            error("[" ~ filename ~ "] " ~ msg);
-            showError(filename, msg);
-        }
-    }
-}
+// --- Hooks ---
 
-// A game's State as stored in the N64's memory: minified JSON, compressed with zlib (deflate).
-// It's still JSON underneath, so fields and enums are matched by name: a State saved by an older or newer version
-// of a plugin still loads, with missing fields keeping their defaults and unknown fields ignored.
-ubyte[] packState(T)(T state) {
-    import std.zlib : compress;
-    return cast(ubyte[])compress(state.toJSON().toJSONText(), 9);
-}
-
-T unpackState(T)(const(ubyte)[] data) {
-    import std.zlib : uncompress;
-    return (cast(string)uncompress(data).idup).parseJSON().fromJSON!T();
-}
-
-// Where a game's permanent heap and its functions are, for keeping the plugin's State in the N64's memory.
-// The plugin allocates a block on the permanent heap, so it never collides with anything else using the memory
-// (such as PartyPlanner64 boards in the Expansion Pak), and save states include it automatically.
-struct PermanentHeap {
-    Address heapPointer;   // Variable holding the heap's first node (HeapNode*)
-    Address heapInit;      // Function that (re)creates the heap
-    Address alloc;         // void* alloc(u32 size)
-    Address free;          // void free(void* ptr)
-    Address processSleep;  // HuPrcVSleep: always runs inside a game process, where the heap functions are safe to call
-}
-
-// The plugin's folder for files that aren't settings (like the State backups):
-// %APPDATA%\N64-Game-Plugins on Windows, $XDG_STATE_HOME/N64-Game-Plugins (~/.local/state) elsewhere
-string dataDirectory() {
-    import std.process : environment;
-    import std.path : buildPath, expandTilde;
-
-    version (Windows) {
-        auto base = environment.get("APPDATA", "");
-    } else {
-        auto base = environment.get("XDG_STATE_HOME", expandTilde("~/.local/state"));
-    }
-    if (base.empty) return ".";
-
-    auto dir = buildPath(base, "N64-Game-Plugins");
-    try {
-        mkdirRecurse(dir);
-        return dir;
-    } catch (Exception e) {
-        warning("Can't create ", dir, ": ", e.message);
-        return ".";
-    }
-}
-
-abstract class Game(Config, State = NoState) : Plugin {
-    string romName;
-    string romHash;
-    Config config;
-    State state;
-    bool stateError;
-
-    // State block in the N64's memory (see PermanentHeap). The header is 8 words: magic (2), format version,
-    // capacity, data length, data CRC32 and a write stamp (2) that changes on every write.
-    enum STATE_MAGIC_1 = 0x4E363450; // "N64P"
-    enum STATE_MAGIC_2 = 0x53544154; // "STAT"
-    enum STATE_FORMAT = 2;                // 2: zlib-compressed JSON (1 was a custom binary format)
-    enum STATE_HEADER_SIZE = 32;
-
-    // Room for the State to grow by half before it needs a bigger block, in steps of 1 KB
-    static uint stateBlockCapacity(size_t length) {
-        return cast(uint)((length + length / 2 + 1023) / 1024 * 1024);
-    }
-
-    PermanentHeap permanentHeap;   // Set by games that support it; otherwise the State is only kept in the backup file
-    bool stateInMemory;            // Whether permanentHeap is usable
-    Address stateBlock;            // The block's address, or 0 if there isn't one yet
-    uint stateCapacity;            // Data bytes the block can hold
-    ulong stateStamp;              // Last stamp written to (or read from) the block
-    uint stateCrc;                 // Last data CRC written to (or read from) the block
-    bool stateAllocating;          // An allocation is in progress
-    bool stateNeedsBiggerBlock;    // The State outgrew the block
-
-    this(string romName, string romHash) {
-        this.romName = romName;
-        this.romHash = romHash;
-    }
-
-    void loadConfig() {
-        // A netplay guest plays with the host's settings, not its own file
-        if (netplayRole == NetplayRole.guest && netplayImport.type == JSONType.object) {
-            if (auto imported = "config" in netplayImport) {
-                config = (*imported).fromJSON!Config();
-                if (!config) config = new Config;
-                return;
-            }
-        }
-
-        config = loadJson!Config(romName ~ ".json");
-        if (!config) config = new Config;
-    }
-
-    // The settings and State as JSON, for netplay guests. Written with std.json rather than toJSONText, since its
-    // floats keep every digit: a rounded float would make a guest's game run differently.
-    string netplayExport() {
-        JSONValue result = parseJSON("{}");
-        result["config"] = config ? config.toJSON() : JSONValue(null);
-        static if (!is(State == NoState)) {
-            result["state"] = state ? state.toJSON() : JSONValue(null);
-        }
-        return result.toString();
-    }
-
-    // The State's backup file, used when the State isn't in memory (e.g. when continuing a game from the game's
-    // own save file rather than a save state). It's named after the ROM's header name and the start of its MD5,
-    // so ROM hacks of the same game (which usually keep the header name) each get their own file.
-    string stateFile;
-    string stateBackupFile() {
-        if (!stateFile) {
-            import std.path : buildPath;
-            import std.uni : isAlphaNum, toUpper;
-
-            // Only characters that are safe in file names
-            auto safe = (string s) => s.map!(c => (c.isAlphaNum || c == '-' || c == '_' || c == ' ') ? c : '_').to!string;
-            auto name = safe(romName);
-            auto hash = safe(romHash.take(8).to!string.toUpper);
-            stateFile = buildPath(dataDirectory(), (hash.empty ? name : name ~ "-" ~ hash) ~ "-State.json");
-        }
-        return stateFile;
-    }
-
-    // Called whenever the State is (re)loaded, so games can update anything that refers into it
-    void stateLoaded() { }
-
-    void loadState() {
-        static if (!is(State == NoState)) {
-            // A netplay guest starts with the host's State, not its own backup
-            if (netplayRole == NetplayRole.guest && netplayImport.type == JSONType.object) {
-                if (auto imported = "state" in netplayImport) {
-                    if (imported.type == JSONType.object) {
-                        state = (*imported).fromJSON!State();
-                        if (!state) state = new State;
-                        stateError = false;
-                        stateLoaded();
-                        return;
-                    }
-                }
-            }
-
-            state = loadJson!State(stateBackupFile());
-            if (state) {
-                stateError = false;
-            } else {
-                state = new State;
-                stateError = true;
-            }
-            stateLoaded();
-        }
-    }
-
-    void saveState() {
-        static if (!is(State == NoState)) {
-            if (!writeStateBlock()) return; // A save state was loaded, so the State was reloaded instead
-            if (netplayRole != NetplayRole.guest) state.saveJson(stateBackupFile()); // Only the host keeps it
-            stateError = false;
-        }
-    }
-
-    static if (!is(State == NoState)) {
-        bool inMemory(Address address, size_t size) {
-            return address >= 0x80000000 && address + size <= 0x80000000 + memory.length && address % 4 == 0;
-        }
-
-        bool isHeapNode(Address node) {
-            return inMemory(node, 16) && (node + 4).val!ubyte == 0xA5;
-        }
-
-        Address heapStart() {
-            Address start = permanentHeap.heapPointer.val!uint;
-            return isHeapNode(start) ? start : 0;
-        }
-
-        // Reads a State block, returning its data, or null if there's no valid block at the address
-        const(ubyte)[] readStateBlock(Address block, out uint capacity, out ulong stamp, out uint crc) {
-            import std.digest.crc : crc32Of;
-
-            if (!inMemory(block, STATE_HEADER_SIZE)) return null;
-            if (block.val!uint != STATE_MAGIC_1 || (block + 4).val!uint != STATE_MAGIC_2) return null;
-            if ((block + 8).val!uint != STATE_FORMAT) return null;
-            capacity = (block + 12).val!uint;
-            auto length = (block + 16).val!uint;
-            crc = (block + 20).val!uint;
-            stamp = (cast(ulong)(block + 24).val!uint << 32) | (block + 28).val!uint;
-            if (length == 0 || length > capacity || !inMemory(block, STATE_HEADER_SIZE + capacity)) return null;
-
-            auto data = new ubyte[length];
-            foreach (i, ref b; data) b = Ptr!ubyte(block + STATE_HEADER_SIZE + cast(uint)i)[0];
-            auto check = crc32Of(data);
-            if ((check[0] | check[1] << 8 | check[2] << 16 | check[3] << 24) != crc) return null;
-
-            return data;
-        }
-
-        // Whether the block no longer holds what the plugin last wrote (i.e. a save state was loaded)
-        bool stateBlockChanged() {
-            Address block = stateBlock;
-            return block.val!uint != STATE_MAGIC_1 || (block + 4).val!uint != STATE_MAGIC_2 ||
-                   (block + 20).val!uint != stateCrc ||
-                   (block + 24).val!uint != cast(uint)(stateStamp >> 32) || (block + 28).val!uint != cast(uint)stateStamp;
-        }
-
-        // Looks through the permanent heap's allocated blocks for a State block
-        Address findStateBlock() {
-            Address start = heapStart();
-            if (!start) return 0;
-
-            Address node = start;
-            foreach (i; 0..100_000) {
-                if (!isHeapNode(node)) return 0;
-                uint capacity, crc;
-                ulong stamp;
-                if ((node + 5).val!ubyte && readStateBlock(node + 16, capacity, stamp, crc)) {
-                    return node + 16;
-                }
-                node = (node + 12).val!uint;
-                if (node == start) break;
-            }
-            return 0;
-        }
-
-        void writeBlock(Address block, uint capacity, const(ubyte)[] data) {
-            import std.digest.crc : crc32Of;
-            import std.datetime.systime : Clock;
-
-            auto check = crc32Of(data);
-            uint crc = check[0] | check[1] << 8 | check[2] << 16 | check[3] << 24;
-            // During netplay the stamp is a counter, so every player's memory stays the same
-            ulong stamp = netplayRole != NetplayRole.none ? stateStamp + 1 : max(cast(ulong)Clock.currStdTime, stateStamp + 1);
-
-            foreach (i, b; data) Ptr!ubyte(block + STATE_HEADER_SIZE + cast(uint)i)[0] = b;
-            (block +  0).val!uint = STATE_MAGIC_1;
-            (block +  4).val!uint = STATE_MAGIC_2;
-            (block +  8).val!uint = STATE_FORMAT;
-            (block + 12).val!uint = capacity;
-            (block + 16).val!uint = cast(uint)data.length;
-            (block + 20).val!uint = crc;
-            (block + 24).val!uint = cast(uint)(stamp >> 32);
-            (block + 28).val!uint = cast(uint)stamp;
-
-            stateCrc = crc;
-            stateStamp = stamp;
-        }
-
-        void wipeStateBlock(Address block) {
-            if (inMemory(block, 8)) block.val!uint = 0;
-        }
-
-        // Writes the State to its block. Returns false if a save state was loaded since the last write, in which
-        // case the State is reloaded from memory instead (overwriting it would undo the loaded save state).
-        bool writeStateBlock() {
-            if (!stateInMemory || !stateBlock || stateAllocating) return true;
-
-            if (stateBlockChanged()) {
-                reloadStateFromMemory();
-                return false;
-            }
-
-            auto data = packState(state);
-            if (data.length > stateCapacity) {
-                stateNeedsBiggerBlock = true; // A bigger block is made from the next game process
-                return true;
-            }
-
-            writeBlock(stateBlock, stateCapacity, data);
-            return true;
-        }
-
-        // Makes the State block at the address the plugin's State
-        void useStateBlock(Address block) {
-            uint capacity, crc;
-            ulong stamp;
-            auto data = readStateBlock(block, capacity, stamp, crc);
-            if (!data) return;
-
-            stateBlock = block;
-            stateCapacity = capacity;
-            stateStamp = stamp;
-            stateCrc = crc;
-            stateNeedsBiggerBlock = false;
-
-            try {
-                auto loaded = unpackState!State(data);
-                if (loaded) state = loaded;
-            } catch (Exception e) {
-                error("Can't read the State in memory: ", e.classinfo.name, ": ", e.message);
-            }
-
-            stateLoaded();
-            if (netplayRole != NetplayRole.guest) state.saveJson(stateBackupFile()); // Only the host keeps it
-            stateError = false;
-        }
-
-        // A save state was loaded: switch to the State saved with it
-        void reloadStateFromMemory() {
-            uint capacity, crc;
-            ulong stamp;
-            Address block = readStateBlock(stateBlock, capacity, stamp, crc) ? stateBlock : findStateBlock();
-            stateBlock = 0;
-
-            // A save state made before the State was kept in memory has no block: keep the current State,
-            // and a new block is made for it
-            if (block) useStateBlock(block);
-        }
-
-        // Runs inside a game process (from HuPrcVSleep): finds or makes the State block when there isn't one,
-        // and moves the State to a bigger block when it outgrows its block
-        void maintainStateBlock() {
-            if (!stateInMemory || stateAllocating) return;
-            if (stateBlock && !stateNeedsBiggerBlock) return;
-
-            // The hook is only safe if HuPrcVSleep starts with "addiu sp, sp, ..." (e.g. not on another ROM version)
-            if ((permanentHeap.processSleep.val!uint & 0xFFFF0000) != 0x27BD0000) {
-                warning("Unexpected code at ", permanentHeap.processSleep.to!string(16), "; the State is only kept in ", stateBackupFile());
-                stateInMemory = false;
-                return;
-            }
-
-            if (!heapStart()) return; // The heap isn't set up yet
-
-            if (!stateBlock) {
-                if (auto block = findStateBlock()) {
-                    useStateBlock(block);
-                    return;
-                }
-            }
-
-            Address oldBlock = stateBlock;
-            uint capacity = stateBlockCapacity(packState(state).length);
-
-            stateAllocating = true;
-            permanentHeap.alloc.jal(STATE_HEADER_SIZE + capacity, (ptr) {
-                stateAllocating = false;
-
-                if (!ptr || !inMemory(ptr, STATE_HEADER_SIZE + capacity)) {
-                    warning("Not enough memory for the State; it is only kept in ", stateBackupFile());
-                    stateInMemory = false;
-                    return;
-                }
-
-                stateBlock = ptr;
-                stateCapacity = capacity;
-                stateNeedsBiggerBlock = false;
-                writeBlock(ptr, capacity, packState(state));
-
-                if (oldBlock) {
-                    wipeStateBlock(oldBlock);
-                    if (permanentHeap.free) permanentHeap.free.jal(oldBlock);
-                }
-            });
-        }
-
-        void setUpStateInMemory() {
-            with (permanentHeap) {
-                if (!heapPointer || !heapInit || !alloc || !processSleep) return;
-
-                stateInMemory = true;
-
-                // The heap is being (re)created (boot or reset), so the block is gone: a new one is made later
-                heapInit.onExec({
-                    if (stateBlock) wipeStateBlock(stateBlock);
-                    stateBlock = 0;
-                    stateAllocating = false;
-                });
-
-                processSleep.onExecDone({ maintainStateBlock(); });
-            }
-        }
-    }
-
-    void connect(string url) {
-        spawn((Tid parentTid, URL url) {
-            runTask({
-                while (true) {
-                    try {
-                        auto ws = connectWebSocket(url);
-
-                        synchronized (plugin) {
-                            wsSender = runTask({
-                                try {
-                                    while (ws.connected) {
-                                        ws.send(receiveOnly!string);
-                                    }
-                                } catch (Exception e) { }
-                            });
-                        }
-
-                        while (ws.waitForData()) {
-                            send(parentTid, ws.receiveText());
-                        }
-                    } catch (Exception e) { }
-
-                    try { sleep(5.seconds); } catch (Exception e) { break; }
-                }
-            });
-
-            runApplication();
-        }, thisTid, URL(url));
-    }
-
-    void sendMessage(string msg) {
-        synchronized (plugin) {
-            if (wsSender) {
-                send(wsSender, msg);
-            }
-        }
-    }
-
-    void sendMessage(JSONValue msg) {
-        sendMessage(msg.toJSONText());
-    }
-
-    void onStart() {
-        try {
-            loadConfig();
-        } catch (Exception e) {
-            auto msg = e.classinfo.name ~ ": " ~ e.message;
-            error(msg);
-            showError("loadConfig()", msg);
-        }
-
-        try {
-            loadState();
-        } catch (Exception e) {
-            auto msg = e.classinfo.name ~ ": " ~ e.message;
-            error(msg);
-            showError("loadState()", msg);
-        }
-
-        static if (!is(State == NoState)) {
-            setUpStateInMemory();
-        }
-    }
-    void onInput(int, InputData*) { }
-    void onMessage(string msg) { }
-    void onFrame(ulong) {
-        reloadStateIfSaveStateLoaded();
-    }
-    void onStateLoaded() {
-        reloadStateIfSaveStateLoaded();
-    }
-    void onReset(bool hard) { }
-
-    // Switches to the State saved with a save state, if one was loaded since the plugin last wrote the State (the
-    // emulator doesn't say when). Each frame checks, but call it before using the State in game code that can run
-    // before that, like on the first frame after a load. Returns whether it switched.
-    bool reloadStateIfSaveStateLoaded() {
-        static if (!is(State == NoState)) {
-            if (stateInMemory && stateBlock && !stateAllocating && stateBlockChanged()) {
-                reloadStateFromMemory();
-                return true;
-            }
-        }
-        return false;
-    }
-    void onFinish() {
-        if (!stateError) {
-            saveState();
-        }
-    }
-}
-
-// The kinds of hook the emulator calls the plugin for (m64p_execution_hook in its m64p_plugin.h)
+// What the emulator calls the plugin for (m64p_execution_hook in its m64p_plugin.h)
 enum HookKind : int { EXECUTE, READ, WRITE } // EXECUTE has Execute() and ExecuteDone()
 
-// The emulator has a bit per word of RDRAM for each kind of hook, which addresses that agree in bits 2..22 share (a KSEG0
-// address and its KSEG1 mirror, or the bytes of a word). hookedWords counts the hooked addresses on each, so the bit is
-// turned off only once none is left.
+// A hook's handler, and what it was made from (to remove it again: see unhook())
+struct Handler(F) {
+    const(void)*[2] key;
+    F run;
+}
+alias ExecHandler = Handler!(void delegate(Address pc));
+alias MemHandler  = Handler!(void delegate(void* value, Address pc, Address address));
+
+// Every hook, and where the waiting hooks and game calls wait. Rollback keeps a copy of it with each frame it saves
+// (the same copy for frames that didn't change it: see hooksVersion).
+struct Hooks {
+    ExecHandler[][Address] exec, execOnce, execDone, execDoneOnce;
+    MemHandler[][Address][4] read, write; // By size: 1, 2, 4 and 8 bytes
+    // The emulator has a bit per word of RDRAM for each kind of hook, which addresses that agree in bits 2..22 share (a
+    // KSEG0 address and its KSEG1 mirror, or the bytes of a word). These count the hooked addresses on each, so the bit
+    // is turned off only once none is left.
+    uint[uint][3] hooked;
+    HookReturn[] returns;
+    GameCall[] calls; // In progress (see callGame())
+    ulong serial;     // Numbers the waits in the order they start (see Execute)
+
+    Hooks dup() {
+        Hooks h;
+        static foreach (i; 0 .. Hooks.tupleof.length) {
+            static if (isStaticArray!(typeof(h.tupleof[i]))) {
+                foreach (k, ref e; h.tupleof[i]) e = this.tupleof[i][k].dup;
+            } else static if (isScalarType!(typeof(h.tupleof[i]))) {
+                h.tupleof[i] = this.tupleof[i];
+            } else {
+                h.tupleof[i] = this.tupleof[i].dup;
+            }
+        }
+        return h;
+    }
+}
+
+int sizeIndex(size_t size) { return size == 1 ? 0 : size == 2 ? 1 : size == 4 ? 2 : 3; }
+
 uint hookedWord(Address addr) { return (addr >> 2) & 0x1FFFFF; }
 
 void hookAdded(HookKind kind, Address addr) {
-    if (hookedWords[kind].require(hookedWord(addr), 0)++ == 0) setHook(addr, kind, 1);
+    if (hooks.hooked[kind].require(hookedWord(addr), 0)++ == 0) setHook(addr, kind, 1);
+    hooksVersion++;
 }
 
 void hookRemoved(HookKind kind, Address addr) {
     auto word = hookedWord(addr);
-    auto count = word in hookedWords[kind];
+    auto count = word in hooks.hooked[kind];
     if (count && --*count == 0) {
-        hookedWords[kind].remove(word);
+        hooks.hooked[kind].remove(word);
         setHook(addr, kind, 0);
     }
+    hooksVersion++;
 }
 
 // Adds a handler for an address, turning on its hook if it's the address's first
 void addHandler(H)(ref H[][Address] table, HookKind kind, Address addr, H handler) {
     if (addr !in table) hookAdded(kind, addr);
     table[addr] ~= handler;
+    hooksVersion++;
 }
 
-// Removes an address's handlers, turning off its hook if nothing else has it
-bool removeHandlers(H)(ref H[][Address] table, HookKind kind, Address addr) {
-    if (!table.remove(addr)) return false;
-    hookRemoved(kind, addr);
-    return true;
+// Removes an address's handlers made from a key (or all of them), turning off its hook if none is left
+void removeHandlers(H)(ref H[][Address] table, HookKind kind, Address addr, const(void)*[2] key = [null, null]) {
+    auto handlers = addr in table;
+    if (!handlers) return;
+    auto left = key == [null, null] ? null : (*handlers).filter!(h => h.key != key).array;
+    if (left.length) {
+        *handlers = left;
+    } else {
+        table.remove(addr);
+        hookRemoved(kind, addr);
+    }
+    hooksVersion++;
 }
 
-void onExec(Address address, void delegate(Address) callback) {
-    assert(address % 4 == 0);
-    addHandler(executeHandlers, HookKind.EXECUTE, address, callback);
+// A method as the handlers the tables keep: Execute and ExecuteDone hooks take () or (Address pc), Read and Write hooks
+// (ref T value), optionally with (Address pc, Address address) after it
+ExecHandler execHandler(D)(D method) {
+    static if (Parameters!D.length == 0) auto run = (Address pc) { method(); };
+    else auto run = method;
+    return ExecHandler([method.ptr, method.funcptr], run);
 }
 
-void onExec(Address address, void delegate() callback) {
-    onExec(address, (Address) { callback(); });
-}
-
-bool clearExec(Address address) {
-    assert(address % 4 == 0);
-    return removeHandlers(executeHandlers, HookKind.EXECUTE, address);
-}
-
-void onExecOnce(Address address, void delegate(Address) callback) {
-    assert(address % 4 == 0);
-    addHandler(executeOnceHandlers, HookKind.EXECUTE, address, callback);
-}
-
-void onExecOnce(Address address, void delegate() callback) {
-    onExecOnce(address, (Address) { callback(); });
-}
-
-bool clearExecOnce(Address address) {
-    assert(address % 4 == 0);
-    return removeHandlers(executeOnceHandlers, HookKind.EXECUTE, address);
-}
-
-void onExecDone(Address address, void delegate(Address) callback) {
-    assert(address % 4 == 0);
-    addHandler(executeDoneHandlers, HookKind.EXECUTE, address, callback);
-}
-
-void onExecDone(Address address, void delegate() callback) {
-    onExecDone(address, (Address) { callback(); });
-}
-
-bool clearExecDone(Address address) {
-    assert(address % 4 == 0);
-    return removeHandlers(executeDoneHandlers, HookKind.EXECUTE, address);
-}
-
-void onExecDoneOnce(Address address, void delegate(Address) callback) {
-    assert(address % 4 == 0);
-    addHandler(executeDoneOnceHandlers, HookKind.EXECUTE, address, callback);
-}
-
-void onExecDoneOnce(Address address, void delegate() callback) {
-    onExecDoneOnce(address, (Address) { callback(); });
-}
-
-bool clearExecDoneOnce(Address address) {
-    assert(address % 4 == 0);
-    return removeHandlers(executeDoneOnceHandlers, HookKind.EXECUTE, address);
-}
-
-void onRead(T)(ref T r, void delegate() callback)               { onRead!T(r, (ref T v, Address p, Address a) { callback(); }); }
-void onRead(T)(ref T r, void delegate(ref T) callback)          { onRead!T(r, (ref T v, Address p, Address a) { callback(v); }); }
-void onRead(T)(ref T r, void delegate(ref T, Address) callback) { onRead!T(r, (ref T v, Address p, Address a) { callback(v, p); }); }
-void onRead(T)(ref T r, void delegate(ref T, Address, Address) callback) {
-    addHandler(handlers!(T.sizeof).read, HookKind.READ, r.addr,
-               (void* v, Address p, Address a) { callback(*cast(T*)v, p, a); });
-}
-
-void onWrite(T)(ref T r, void delegate() callback)               { onWrite!T(r, (ref T v, Address p, Address a) { callback(); }); }
-void onWrite(T)(ref T r, void delegate(ref T) callback)          { onWrite!T(r, (ref T v, Address p, Address a) { callback(v); }); }
-void onWrite(T)(ref T r, void delegate(ref T, Address) callback) { onWrite!T(r, (ref T v, Address p, Address a) { callback(v, p); }); }
-void onWrite(T)(ref T r, void delegate(ref T, Address, Address) callback) {
-    addHandler(handlers!(T.sizeof).write, HookKind.WRITE, r.addr,
-               (void* v, Address p, Address a) { callback(*cast(T*)v, p, a); });
-}
-
-void jal(Address addr)                                                                   { jal(addr,  0,  0,  0,  0, (res) { }); }
-void jal(Address addr,                                     void delegate()     callback) { jal(addr,  0,  0,  0,  0, (res) { callback(); }); }
-void jal(Address addr,                                     void delegate(uint) callback) { jal(addr,  0,  0,  0,  0, callback); }
-void jal(Address addr, uint a0)                                                          { jal(addr, a0,  0,  0,  0, (res) { }); }
-void jal(Address addr, uint a0,                            void delegate()     callback) { jal(addr, a0,  0,  0,  0, (res) { callback(); }); }
-void jal(Address addr, uint a0,                            void delegate(uint) callback) { jal(addr, a0,  0,  0,  0, callback); }
-void jal(Address addr, uint a0, uint a1)                                                 { jal(addr, a0, a1,  0,  0, (res) { }); }
-void jal(Address addr, uint a0, uint a1,                   void delegate()     callback) { jal(addr, a0, a1,  0,  0, (res) { callback(); }); }
-void jal(Address addr, uint a0, uint a1,                   void delegate(uint) callback) { jal(addr, a0, a1,  0,  0, callback); }
-void jal(Address addr, uint a0, uint a1, uint a2)                                        { jal(addr, a0, a1, a2,  0, (res) { }); }
-void jal(Address addr, uint a0, uint a1, uint a2,          void delegate()     callback) { jal(addr, a0, a1, a2,  0, (res) { callback(); }); }
-void jal(Address addr, uint a0, uint a1, uint a2,          void delegate(uint) callback) { jal(addr, a0, a1, a2,  0, callback); }
-void jal(Address addr, uint a0, uint a1, uint a2, uint a3)                               { jal(addr, a0, a1, a2, a3, (res) { }); }
-void jal(Address addr, uint a0, uint a1, uint a2, uint a3, void delegate()     callback) { jal(addr, a0, a1, a2, a3, (res) { callback(); }); }
-void jal(Address addr, uint a0, uint a1, uint a2, uint a3, void delegate(uint) callback) {
-    GPR g = *gpr;
-    FPR f = *fpr;
-    gpr.ra = pc();
-    gpr.a0 = a0;
-    gpr.a1 = a1;
-    gpr.a2 = a2;
-    gpr.a3 = a3;
-    jump(addr);
-    gpr.ra.onExecOnce({
-        uint v0 = gpr.v0;
-        *gpr = g;
-        *fpr = f;
-        if (callback) {
-            callback(v0);
-        }
+MemHandler memHandler(T, D)(D method) {
+    enum n = Parameters!D.length;
+    return MemHandler([method.ptr, method.funcptr], (void* v, Address pc, Address address) {
+        static if (n == 1) method(*cast(T*)v);
+        else static if (n == 2) method(*cast(T*)v, pc);
+        else method(*cast(T*)v, pc, address);
     });
 }
 
-// Tells the emulator that the code at the address changed: its cached interpreter (and dynarec) would keep running the
-// instructions it already decoded otherwise. The game's own writes do that by themselves, the plugin's don't. Does
-// nothing in an emulator without ExecutionInvalidateCode (it doesn't cache code, or the change isn't seen).
-void invalidateCode(Address address, uint size = 4) {
-    if (invalidateCodeFunction) invalidateCodeFunction(address, size);
-}
-
-// Changes an instruction (or any word the CPU runs or decodes as code)
-void setCode(Address address, Instruction instruction) {
-    if (address.val!Instruction == instruction) return;
-    address.val!Instruction = instruction;
-    invalidateCode(address);
-}
-
-Address[] searchMemory(immutable uint[] data) {
-    auto mem = (cast(uint*)memory.ptr)[0..memory.length / uint.sizeof];
-    ptrdiff_t[] result;
-    ptrdiff_t start = 0;
-    ptrdiff_t index;
-    while (start < mem.length && (index = mem[start..$].countUntil(data)) != -1) {
-        result ~= start + index;
-        start += index + 1;
-    }
-    return result.map!(e => cast(Address)(0x80000000 + e * uint.sizeof)).array;
-}
-
-void info(T...)(T args) {
-    msg(MsgLevel.INFO, args);
-    version (Windows) { } else {
-        stdout.writeln(args);
+void runHandlers(H, Args...)(H[] handlers, Args args) {
+    foreach (h; handlers) {
+        try { h.run(args); }
+        catch (Exception e) { error(e); }
     }
 }
 
-void warning(T...)(T args) {
-    msg(MsgLevel.WARNING, args);
-    version (Windows) { } else {
-        stderr.writeln(args);
+// --- Hooks that wait for the game ---
+
+// Execute and ExecuteDone hooks run on fibers (kept and used again), so a hook can wait for the game partway through,
+// briefly: for a game function it calls (callGame()), or for the game to get somewhere (waitExec()). It goes on from
+// there when the game gets there. Where it was is on the fiber's stack (the return address, its local variables) and in
+// the fiber's saved stack pointer, so rollback saves a waiting hook by copying the used part of its stack and the
+// fiber's few fields (see saveFibers()). Its local variables should be values (numbers, structs of them) or immutable:
+// what a reference points to isn't saved. A save state can't hold it, so a save waits until no hook waits.
+final class HookFiber : Fiber {
+    uint index;
+    ExecHandler handler; // What it runs, and for which address
+    Address pc;
+    uint result;         // The game call's it waits for (see callGame())
+    Address waitingFor;  // (for the warning in Frame)
+    ulong since;         // The frame it started waiting in
+
+    this(uint index) { super(&run, 64 * 1024); this.index = index; }
+
+    void run() {
+        if (!handler.run) return;
+        try { handler.run(pc); }
+        catch (Exception e) { error(e); }
     }
 }
 
-void error(T...)(T args) {
-    msg(MsgLevel.ERROR, args);
-    version (Windows) { } else {
-        stderr.writeln(args);
+// Runs a hook's handler on a fiber that isn't waiting
+void runHook(ExecHandler handler, Address pc) {
+    uint index = 0;
+    while (index < hookFibers.length && hookFibers[index].state != Fiber.State.TERM) index++;
+    if (index == hookFibers.length) hookFibers ~= new HookFiber(index);
+    auto fiber = hookFibers[index];
+    if (fiber.state == Fiber.State.TERM) fiber.reset();
+    fiber.handler = handler;
+    fiber.pc = pc;
+    resumeFiber(fiber);
+    if (fiber.state == Fiber.State.TERM) fiber.handler = ExecHandler.init;
+}
+
+void runHooks(ExecHandler[] handlers, Address pc) {
+    foreach (h; handlers) runHook(h, pc);
+}
+
+void resumeFiber(HookFiber fiber) {
+    try { fiber.call(); }
+    catch (Throwable t) { error("A hook failed: ", t); }
+}
+
+// Ends a waiting hook (what it waited for won't come)
+void endFiber(HookFiber fiber) {
+    if (fiber.state == Fiber.State.TERM) return;
+    fiber.handler = ExecHandler.init;
+    fiber.reset();
+    fiber.call();
+}
+
+HookFiber currentFiber(string what) {
+    auto fiber = cast(HookFiber)Fiber.getThis();
+    if (!fiber) throw new Exception(what ~ " is only for Execute and ExecuteDone hooks");
+    return fiber;
+}
+
+// --- Calling the game ---
+//
+// A hook calls a game function and waits for it on its fiber (callGame()), which is quick: the function returns in
+// microseconds, and a save state waits until no hook waits (see StateSaving). A call that waits for the game itself
+// (for frames, input, a message to load) is started with startCall() instead, and what comes after it is a method
+// that runs when it returns (then!m in game.d), kept as data: a save state made in the middle has it, and loading it
+// carries on from there. afterReturn!m does the same for a function the game called (a hook at its start).
+// A hook that waits for longer than a frame is logged (see warnLongWaits()): it puts save states off.
+
+// Calls a game function from a hook and returns its result (v0), with the registers put back as they were. For
+// functions that return at once; one that waits for the game needs startCall(). The game can run one call at a time
+// from a run of the hooks: a hook that calls while another call from the same run hasn't returned waits for it first.
+uint callGame(Args...)(Address function_, Args args) {
+    auto fiber = currentFiber("callGame()");
+    waitTurn(fiber);
+    auto call = setUpCall(function_, args);
+    call.fiber = cast(int)fiber.index;
+    addCall(call);
+    jump(function_);
+    fiber.waitingFor = function_;
+    fiber.since = frame;
+    Fiber.yield();
+    return fiber.result;
+}
+
+// Starts a call of a game function that waits for the game: the hook goes on (and should end), and the game runs the
+// function. What comes after it is its .then!m (see game.d), which runs when it returns.
+ref GameCall startCall(Args...)(Address function_, Args args) {
+    waitTurn(currentFiber("startCall()"));
+    addCall(setUpCall(function_, args));
+    jump(function_);
+    return hooks.calls[$ - 1];
+}
+
+// Runs `next` when the function the game is in returns (from a hook at its first instruction: to gpr.ra, with the
+// stack pointer and the registers a function keeps as they are now). See afterReturn!m in game.d.
+void waitForReturn(Then next) {
+    addCall(GameCall(gpr.ra, gpr.sp, *gpr, *fpr, 0, false, next));
+}
+
+// (one call at a time from a run of the hooks: see callGame())
+void waitTurn(HookFiber fiber) {
+    while (true) {
+        auto running = hooks.calls.find!(c => c.run == hookRun && c.function_);
+        if (running.empty) return;
+        running.front.queued ~= Resume(cast(int)fiber.index);
+        hooksVersion++;
+        fiber.waitingFor = running.front.function_;
+        fiber.since = frame;
+        Fiber.yield();
     }
 }
 
-void msg(T...)(MsgLevel level, T args) {
-    if (!debugCallback) return;
-
-    string message;
-    foreach (arg; args) {
-        message ~= arg.to!string;
+// A call's return address and arguments: the first 4 in a0..a3, the others on the stack, after the 16 bytes the
+// function may keep a0..a3 in (as the game's own calls pass them). The registers to put back are the ones before.
+GameCall setUpCall(Args...)(Address function_, Args args) {
+    static assert(Args.length <= 8, "A game call takes up to 8 arguments");
+    GPR g = *gpr;
+    FPR f = *fpr;
+    Address returnTo = pc();
+    static if (Args.length > 4) gpr.sp -= (16 + 4 * (Args.length - 4) + 7) & ~7;
+    gpr.ra = returnTo;
+    static foreach (i; 0 .. Args.length) {
+        static if (i < 4) gpr.r[4 + i] = cast(uint)args[i];
+        else (gpr.sp + cast(uint)(16 + 4 * (i - 4))).val!uint = cast(uint)args[i];
     }
+    return GameCall(returnTo, gpr.sp, g, f, function_, returnTo == executing);
+}
 
-    debugCallback(debugContext.toStringz, level, message.toStringz);
+void addCall(GameCall call) {
+    call.run = hookRun;
+    hooks.calls ~= call;
+    hookAdded(HookKind.EXECUTE, call.at);
+    if (plugin) plugin.onCallsChanged();
+}
+
+// What runs when a call returns, kept as data a save state can hold: a method, by its class's name and its own (see
+// then!m in game.d), and its arguments' bytes
+struct Then {
+    string method;
+    immutable(ubyte)[] args;
+    bool opCast(T : bool)() const { return method.length > 0; }
+}
+
+__gshared void function(const ref Then, uint result) runThen; // (set by game.d)
+
+// A hook, or a Then, that goes on when a call returns
+struct Resume {
+    int fiber = -1;
+    Then next;
+    uint result;
+}
+
+// A call in progress: one the plugin made (function_), or a function the game called that a hook waits for (0). When
+// it returns to `at` (the stack pointer back at `sp`, and the registers a function keeps as they were), the plugin's
+// call gets its registers put back, and what waits for it goes on: its hook (fiber, see callGame()) or its Then, then
+// the ones queued behind it. The state block keeps these (see FrameworkState in game.d), and a save state waits while a
+// hook waits on its fiber, so loading one carries on from where it was.
+struct GameCall {
+    Address at;
+    uint sp;
+    GPR gpr;
+    FPR fpr;
+    Address function_;
+    bool revisit;     // It started in at's Execute hooks: the game was at `at` already, so they don't run again
+    Then next;        // What runs when it returns (see startCall() and afterReturn!m)
+    int fiber = -1;
+    ulong run;        // The run of the hooks it started in (see hookRun)
+    Resume[] queued;
+
+    // Whether the game is back from it: at `at`, with the registers a function keeps (gp, sp, s0-s7, fp) as they were
+    bool returned(Address pc) const {
+        static immutable kept = [16, 17, 18, 19, 20, 21, 22, 23, 28, 30];
+        if (pc != at || .gpr.sp != sp) return false;
+        foreach (r; kept) if (.gpr.r[r].v != gpr.r[r].v) return false;
+        return true;
+    }
+}
+
+// The calls that returned here (see GameCall): taken, and the plugin's call gets its registers put back. Returns what
+// goes on now, and whether one of them started in this address's hooks.
+Resume[] returnFromCalls(Address pc, out bool revisit) {
+    Resume[] resumes;
+    foreach_reverse (i, c; hooks.calls) {
+        if (!c.returned(pc)) continue;
+        hooks.calls = hooks.calls.remove(i);
+        hookRemoved(HookKind.EXECUTE, c.at);
+        uint result = gpr.v0;
+        if (c.function_) {
+            *gpr = c.gpr;
+            *fpr = c.fpr;
+        }
+        revisit |= c.revisit;
+        resumes = Resume(c.fiber, c.next, result) ~ c.queued ~ resumes;
+    }
+    if (resumes.length && plugin) plugin.onCallsChanged();
+    return resumes;
+}
+
+// Goes on with what waited for calls that returned, one at a time until one calls the game again (the rest wait for
+// that call)
+void resume(Resume[] resumes) {
+    foreach (i, r; resumes) {
+        if (r.fiber >= 0) {
+            hookFibers[r.fiber].result = r.result;
+            resumeFiber(hookFibers[r.fiber]);
+        } else if (r.next) {
+            auto next = r.next;
+            auto result = r.result;
+            runHook(ExecHandler([null, null], (Address pc) { runThen(next, result); }), pc());
+        }
+        auto running = hooks.calls.find!(c => c.run == hookRun && c.function_);
+        if (!running.empty) {
+            running.front.queued ~= resumes[i + 1 .. $];
+            hooksVersion++;
+            return;
+        }
+    }
+}
+
+// The calls a save state had in progress (see GameCall)
+void restoreCalls(const GameCall[] calls) {
+    foreach (c; calls) {
+        auto call = GameCall(c.at, c.sp, c.gpr, c.fpr, c.function_, c.revisit, c.next);
+        foreach (r; c.queued) if (r.next) call.queued ~= Resume(-1, r.next, r.result);
+        hooks.calls ~= call;
+        hookAdded(HookKind.EXECUTE, c.at);
+    }
+}
+
+// --- Waiting for the game ---
+
+// Where a hook waits for the game to get (see waitExec()), and which hook (its fiber)
+struct HookReturn {
+    Address at;
+    uint fiber;
+    ulong serial; // (see Hooks.serial)
+}
+
+// Waits in a hook until the game runs the instruction at an address (like a function returning to gpr.ra). For a
+// wait that's over at once; one that lasts frames needs afterReturn (a save state waits while a hook waits).
+void waitExec(Address address) {
+    auto fiber = currentFiber("waitExec()");
+    hooks.returns ~= HookReturn(address, fiber.index, hooks.serial++);
+    hookAdded(HookKind.EXECUTE, address);
+    fiber.waitingFor = address;
+    fiber.since = frame;
+    Fiber.yield();
+}
+
+// The hooks that started waiting at the address before a serial number (see Hooks.serial)
+void resumeHooksAt(Address pc, ulong before) {
+    HookFiber[] ready;
+    foreach_reverse (i, r; hooks.returns) {
+        if (r.at != pc || r.serial >= before) continue;
+        ready = hookFibers[r.fiber] ~ ready;
+        hooks.returns = hooks.returns.remove(i);
+        hookRemoved(HookKind.EXECUTE, r.at);
+    }
+    foreach (fiber; ready) resumeFiber(fiber);
+}
+
+// Whether a hook waits on its fiber (which a save state can't hold)
+bool hookWaiting() {
+    return hookFibers.any!(f => f.state == Fiber.State.HOLD);
+}
+
+// A hook that has waited for more than a frame puts save states off: what it waits for needs startCall() or
+// afterReturn!m. Logged once for each function or address it waits for.
+void warnLongWaits() {
+    foreach (f; hookFibers) {
+        if (f.state != Fiber.State.HOLD || f.since + 2 > frame || f.waitingFor in warnedWaits) continue;
+        warnedWaits[f.waitingFor] = true;
+        warning(format!"A hook has waited %d frames for %08X, which puts save states off: it needs startCall() or %s"(
+            frame - f.since, f.waitingFor, "afterReturn!m"));
+    }
+}
+
+// Ends every waiting hook and call (a save state was loaded: what they waited for won't come)
+void cancelWaits() {
+    foreach (r; hooks.returns) hookRemoved(HookKind.EXECUTE, r.at);
+    foreach (c; hooks.calls) hookRemoved(HookKind.EXECUTE, c.at);
+    hooks.returns = null;
+    hooks.calls = null;
+    foreach (fiber; hookFibers) endFiber(fiber);
+    hooksVersion++;
+}
+
+// A hook's fiber as it was: its own fields, its saved stack pointer and the used part of its stack
+struct FiberState {
+    void[] fields;
+    void* tstack;
+    void* ehContext;
+    void[] stack;
+}
+
+// A fiber's fields are in Fiber's base class, which druntime doesn't make public: found by name
+alias FiberBase = BaseClassesTuple!Fiber[0];
+
+ref auto fiberField(string name)(Fiber f) {
+    auto b = cast(FiberBase)f;
+    static foreach (i; 0 .. FiberBase.tupleof.length) {
+        static if (__traits(identifier, FiberBase.tupleof[i]) == name) return b.tupleof[i];
+    }
+}
+
+FiberState[] saveFibers() {
+    FiberState[] saved;
+    foreach (f; hookFibers) {
+        FiberState s;
+        auto ctxt = fiberField!"m_ctxt"(f);
+        // (the fields that change while it runs: the stack and its context stay where they are)
+        s.fields = (cast(void*)f)[0 .. __traits(classInstanceSize, FiberBase)].dup;
+        s.tstack = ctxt.tstack;
+        s.ehContext = ctxt.ehContext;
+        if (f.state == Fiber.State.HOLD) s.stack = ctxt.tstack[0 .. ctxt.bstack - ctxt.tstack].dup;
+        saved ~= s;
+    }
+    return saved;
+}
+
+// The hooks' fibers as they were; ones made since are free
+void restoreFibers(FiberState[] saved) {
+    foreach (i, f; hookFibers) {
+        if (i >= saved.length) {
+            endFiber(f);
+            continue;
+        }
+        auto s = &saved[i];
+        auto ctxt = fiberField!"m_ctxt"(f);
+        enum header = 2 * size_t.sizeof; // (the object's vtable and monitor)
+        (cast(void*)f)[header .. s.fields.length] = s.fields[header .. $];
+        ctxt.tstack = s.tstack;
+        ctxt.ehContext = s.ehContext;
+        if (s.stack.length) ctxt.tstack[0 .. s.stack.length] = s.stack[];
+    }
+}
+
+// For tests: the time spent in each hooked address's hooks (ExecuteDone's address + 1, a memory hook's + 2, + 3 for a
+// write), and how often they ran
+version (TestDriver) {
+    import core.time : MonoTime;
+    __gshared long[Address] profileTicks;
+    __gshared ulong[Address] profileRuns;
+    __gshared uint profileDepth;
+
+    struct Profiled {
+        Address at;
+        MonoTime start;
+        this(Address at) { this.at = at; start = MonoTime.currTime; profileDepth++; }
+        ~this() {
+            if (--profileDepth) return; // (the outermost hook's time has the nested ones')
+            profileTicks[at] += (MonoTime.currTime - start).total!"hnsecs";
+            profileRuns[at]++;
+        }
+    }
+}
+
+// --- Netplay ---
+
+// A netplay session's role (see NetplayStart)
+enum NetplayRole { none, host, guest }
+
+// Something that reaches outside the game (sending to a server, saving a state, logging). Outside netplay it's done
+// now. During netplay it waits until the frame it comes from is final: a frame that isn't can be run again with
+// different input after a rollback, which would do something else (the plugin forgets what the frames it goes back
+// from planned, see NetplayLoadState). A final frame can be run again too, when a rollback goes back to a frame saved
+// before it, but with the same input it does the same: what it planned was done the first time, so it's skipped.
+void afterFinal(void delegate() effect) {
+    if (netplayRole == NetplayRole.none) return effect();
+    if (netplayFrame < effectsDoneBefore) return;
+    synchronized (effectsLock) pendingEffects ~= PendingEffect(netplayFrame, effect);
+}
+
+struct PendingEffect {
+    ulong frame;
+    void delegate() effect;
+}
+
+// Does what the frames that are final now planned to do
+void runFinalEffects() {
+    PendingEffect[] ready;
+    synchronized (effectsLock) {
+        auto n = pendingEffects.countUntil!(e => e.frame >= netplayFinal);
+        if (n < 0) n = pendingEffects.length;
+        effectsDoneBefore = max(effectsDoneBefore, netplayFinal);
+        ready = pendingEffects[0 .. n].dup;
+        pendingEffects = pendingEffects[n .. $].dup;
+    }
+    foreach (ref e; ready) {
+        try { e.effect(); } catch (Exception) { }
+    }
+}
+
+// Forgets what the frame and the ones after it planned to do (they're run again)
+void dropEffectsFrom(ulong frame) {
+    synchronized (effectsLock) pendingEffects = pendingEffects.filter!(e => e.frame < frame).array;
+}
+
+// What the server sends reaches the game in one place, Plugin.onMessage(). Outside netplay that's at the frame it
+// arrives. During netplay the speaker passes it to the core, which hands it to every machine's plugin at the same frame
+// (NetplayMessage), so every game applies it at the same point.
+void passOnServerMessage(string text) {
+    if (netplayRole == NetplayRole.none) return applyServerMessage(text);
+    if (!netplaySendFunction || !netplaySendFunction(text.ptr, cast(uint)text.length)) {
+        warning("Netplay: couldn't pass a message from the server on to the other players");
+    }
+}
+
+void applyServerMessage(string text) {
+    if (!plugin) return;
+    info("The server's message at frame ", netplayRole != NetplayRole.none ? netplayFrame : frame, ": ",
+         text.length > 60 ? text[0..60] ~ "..." : text);
+    try { plugin.onMessage(text); }
+    catch (Exception e) { error(e); }
+}
+
+// A frame saved for rollback (see NetplaySaveState)
+final class RollbackSave {
+    Hooks* hooks;              // (the same copy for saves that didn't change them)
+    FiberState[] fibers;       // The waiting hooks
+    Object game;               // The game's state (see Plugin.saveRollback)
+}
+
+// --- The game ---
+
+// What the exports call (Game in game.d)
+interface Plugin {
+    void onStart();
+    void onInput(int port, InputData* data);
+    void onFrame();
+    void onMessage(string text);     // From the server (see passOnServerMessage)
+    void onStateLoaded();            // A save state was loaded
+    void onStateSaving();            // A save state is about to be made
+    void onCallsChanged();           // A game call started or returned (see callGame())
+    void onReset(bool hard);
+    void onSpeakerChanged(bool speaker);
+    void onFinish();
+    string netplayExport();          // The settings, for the other players in a netplay session (see NetplayStart)
+    Object saveRollback();           // Rollback: the game's state now, and back to it
+    void loadRollback(Object saved);
+    ulong stateHash();               // For the emulator's rollback self-test
 }
 
 struct ExecutionInfo {
@@ -1257,19 +790,11 @@ struct ExecutionInfo {
     void function(int) setSaveStateSlot;
 }
 
-// A netplay session's role (see NetplayStart)
-enum NetplayRole { none, host, guest }
-
 __gshared {
-    NetplayRole netplayRole;
-    JSONValue netplayImport;   // The host's settings and State, on a guest
-    string netplayExported;    // What NetplayExport handed out last (it has to stay valid)
-    const(char)* name;
-    Xoshiro256pp random;
+    // The emulator
     void* window;
-    Plugin plugin;
-    extern (C) void function(uint, int, int) setHook; // The emulator's set_hook
-    uint[uint][3] hookedWords; // By HookKind (see hookAdded())
+    extern (C) void function(uint, int, int) setHook;           // Turns a hook on or off (see Hooks.hooked)
+    extern (C) void function(uint, uint) invalidateCodeFunction; // The core's ExecutionInvalidateCode, if it has one
     uint function() pc;
     void function(uint) jump;
     GPR* gpr;
@@ -1277,19 +802,55 @@ __gshared {
     ubyte[] memory;
     void function() saveGameState;
     void function(int) setSaveStateSlot;
+
+    // The game
+    Plugin plugin;
+    Plugin function(string, string) pluginFactory; // (set with usePlugin() in game.d)
+    const(char)* name;
+    Hooks hooks;
+    ulong hooksVersion; // Changes with the hooks (see Hooks)
+    ulong hookRun;      // Counts the runs of the hooks at an address (Execute, ExecuteDone, and Frame)
+    Address executing;  // The address whose Execute hooks run, or 0
+    bool[Address] warnedWaits; // (see warnLongWaits())
+    HookFiber[] hookFibers; // (kept, and used again)
+    // State that isn't a game object's (the game saves it with its own: see Game.stateParts in game.d)
+    Xoshiro256pp random;
     ulong frame;
     InputData[4] input;
-    Plugin function(string, string) pluginFactory;
-    Task wsSender;
-    void delegate(Address)[][Address] executeHandlers;
-    void delegate(Address)[][Address] executeOnceHandlers;
-    void delegate(Address)[][Address] executeDoneHandlers;
-    void delegate(Address)[][Address] executeDoneOnceHandlers;
-    extern (C) void function(uint, uint) invalidateCodeFunction; // The core's ExecutionInvalidateCode, if it has one
-    template handlers(int S) {
-        void delegate(void*, Address, Address)[][Address] read;
-        void delegate(void*, Address, Address)[][Address] write;
-    }
+
+    // Netplay (see NetplayStart and NetplayFrame): the role, the frame being emulated, the first one that isn't final,
+    // whether this machine talks to the server for everyone, and who plays on each port
+    NetplayRole netplayRole;
+    ulong netplayFrame;
+    ulong netplayFinal;
+    bool netplaySpeaker;
+    string[4] netplayNames;
+    JSONValue netplayImport;   // The host's settings, on a guest
+    string netplayExported;    // What NetplayExport handed out last (it has to stay valid)
+    extern (C) int function(const(void)*, uint) netplaySendFunction; // The core's ExecutionNetplaySendMessage
+    // what frames that aren't final yet will do outside the game (see afterFinal()), oldest first, and the frames
+    // whose effects were done (they're final)
+    PendingEffect[] pendingEffects;
+    ulong effectsDoneBefore;
+    Mutex effectsLock;
+    // Rollback: the saved frames, and the last copy of the hooks (and their version then)
+    RollbackSave[uint] rollbackSaves;
+    Hooks* savedHooks;
+    ulong savedHooksVersion;
+}
+
+shared static this() {
+    effectsLock = new Mutex;
+}
+
+void resetNetplay(NetplayRole role) {
+    netplayRole = role;
+    netplayImport = JSONValue.init;
+    netplayExported = null;
+    netplayFrame = 0;
+    netplayFinal = 0;
+    effectsDoneBefore = 0;
+    netplaySpeaker = false;
 }
 
 extern (C) {
@@ -1298,20 +859,22 @@ extern (C) {
     void function(const char*, int, const char*) debugCallback;
 
     string getName();
-
     int startup();
-    
+
     export int PluginStartup(void* handle, const char* context, void function(const char*, int, const char*) callback) {
         coreHandle = handle;
         debugContext = context ? fromStringz(context) : "[EXEC]  ";
         debugCallback = callback;
 
-        version (Windows) {
-            invalidateCodeFunction = cast(typeof(invalidateCodeFunction))GetProcAddress(cast(HMODULE)handle, "ExecutionInvalidateCode");
-        } else {
-            import core.sys.posix.dlfcn : dlsym;
-            invalidateCodeFunction = cast(typeof(invalidateCodeFunction))dlsym(handle, "ExecutionInvalidateCode");
+        T core(T)(string name) {
+            version (Windows) return cast(T)GetProcAddress(cast(HMODULE)handle, name.toStringz);
+            else {
+                import core.sys.posix.dlfcn : dlsym;
+                return cast(T)dlsym(handle, name.toStringz);
+            }
         }
+        invalidateCodeFunction = core!(typeof(invalidateCodeFunction))("ExecutionInvalidateCode");
+        netplaySendFunction = core!(typeof(netplaySendFunction))("ExecutionNetplaySendMessage");
 
         return startup();
     }
@@ -1327,40 +890,35 @@ extern (C) {
             *pluginNamePtr = name;
         }
         if (pluginCapabilities) *pluginCapabilities = 0;
-
         return 0;
     }
 
-    export void RomOpen() {
-        
-    }
+    export void RomOpen() { }
 
     export void RomClosed() {
-        try {
-            if (plugin) {
-                plugin.onFinish();
-                plugin = null;
-            }
-        } catch (Exception e) {
-            error(e);
+        if (plugin) {
+            try { plugin.onFinish(); }
+            catch (Exception e) { error(e); }
+            plugin = null;
         }
 
-        netplayRole = NetplayRole.none;
-        netplayImport = JSONValue.init;
-        netplayExported = null;
+        // what final frames planned is done; the rest never happened
+        runFinalEffects();
+        synchronized (effectsLock) pendingEffects = null;
+        rollbackSaves = null;
+        savedHooks = null;
+        resetNetplay(NetplayRole.none);
+        netplayNames = netplayNames.init;
     }
 
-    // Peer-to-peer netplay: every player needs the same settings and State, or their games drift apart. The emulator
-    // calls NetplayStart before InitiateExecution. The host's plugin then starts as usual and NetplayExport hands its
-    // settings and State over; each guest's plugin gets them with NetplayImport, before its InitiateExecution, and uses
-    // them instead of its own files. Until RomClosed, the plugin does nothing that differs between players (like
-    // talking to a bingo server), and only the host writes the State backup.
+    // Peer-to-peer netplay: every player needs the same settings, or their games drift apart. The emulator calls
+    // NetplayStart before InitiateExecution. The host's plugin then starts as usual and NetplayExport hands its settings
+    // over; each guest's plugin gets them with NetplayImport, before its InitiateExecution, and uses them instead of its
+    // own file. Until RomClosed, only the speaker talks to the bingo server (see NetplayFrame).
     export void NetplayStart(int isHost) {
-        netplayRole = isHost ? NetplayRole.host : NetplayRole.guest;
-        netplayImport = JSONValue.init;
-        netplayExported = null;
-        info(isHost ? "Netplay: hosting, sharing the settings and State with the other players"
-                    : "Netplay: playing with the host's settings and State");
+        resetNetplay(isHost ? NetplayRole.host : NetplayRole.guest);
+        info(isHost ? "Netplay: hosting, sharing the settings with the other players"
+                    : "Netplay: playing with the host's settings");
     }
 
     export int NetplayExport(const(void)** data, uint* size) {
@@ -1387,10 +945,117 @@ extern (C) {
         }
     }
 
+    // Who plays on each port (the same on every machine), right after NetplayStart
+    export void NetplayPlayers(const(char*)* names) {
+        foreach (i; 0..4) netplayNames[i] = names && names[i] ? names[i].fromStringz.idup : "";
+    }
+
+    // The start of a frame during netplay: frames before `final_` are final, so what they planned to do outside the
+    // game is done now (see afterFinal()). Whether this machine is the speaker can change.
+    export void NetplayFrame(uint f, uint final_, int flags) {
+        enum SPEAKER = 2;
+        netplayFrame = f;
+        netplayFinal = final_;
+        bool speaker = (flags & SPEAKER) != 0;
+        if (speaker != netplaySpeaker) {
+            netplaySpeaker = speaker;
+            if (plugin) {
+                try { plugin.onSpeakerChanged(speaker); }
+                catch (Exception e) { error(e); }
+            }
+        }
+        runFinalEffects();
+    }
+
+    // A message from the speaker's plugin (what the server sent), at the same point of the game on every machine
+    export void NetplayMessage(const(void)* data, uint size) {
+        applyServerMessage((cast(const(char)*)data)[0..size].idup);
+    }
+
+    // Rollback: the core saves the plugin's state with each frame it saves. The plugin keeps the saves itself (they
+    // hold references to its objects), so the core's buffer for it is empty.
+    export uint NetplayStateSize() {
+        return 0;
+    }
+
+    export void NetplaySaveState(uint f, void* data) {
+        try {
+            auto save = new RollbackSave;
+            if (!savedHooks || savedHooksVersion != hooksVersion) {
+                savedHooks = new Hooks;
+                *savedHooks = hooks.dup;
+                savedHooksVersion = hooksVersion;
+            }
+            save.hooks = savedHooks;
+            save.fibers = saveFibers();
+            if (plugin) save.game = plugin.saveRollback();
+            rollbackSaves[f] = save;
+        } catch (Exception e) {
+            error(e);
+        }
+    }
+
+    export void NetplayLoadState(uint f, const(void)* data) {
+        auto save = rollbackSaves.get(f, null);
+        if (!save) return error("Netplay: the plugin has no saved state for frame ", f);
+
+        // the hooks as they were, and the emulator's with them
+        auto before = hooks.hooked;
+        hooks = save.hooks.dup;
+        foreach (k; 0..3) {
+            foreach (word; before[k].byKey) if (word !in hooks.hooked[k]) setHook(0x80000000 | (word << 2), k, 0);
+            foreach (word; hooks.hooked[k].byKey) if (word !in before[k]) setHook(0x80000000 | (word << 2), k, 1);
+        }
+        hooksVersion++;
+        savedHooks = save.hooks;
+        savedHooksVersion = hooksVersion;
+
+        restoreFibers(save.fibers);
+        if (plugin) {
+            try { plugin.loadRollback(save.game); }
+            catch (Exception e) { error(e); }
+        }
+
+        // the frames after it are gone, with what they planned to do outside the game
+        foreach (k; rollbackSaves.keys) if (k > f) rollbackSaves.remove(k);
+        dropEffectsFrom(f);
+        netplayFrame = f;
+    }
+
+    export void NetplayDropState(uint f) {
+        rollbackSaves.remove(f);
+    }
+
+    // For the emulator's rollback self-test: a hash of the plugin's state, which must be the same at the end of a frame
+    // run again as at the end of its first run
+    export ulong NetplayStateHash() {
+        try {
+            ulong h = plugin ? plugin.stateHash() : 0;
+            void mix(ulong v) { h = (h ^ v) * 0x100000001B3; }
+            foreach (r; hooks.returns) { mix(r.at); mix(r.fiber); }
+            foreach (c; hooks.calls) {
+                mix(c.at);
+                mix(c.sp);
+                mix(c.function_);
+                mix(c.revisit);
+                mix(c.fiber);
+                mix(hashOf(c.next.method));
+                mix(c.queued.length);
+            }
+            foreach (k; 0..3) foreach (word; hooks.hooked[k].keys.sort) { mix(word); mix(hooks.hooked[k][word]); }
+            // (not the hooks' stacks: their unused slots hold whatever was there before, so they can differ when a frame
+            // is run again; what a hook does shows in the game's state and memory)
+            foreach (fiber; hookFibers) mix(fiber.state);
+            return h;
+        } catch (Exception e) {
+            error(e);
+            return 0;
+        }
+    }
+
     export void InitiateExecution(ExecutionInfo ei) {
         try {
             info("Initializing...");
-            random.seed(0);
             window = ei.window;
             setHook = ei.setHook;
             pc = ei.pc;
@@ -1400,32 +1065,21 @@ extern (C) {
             memory = ei.memory[0..ei.memorySize];
             saveGameState = ei.saveGameState;
             setSaveStateSlot = ei.setSaveStateSlot;
+
+            random.seed(0);
             frame = 0;
-            input.each!((ref b) { b.value = 0; });
-            executeHandlers.clear();
-            executeOnceHandlers.clear();
-            executeDoneHandlers.clear();
-            executeDoneOnceHandlers.clear();
-            handlers!1.read.clear();
-            handlers!2.read.clear();
-            handlers!4.read.clear();
-            handlers!8.read.clear();
-            handlers!1.write.clear();
-            handlers!2.write.clear();
-            handlers!4.write.clear();
-            handlers!8.write.clear();
-            foreach (ref words; hookedWords) words.clear(); // The emulator turned the hooks off
+            input = input.init;
+            hooks = Hooks.init; // (the emulator turned its hooks off)
+            hooksVersion++;
+            foreach (fiber; hookFibers) endFiber(fiber);
+            rollbackSaves = null;
+            savedHooks = null;
 
+            plugin = null;
             if (pluginFactory) {
-                string romName = ei.romName.to!string().strip();
-                string romHash = ei.romHash.to!string().strip();
-
-                plugin = pluginFactory(romName, romHash);
-
+                plugin = pluginFactory(ei.romName.to!string.strip, ei.romHash.to!string.strip);
                 try { plugin.onStart(); }
                 catch (Exception e) { error(e); }
-            } else {
-                plugin = null;
             }
         } catch (Exception e) {
             error(e);
@@ -1446,77 +1100,59 @@ extern (C) {
     }
 
     export void Frame(uint f) {
-        if (plugin) {
-            try {
-                synchronized (plugin) {
-                    if (wsSender) {
-                        receiveTimeout(Duration.zero, (string msg) {
-                            try {
-                                plugin.onMessage(msg);
-                            }
-                            catch (Exception e) { error(e); }
-                        });
-                    }
-                }
-                
-                plugin.onFrame(frame++);
-            }
-            catch (Exception e) { error(e); }
-        }
+        if (!plugin) return;
+        frame++;
+        hookRun++;
+        executing = 0;
+        warnLongWaits();
+        try { plugin.onFrame(); }
+        catch (Exception e) { error(e); }
     }
 
     export void Execute(Address pc) {
-        // This address's one-time handlers are taken first: ones the handlers below add are for the next time it runs
-        // (like jal()'s, which restores the registers when the call returns here)
-        auto once = executeOnceHandlers.get(pc, null);
-        if (once) removeHandlers(executeOnceHandlers, HookKind.EXECUTE, pc);
+        version (TestDriver) auto profiled = Profiled(pc);
+        hookRun++;
+        executing = pc;
+        scope (exit) executing = 0;
 
-        if (auto handlers = (pc in executeHandlers)) {
-            (*handlers).each!((h) {
-                try { h(pc); }
-                catch (Exception e) { error(e); }
-            });
+        // This address's one-time handlers are taken first: ones added meanwhile are for the next time it runs, as are
+        // waits that start meanwhile
+        auto once = hooks.execOnce.get(pc, null);
+        if (once) removeHandlers(hooks.execOnce, HookKind.EXECUTE, pc);
+        auto serial = hooks.serial;
+
+        // Calls that return here: the game goes on as it was. If a call started in this address's hooks, they ran then
+        // (the game was here already), and only what waits for the game to get here goes on now. What waits for the
+        // calls goes on last, as the game would after the call.
+        bool revisit;
+        auto resumes = hooks.calls.length ? returnFromCalls(pc, revisit) : null;
+        if (!revisit) {
+            if (auto handlers = pc in hooks.exec) runHooks(*handlers, pc);
         }
-
-        once.each!((h) {
-            try { h(pc); }
-            catch (Exception e) { error(e); }
-        });
+        runHooks(once, pc);
+        if (hooks.returns.length) resumeHooksAt(pc, serial);
+        resume(resumes);
     }
 
     export void ExecuteDone(Address pc) {
-        if (auto handlers = (pc in executeDoneHandlers)) {
-            (*handlers).each!((h) {
-                try { h(pc); }
-                catch (Exception e) { error(e); }
-            });
-        }
-        
-        if (auto once = executeDoneOnceHandlers.get(pc, null)) {
-            removeHandlers(executeDoneOnceHandlers, HookKind.EXECUTE, pc);
-            once.each!((h) {
-                try { h(pc); }
-                catch (Exception e) { error(e); }
-            });
-        }
+        version (TestDriver) auto profiled = Profiled(pc | 1);
+        hookRun++;
+        auto once = hooks.execDoneOnce.get(pc, null);
+        if (once) removeHandlers(hooks.execDoneOnce, HookKind.EXECUTE, pc);
+
+        if (auto handlers = pc in hooks.execDone) runHooks(*handlers, pc);
+        runHooks(once, pc);
     }
 
-    void ReadHandler(int S)(void* value, Address pc, Address addr) {
-        if (auto handlers = (addr in handlers!(S).read)) {
-            (*handlers).each!((h) {
-                try { h(value, pc, addr); }
-                catch (Exception e) { error(e); }
-            });
+    // Before a save state is made: not while a hook waits (a save state can't hold it, see HookFiber), and the
+    // plugin's state in the game's memory is brought up to date. 0 puts it off until the next interrupt.
+    export int StateSaving() {
+        if (hookWaiting()) return 0;
+        if (plugin) {
+            try { plugin.onStateSaving(); }
+            catch (Exception e) { error(e); }
         }
-    }
-
-    void WriteHandler(int S)(void* value, Address pc, Address addr) {
-        if (auto handlers = (addr in handlers!(S).write)) {
-            (*handlers).each!((h) {
-                try { h(value, pc, addr); }
-                catch (Exception e) { error(e); }
-            });
-        }
+        return 1;
     }
 
     export void StateLoaded() {
@@ -1535,39 +1171,32 @@ extern (C) {
         }
     }
 
-    export void Read8  (ubyte*  value, Address pc, Address addr) { ReadHandler !1(value, pc, addr); }
-    export void Read16 (ushort* value, Address pc, Address addr) { ReadHandler !2(value, pc, addr); }
-    export void Read32 (uint*   value, Address pc, Address addr) { ReadHandler !4(value, pc, addr); }
-    export void Read64 (ulong*  value, Address pc, Address addr) { ReadHandler !8(value, pc, addr); }
-    export void Write8 (ubyte*  value, Address pc, Address addr) { WriteHandler!1(value, pc, addr); }
-    export void Write16(ushort* value, Address pc, Address addr) { WriteHandler!2(value, pc, addr); }
-    export void Write32(uint*   value, Address pc, Address addr) { WriteHandler!4(value, pc, addr); }
-    export void Write64(ulong*  value, Address pc, Address addr) { WriteHandler!8(value, pc, addr); }
+    void memoryHook(bool write, T)(T* value, Address pc, Address addr) {
+        version (TestDriver) auto profiled = Profiled(addr | 2 | write);
+        auto table = write ? &hooks.write[sizeIndex(T.sizeof)] : &hooks.read[sizeIndex(T.sizeof)];
+        if (auto handlers = addr in *table) runHandlers(*handlers, cast(void*)value, pc, addr);
+    }
+
+    export void Read8  (ubyte*  value, Address pc, Address addr) { memoryHook!false(value, pc, addr); }
+    export void Read16 (ushort* value, Address pc, Address addr) { memoryHook!false(value, pc, addr); }
+    export void Read32 (uint*   value, Address pc, Address addr) { memoryHook!false(value, pc, addr); }
+    export void Read64 (ulong*  value, Address pc, Address addr) { memoryHook!false(value, pc, addr); }
+    export void Write8 (ubyte*  value, Address pc, Address addr) { memoryHook!true(value, pc, addr); }
+    export void Write16(ushort* value, Address pc, Address addr) { memoryHook!true(value, pc, addr); }
+    export void Write32(uint*   value, Address pc, Address addr) { memoryHook!true(value, pc, addr); }
+    export void Write64(ulong*  value, Address pc, Address addr) { memoryHook!true(value, pc, addr); }
 }
 
 version (Windows) {
     extern (Windows)
     BOOL DllMain(HINSTANCE hInstance, ULONG ulReason, LPVOID pvReserved) {
         switch (ulReason) {
-            case DLL_PROCESS_ATTACH:
-                dll_process_attach(hInstance, true);
-                break;
-
-            case DLL_PROCESS_DETACH:			
-                dll_process_detach(hInstance, true);
-                break;
-
-            case DLL_THREAD_ATTACH:
-                dll_thread_attach(true, true);
-                break;
-
-            case DLL_THREAD_DETACH:
-                dll_thread_detach(true, true);
-                break;
-
+            case DLL_PROCESS_ATTACH: dll_process_attach(hInstance, true); break;
+            case DLL_PROCESS_DETACH: dll_process_detach(hInstance, true); break;
+            case DLL_THREAD_ATTACH:  dll_thread_attach(true, true); break;
+            case DLL_THREAD_DETACH:  dll_thread_detach(true, true); break;
             default:
         }
-        
         return true;
     }
 }

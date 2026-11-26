@@ -5,7 +5,7 @@ version (TestDriver):
 
 import me.timz.n64.marioparty;
 import me.timz.n64.marioparty1;
-import me.timz.n64.plugin;
+import me.timz.n64.game;
 import me.timz.n64.testdriver;
 import std.algorithm;
 import std.array;
@@ -119,10 +119,14 @@ class TestMarioParty1 : MarioParty1 {
     }
 
     // Tests never connect to a Bingo page, whatever the config says
-    override void loadConfig() {
-        super.loadConfig();
+    override Config readConfig() {
+        auto config = super.readConfig();
         config.bingoURL = "";
+        return config;
     }
+
+    // The bonus stars the plugin picked (see RandomBonus)
+    @property const(BonusType)[] bonus() { return featureOf!RandomBonus1.bonus; }
 
     override void onStart() {
         super.onStart();
@@ -149,8 +153,8 @@ class TestMarioParty1 : MarioParty1 {
         });
     }
 
-    override void onFrame(ulong frame) {
-        super.onFrame(frame);
+    override void onFrame() {
+        super.onFrame();
         checkTeams();
         driver.onFrame();
     }
@@ -327,6 +331,7 @@ class TestMarioParty1 : MarioParty1 {
             Test("bonusStars", &bonusStars, 60 * 60 * 20),
             Test("bonusStarCases", &bonusStarCases, 60 * 60 * 20),
             Test("makeBonusState", &makeBonusState, 60 * 60 * 20),
+            Test("makeCustomSpacesState", &makeCustomSpacesState, 60 * 60),
             Test("chanceTimeTeams", &chanceTimeTeams, 60 * 60 * 10),
             Test("bowserAverage", &bowserAverage, 60 * 60 * 10),
             Test("booTeams", &booTeams, 60 * 60 * 10),
@@ -421,7 +426,7 @@ class TestMarioParty1 : MarioParty1 {
 
         int[4] won;
         foreach (b; chosen) {
-            auto value = (int i) => cast(int)getBonusStat(players[i], b);
+            auto value = (int i) => cast(int)featureOf!RandomBonus1.stat(players[i], b);
             auto best = iota(4).map!(i => value(i)).maxElement;
             auto winners = iota(4).filter!(i => value(i) == best).array;
             d.note(b, ": ", iota(4).map!(i => value(i)).array, " -> ", winners.length == 4 ? "nobody" : winners.map!(w => "P" ~ (w + 1).to!string).join(", "));
@@ -470,6 +475,28 @@ class TestMarioParty1 : MarioParty1 {
         d.waitUntil(() => data.currentScene == Scene.MINI_GAME_RESULTS, "the final mini-game's results", 60 * 60 * 10);
         d.saveEmulatorState(STATE_DK_BEFORE_BONUS);
         d.note("Saved: ", describe());
+    }
+
+    // Makes STATE_DK_TURN_1_CUSTOM again, with its custom spaces in the plugin's state (in the game's memory): from the
+    // board's spaces in the state made by an older version of the plugin (whose state the plugin can't read), compared
+    // with STATE_DK_TURN_1's (blue spaces that are another type now are converted ones)
+    void makeCustomSpacesState() {
+        // (without the plugin's custom spaces while it reads the board's own)
+        auto customSpaces = featureOf!CustomSpaces1;
+        removeHandlers(hooks.exec, HookKind.EXECUTE, 0x8004BA04);
+        setUp(STATE_DK_TURN_1);
+        auto original = iota(data.spaceCount).map!(i => data.spaces[i].type).array;
+        setUp(STATE_DK_TURN_1_CUSTOM);
+        customSpaces.hookExec!(CustomSpaces1.renderSpaces)(0x8004BA04);
+        d.check(data.spaceCount == original.length, "The two states have different boards");
+        spacesBoard = data.currentBoard;
+        spaces = iota(data.spaceCount).map!(i => original[i] != Space.Type.BLUE ? CustomSpace.DEFAULT
+                                                 : data.spaces[i].type == Space.Type.BLUE ? CustomSpace.LOCKED
+                                                 : cast(CustomSpace)data.spaces[i].type).array;
+        d.wait(30); // (written to the game's memory at the next frame)
+        d.check(spaces[14] == CustomSpace.CHANCE, "Space 14 isn't a converted ! Space");
+        d.saveEmulatorState(STATE_DK_TURN_1_CUSTOM);
+        d.note("Saved, with ", spaces.count!(c => c >= 0 && c != CustomSpace.BLUE), " converted spaces");
     }
 
     // teamScores in Chance Time: P1 lands on a converted ! Space, and Chance Time's players are made P1 and a
@@ -609,31 +636,31 @@ class TestMarioParty1 : MarioParty1 {
         d.check(abs(speed - expected) < 0.001, format("The map scroll speed is %s, not %s", speed, expected));
     }
 
-    // Custom spaces from another board aren't used: STATE_DK_TURN_1_CUSTOM's State (from before spacesBoard) is taken
-    // as DK's, then a State whose spaces are all ! Spaces, for another board, is replaced. The board's ! Spaces (all
-    // converted ones; DK has none of its own) stay as they were.
+    // Custom spaces from another board aren't used: STATE_DK_TURN_1_CUSTOM's are DK's, then spaces that are all
+    // ! Spaces, for another board, are replaced. The board's ! Spaces (all converted ones; DK has none of its own) stay
+    // as they were.
     void staleCustomSpaces() {
         setUp(STATE_DK_TURN_1_CUSTOM);
         d.wait(5);
         auto board = cast(int)data.currentBoard;
         auto chanceSpaces = () => iota(data.spaceCount).count!(i => data.spaces[i].type == Space.Type.CHANCE);
         auto chanceBefore = chanceSpaces();
-        d.note("Board ", board, ", custom spaces for board ", state.spacesBoard, ", space 14 ", state.spaces[14],
+        d.note("Board ", board, ", custom spaces for board ", spacesBoard, ", space 14 ", spaces[14],
                ", ", chanceBefore, " ! Spaces");
-        d.check(state.spacesBoard == board, "The State's spaces weren't taken as this board's");
-        d.check(state.spaces[14] == CustomSpace.CHANCE, "Space 14 isn't a converted ! Space any more");
+        d.check(spacesBoard == board, "The state's spaces aren't this board's");
+        d.check(spaces[14] == CustomSpace.CHANCE, "Space 14 isn't a converted ! Space any more");
         // DK has no ! Spaces of its own, so they're all the State's (and none from the State before the load)
-        auto marked = state.spaces.count!(c => c == CustomSpace.CHANCE);
+        auto marked = spaces.count!(c => c == CustomSpace.CHANCE);
         d.check(chanceBefore == marked, format("The board has %d ! Spaces, but the State marks %d", chanceBefore, marked));
 
-        state.spaces[] = CustomSpace.CHANCE;
-        state.spacesBoard = board == 0 ? 1 : 0;
+        spaces[] = CustomSpace.CHANCE;
+        spacesBoard = board == 0 ? 1 : 0;
         d.wait(5);
-        auto stale = state.spaces.count!(c => c == CustomSpace.CHANCE);
-        d.note("After another board's spaces: custom spaces for board ", state.spacesBoard, ", ", stale,
+        auto stale = spaces.count!(c => c == CustomSpace.CHANCE);
+        d.note("After another board's spaces: custom spaces for board ", spacesBoard, ", ", stale,
                " marked ! Spaces, ", chanceSpaces(), " ! Spaces");
-        d.check(state.spacesBoard == board, "The spaces aren't for this board");
-        d.check(stale < state.spaces.length / 2, "Another board's spaces were kept");
+        d.check(spacesBoard == board, "The spaces aren't for this board");
+        d.check(stale < spaces.length / 2, "Another board's spaces were kept");
         d.check(chanceSpaces() == chanceBefore, format("The board has %d ! Spaces, not %d", chanceSpaces(), chanceBefore));
     }
 
@@ -985,7 +1012,7 @@ class TestMarioParty1 : MarioParty1 {
                     auto sp = cast(short)i;
                     int[2][] at;
                     foreach (c; 0..chainCount) foreach (k; 0..chainLength(c)) if (chainSpace(c, k) == sp) at ~= [c, k];
-                    d.note("Space ", sp, ": ", data.spaces[sp].type, i < state.spaces.length ? ", custom " ~ state.spaces[i].to!string : "",
+                    d.note("Space ", sp, ": ", data.spaces[sp].type, i < spaces.length ? ", custom " ~ spaces[i].to!string : "",
                            ", at ", at, eventList(sp) ? ", events " ~ describeEvents(sp) : "");
                 }
             } else if (step.startsWith("shots:")) { // shots:<n>: screenshots land: takes as a landing happens
@@ -1123,8 +1150,8 @@ class TestMarioParty1 : MarioParty1 {
     void customSpaces() {
         setUp(STATE_DK_TURN_1);
         d.wait(30); // A few frames of RenderSpaces
-        d.check(state.spaces.length == data.spaceCount, format("state.spaces has %d entries for %d spaces",
-                                                                state.spaces.length, data.spaceCount));
+        d.check(spaces.length == data.spaceCount, format("spaces has %d entries for %d spaces",
+                                                                spaces.length, data.spaceCount));
 
         auto solid = iota(data.spaceCount).count!(i => data.spaces[i].isSolid);
         foreach (type, ratio; config.standardSpaceRatio) {
@@ -1134,14 +1161,14 @@ class TestMarioParty1 : MarioParty1 {
             d.check(onBoard >= wanted, format("Only %d %s spaces, wanted at least %d", onBoard, type, wanted));
         }
         foreach (i; 0..data.spaceCount) {
-            auto custom = state.spaces[i];
+            auto custom = spaces[i];
             if (custom >= Space.Type.min && custom <= Space.Type.max && data.spaces[i].type != Space.Type.STAR) {
                 d.check(data.spaces[i].type == cast(Space.Type)custom,
                         format("Space %d is %s on the board but %s in the State", i, data.spaces[i].type, custom));
             }
         }
         auto before = iota(data.spaceCount).map!(i => data.spaces[i].type).array;
-        auto custom = state.spaces.dup;
+        auto custom = spaces.dup;
         d.screenshot("custom spaces");
 
         // Through a save state
@@ -1151,22 +1178,22 @@ class TestMarioParty1 : MarioParty1 {
         d.wait(30);
         auto after = iota(data.spaceCount).map!(i => data.spaces[i].type).array;
         d.check(after == before, "Spaces changed after loading a save state");
-        d.check(state.spaces == custom, "state.spaces changed after loading a save state");
+        d.check(spaces == custom, "spaces changed after loading a save state");
     }
 
     // Landing on a converted space counts as that type (the game's own counter for it goes up)
     void landOnCustomSpaces() {
         setUp(STATE_DK_TURN_1);
         d.wait(30);
-        auto converted = iota(data.spaceCount).filter!(i => state.spaces[i] >= Space.Type.min && state.spaces[i] != CustomSpace.BLUE).array;
+        auto converted = iota(data.spaceCount).filter!(i => spaces[i] >= Space.Type.min && spaces[i] != CustomSpace.BLUE).array;
         d.check(!converted.empty, "No converted spaces");
 
         string[] problems;
         foreach (type; config.standardSpaceRatio.keys.sort) {
             // A converted space, and one that was that type already (for comparison)
             auto reachable = reachableSpaces(type);
-            auto conv = reachable.filter!(s => state.spaces[s] == cast(CustomSpace)type && eventList(s) == 0).array;
-            auto natural = reachable.filter!(s => state.spaces[s] == CustomSpace.DEFAULT && eventList(s) == 0).array;
+            auto conv = reachable.filter!(s => spaces[s] == cast(CustomSpace)type && eventList(s) == 0).array;
+            auto natural = reachable.filter!(s => spaces[s] == CustomSpace.DEFAULT && eventList(s) == 0).array;
             Landing[2] results;
             foreach (k, targets; [natural, conv]) {
                 if (targets.empty) {
@@ -1212,7 +1239,7 @@ class TestMarioParty1 : MarioParty1 {
         auto type = d.arg.empty ? Space.Type.CHANCE : d.arg.to!(Space.Type);
         setUp(STATE_DK_TURN_1);
         d.wait(30);
-        auto targets = reachableSpaces(type).filter!(s => state.spaces[s] == cast(CustomSpace)type && eventList(s) == 0).array;
+        auto targets = reachableSpaces(type).filter!(s => spaces[s] == cast(CustomSpace)type && eventList(s) == 0).array;
         d.note(targets.length, " reachable converted ", type, " spaces: ", targets);
         foreach (t; targets) {
             auto r = land(t, type);
@@ -1328,7 +1355,7 @@ class TestMarioParty1 : MarioParty1 {
         d.waitUntil(() => isBonusScene(), "the bonus stars", 60 * 60 * 10);
         foreach (i, p; players) {
             starsBefore[i] = p.data.stars;
-            foreach (b; [EnumMembers!BonusType]) stats[i][b] = getBonusStat(p, b);
+            foreach (b; [EnumMembers!BonusType]) stats[i][b] = featureOf!RandomBonus1.stat(p, b);
         }
         chosen = bonus.dup;
         d.note("Bonus scene ", data.currentScene, ", bonus stars ", chosen.take(3), "; ", describe());

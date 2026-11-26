@@ -5,8 +5,8 @@
  * (https://www.youtube.com/watch?v=DME9IiB77fg), licensed under the Creative Commons Attribution license
  * (CC BY 3.0, https://creativecommons.org/licenses/by/3.0/). The patch changes the ROM; this module makes the same
  * changes to the game as it runs: the values the patch changed are changed as the game loads its code (the tables at
- * the end), the code it rewrote is done by hooks (setUpHooks()), and the background images it widened are widened from
- * the game's own images as they're loaded. What's different from the patch:
+ * the end), the code it rewrote is done by hooks (see Widescreen), and the background images it widened are widened
+ * from the game's own images as they're loaded. What's different from the patch:
  *
  * - Memory: the patch puts the framebuffers and the depth buffer in the Expansion Pak's memory, where custom boards made
  *   with PartyPlanner64 keep their main heap (0x80400000 to 0x807B0000, with their own code after it). Here the
@@ -23,7 +23,7 @@
  */
 module me.timz.n64.mp3widescreen;
 
-import me.timz.n64.plugin;
+import me.timz.n64.game;
 import std.algorithm;
 import std.array;
 import std.conv;
@@ -208,12 +208,12 @@ uint crc(Address start, Address end, const(Address[2])[] skip = null) {
     return c[0] | c[1] << 8 | c[2] << 16 | c[3] << 24;
 }
 
-// Custom boards made with PartyPlanner64 replace a board's overlay with their own, which has much of the original boards'
-// code and data (like the item shops), assembled somewhere else. The patch's changes to those are found by signatures,
-// made from the original boards: for code, a CRC-32 of the instruction and the 4 on each side, with what assembling
-// somewhere else changes (jump and branch targets, and addresses in the overlay) left out; for data, CRC-32s of the
-// word and the 6 before it, and of it and the 6 after it (either matching). Each also has the word as the original
-// boards have it, and the change.
+// Custom boards made with PartyPlanner64 replace a board's overlay with their own, which has much of the original
+// boards' code and data (like the item shops), assembled somewhere else. The patch's changes to those are found by
+// signatures, made from the original boards: for code, a CRC-32 of the instruction and the 4 on each side, with what
+// assembling somewhere else changes (jump and branch targets, and addresses in the overlay) left out; for data, CRC-32s
+// of the word and the 6 before it, and of it and the 6 after it (either matching). Each also has the word as the
+// original boards have it, and the change.
 struct Signature {
     uint crc;
     uint word;
@@ -387,11 +387,6 @@ Address overlayAddress(uint overlay) { return (OVERLAY_TABLE + overlay * 0x24 + 
 // The main code: from 0x80000400 (ROM 0x1000) to the first overlay (ROM 0xA96F0)
 enum Address MAIN_END = 0x800A8AF0;
 
-private __gshared bool mainChanged;             // Whether the main code is the US ROM's (or a custom board's), changed
-private __gshared int[Address] changedOverlays; // The overlay with its changes made at each overlay address (-1: none)
-private __gshared bool extraSkyTile, leftSkyTile; // The end-of-game sky's extra tiles (see setUpHooks())
-private __gshared uint skyGfx;                      // Where the display list was before a sky tile's commands
-
 // The board code's backgrounds (HVQ) file system: its ROM offset (custom boards move it), its directory count, and its
 // directories' offsets in it (in memory). The sky's tiles are its directory 1.
 enum Address HVQ_ROM = 0x80102D20, HVQ_COUNT = 0x80102D24, HVQ_DIRECTORIES = 0x80100FF0;
@@ -421,34 +416,48 @@ private void repeatSkyColumn(Address start, Address end) {
     }
 }
 
-// Whether `overlay` is loaded, with its changes made
-bool changed(uint overlay) {
-    auto p = overlayAddress(overlay) in changedOverlays;
-    return p && *p == overlay;
+// Whether a slot's tile (its entry) is one of the end-of-game sky's: its directory 1 in the HVQ file system
+private bool skyTile(Address entry) {
+    Address directories = HVQ_DIRECTORIES.val!uint;
+    if (HVQ_COUNT.val!uint < 3 || directories < 0x80000000 || directories >= 0x80800000) return false;
+    auto rom = (entry + 16).val!uint - HVQ_ROM.val!uint;
+    return rom >= (directories + 4).val!uint && rom < (directories + 8).val!uint;
 }
 
-// Runs `f` at `address` while `overlay` is loaded with its changes
-void at(uint overlay, Address address, void delegate() f) {
-    address.onExec({ if (changed(overlay)) f(); });
-}
+// widescreen: the main code's changes are made when the game boots, and each overlay's when the game loads it.
+// Nothing is changed in a ROM whose main code isn't the US ROM's (or a custom board's). The code the patch rewrote is
+// done by hooks that change registers where it has computed them (each while its overlay is loaded, with its changes).
+final class Widescreen(G) : Feature!G {
+    bool mainChanged;               // Whether the main code is the US ROM's (or a custom board's), changed
+    int[Address] changedOverlays;   // The overlay with its changes made at each overlay address (-1: none)
+    bool extraSkyTile;     // The end-of-game sky's extra tile (see skySlot())
+    uint skyGfx;                    // Where the display list was before a sky tile's commands
+    uint savedA1;                   // (the staff credits)
+    uint fileDirectory;             // The main file system's directory the game opened last (see fileInfo())
+    uint[uint] widening;            // ROM offset of a file's data -> IMAGES index
+    ubyte[][uint] curtainRight;     // The curtain's right pieces' originals (see LeftPiece)
+    LeftPiece[uint] curtainLeft;    // Left pieces waiting for their right piece, by the right piece
 
-// Sets the game up for widescreen: the main code's changes are made when the game boots, and each overlay's when the
-// game loads it. Nothing is changed in a ROM whose main code isn't the US ROM's (or a custom board's).
-void setUpWidescreen() {
-    changedOverlays.clear();
-    mainChanged = false;
+    override bool enabled() { return config.widescreen; }
 
-    0x80000400.onExec({
+    // Whether `overlay` is loaded, with its changes made
+    bool changed(uint overlay) {
+        auto p = overlayAddress(overlay) in changedOverlays;
+        return p && *p == overlay;
+    }
+
+    @Exec(0x80000400) void booting() {
         auto main = patchFor(MAIN);
         mainChanged = crc(0x80000400, MAIN_END, MAIN_UNCHECKED) == main.codeCrc;
         if (mainChanged) apply(*main);
         else warning("Widescreen is off: this ROM's code isn't Mario Party 3 (US)'s");
-    });
+    }
 
-    // Overlays are copied from the ROM by func_8004DB14(rom, address, size), which returns once they're in memory: whole
-    // (func_8000B2C4), or their code and data separately (func_8000B1A4, for the board code). The overlay is found by its
-    // ROM offset in the game's overlay table (custom boards move overlays in the ROM), which also has its code's end.
-    0x8004DB14.onExec({
+    // Overlays are copied from the ROM by func_8004DB14(rom, address, size), which returns once they're in memory:
+    // whole (func_8000B2C4), or their code and data separately (func_8000B1A4, for the board code). The overlay is
+    // found by its ROM offset in the game's overlay table (custom boards move overlays in the ROM), which also has its
+    // code's end.
+    @Exec(0x8004DB14) void overlayLoading() {
         if (!mainChanged) return;
         uint rom = gpr.a0, size = gpr.a2;
         foreach (n; 0..OVERLAY_COUNT) {
@@ -459,153 +468,144 @@ void setUpWidescreen() {
             Address from = address + (rom - start), to = from + size;
             bool code = from <= address && to >= codeEnd, data = from <= codeEnd && to >= dataEnd;
             if (code) changedOverlays[address] = -1; // Its code is replaced
+            if (!patchFor(n)) return;
+            waitExec(gpr.ra); // Loaded
             auto patch = patchFor(n);
-            if (!patch) return;
-            gpr.ra.onExecOnce({
-                // A board's code or data that isn't the US ROM's is a custom board's (see BOARD_CODE)
-                bool board = n >= 72 && n <= 77 || n >= 91 && n <= 96;
-                if (code && crc(address, codeEnd, OVERLAY_UNCHECKED) != patch.codeCrc) {
-                    code = false;
-                    if (board) applySignatures(address, codeEnd, true);
-                }
-                if (data && crc(codeEnd, dataEnd, OVERLAY_UNCHECKED) != patch.dataCrc) {
-                    data = false;
-                    if (board) applySignatures(codeEnd, dataEnd, false);
-                }
-                apply(*patch, a => code && a < codeEnd || data && a >= codeEnd);
-                if (code) changedOverlays[address] = n;
-            });
+            // A board's code or data that isn't the US ROM's is a custom board's (see BOARD_CODE)
+            bool board = n >= 72 && n <= 77 || n >= 91 && n <= 96;
+            if (code && crc(address, codeEnd, OVERLAY_UNCHECKED) != patch.codeCrc) {
+                code = false;
+                if (board) applySignatures(address, codeEnd, true);
+            }
+            if (data && crc(codeEnd, dataEnd, OVERLAY_UNCHECKED) != patch.dataCrc) {
+                data = false;
+                if (board) applySignatures(codeEnd, dataEnd, false);
+            }
+            apply(*patch, a => code && a < codeEnd || data && a >= codeEnd);
+            if (code) changedOverlays[address] = n;
             return;
         }
-    });
-
-    setUpHooks();
-    setUpImages();
-}
-
-// The code the patch rewrote, done here by changing registers where it has computed them
-private void setUpHooks() {
-    uint savedA1;
+    }
 
     // Main code: X positions from a table of bytes (at 0x800A184D, which can't hold them + 52), before the calls
-    0x80049078.onExec({ if (mainChanged) gpr.a0 += HALF; });
-    0x8004912C.onExec({ if (mainChanged) gpr.a0 += HALF; });
+    @Exec(0x80049078, 0x8004912C) void mainTableX() { if (mainChanged) gpr.a0 += HALF; }
 
     // Board code: X offsets from a table of bytes (0 to 127), + 52
-    at(129, 0x800DE464, { gpr.v0 += HALF; });
-    at(129, 0x800DF0EC, { gpr.v0 += HALF; });
+    @Exec(0x800DE464, 0x800DF0EC) void boardTableX() { if (changed(129)) gpr.v0 += HALF; }
 
     // Boot (and overlay 127): the tiles are in 9 columns instead of 7 (row in v1, column in v0)
-    at(0, 0x80105D90, { gpr.v1 = gpr.s2 / 9; gpr.v0 = gpr.s2 % 9; });
-    at(127, 0x80105DB0, { gpr.v1 = gpr.s2 / 9; gpr.v0 = gpr.s2 % 9; });
+    @Exec(0x80105D90) void bootTiles() { if (changed(0)) { gpr.v1 = gpr.s2 / 9; gpr.v0 = gpr.s2 % 9; } }
+    @Exec(0x80105DB0) void bootTiles127() { if (changed(127)) { gpr.v1 = gpr.s2 / 9; gpr.v0 = gpr.s2 % 9; } }
 
     // Coconut Conk, Messy Memory, Three Door Monty and Merry-Go-Chomp: a rectangle's left side at x = 52 (in 10.2 fixed
     // point, << 12) instead of 0, with its right side at 372 (a "lui" change in the tables)
-    at(2, 0x80105F7C, { gpr.t3 = (HALF * 4) << 12; });
-    at(29, 0x80105D78, { gpr.t3 = (HALF * 4) << 12; });
-    at(43, 0x80106A48, { gpr.t3 = (HALF * 4) << 12; });
-    at(43, 0x80106D84, { gpr.t4 = (HALF * 4) << 12; });
-    at(45, 0x80106238, { gpr.t3 = (HALF * 4) << 12; });
+    @Exec(0x80105F7C) void coconutConk() { if (changed(2)) gpr.t3 = (HALF * 4) << 12; }
+    @Exec(0x80105D78) void messyMemory() { if (changed(29)) gpr.t3 = (HALF * 4) << 12; }
+    @Exec(0x80106A48) void threeDoorMonty() { if (changed(43)) gpr.t3 = (HALF * 4) << 12; }
+    @Exec(0x80106D84) void threeDoorMontyT4() { if (changed(43)) gpr.t4 = (HALF * 4) << 12; }
+    @Exec(0x80106238) void merryGoChomp() { if (changed(45)) gpr.t3 = (HALF * 4) << 12; }
 
     // Spotlight Swim: the rows of its 2D buffer are 212 words long instead of 160 (424 and 320 pixels)
-    at(3, 0x8010BE88, { gpr.a0 = gpr.t5 * (SCREEN_WIDTH / 2); });
-    at(3, 0x8010C01C, { gpr.v1 = gpr.a3 * (SCREEN_WIDTH / 2); });
+    @Exec(0x8010BE88) void spotlightSwim() { if (changed(3)) gpr.a0 = gpr.t5 * (SCREEN_WIDTH / 2); }
+    @Exec(0x8010C01C) void spotlightSwimV1() { if (changed(3)) gpr.v1 = gpr.a3 * (SCREEN_WIDTH / 2); }
 
     // Thwomp Pull: always sets 0x800CD280 (which makes the depth buffer be cleared)
-    at(8, 0x8010B234, { gpr.v1 = 1; });
+    @Exec(0x8010B234) void thwompPull() { if (changed(8)) gpr.v1 = 1; }
 
     // Baby Bowser Broadside: the two columns 284 pixels apart instead of 180
-    at(12, 0x80106A1C, { gpr.s4 = gpr.s2 * 284; });
-    at(12, 0x80106B34, { gpr.s0 = gpr.s2 * 284; });
+    @Exec(0x80106A1C) void babyBowserBroadside() { if (changed(12)) gpr.s4 = gpr.s2 * 284; }
+    @Exec(0x80106B34) void babyBowserBroadsideS0() { if (changed(12)) gpr.s0 = gpr.s2 * 284; }
 
     // Pump, Pump and Away: while a balloon rises (the jump table case at 0x8010A5D4, which also adds 0.2 to its speed),
     // s1's X (+28) moves left by 1.2837 a frame
-    at(13, 0x8010A5F8, { (gpr.s1 + 28).val!float = (gpr.s1 + 28).val!float - 1.2837f; });
+    @Exec(0x8010A5F8) void pumpPumpAndAway() {
+        if (changed(13)) (gpr.s1 + 28).val!float = (gpr.s1 + 28).val!float - 1.2837f;
+    }
 
     // Picking Panic: X positions (in 1/4 pixels) + 208, after they're made 16-bit
-    foreach (a; [0x80107FF8, 0x801080B4, 0x80108F14, 0x801097C8, 0x80109878]) {
-        at(15, a, { gpr.a0 += HALF * 4; gpr.v0 = gpr.a0; });
+    @Exec(0x80107FF8, 0x801080B4, 0x80108F14, 0x801097C8, 0x80109878) void pickingPanic() {
+        if (changed(15)) { gpr.a0 += HALF * 4; gpr.v0 = gpr.a0; }
     }
-    foreach (a; [0x8010814C, 0x80109010, 0x80109910]) at(15, a, { gpr.a0 += HALF * 4; });
-    foreach (a; [0x801081EC, 0x801099B0]) at(15, a, { gpr.v1 += HALF * 4; });
-    at(15, 0x80108D50, { gpr.v1 += HALF * 4; gpr.v0 = gpr.v1; });
-    at(15, 0x801090A4, { gpr.a1 += HALF * 4; });
+    @Exec(0x8010814C, 0x80109010, 0x80109910) void pickingPanicA0() { if (changed(15)) gpr.a0 += HALF * 4; }
+    @Exec(0x801081EC, 0x801099B0) void pickingPanicV1() { if (changed(15)) gpr.v1 += HALF * 4; }
+    @Exec(0x80108D50) void pickingPanicV1V0() { if (changed(15)) { gpr.v1 += HALF * 4; gpr.v0 = gpr.v1; } }
+    @Exec(0x801090A4) void pickingPanicA1() { if (changed(15)) gpr.a1 += HALF * 4; }
 
     // Cosmic Coaster: x * 212 + 106 instead of x * 160 + 80
-    at(16, 0x80106180, { gpr.a1 = gpr.s2 * 212 + 106; });
+    @Exec(0x80106180) void cosmicCoaster() { if (changed(16)) gpr.a1 = gpr.s2 * 212 + 106; }
 
     // Puddle Paddle: x * 264 instead of x * 160
-    at(17, 0x801066FC, { gpr.s2 = gpr.v0 * 264; });
-    at(17, 0x80106810, { gpr.s1 = gpr.v1 * 264; });
-    at(17, 0x80107700, { gpr.a1 = gpr.a2 * 264; });
+    @Exec(0x801066FC) void puddlePaddle() { if (changed(17)) gpr.s2 = gpr.v0 * 264; }
+    @Exec(0x80106810) void puddlePaddleS1() { if (changed(17)) gpr.s1 = gpr.v1 * 264; }
+    @Exec(0x80107700) void puddlePaddleA1() { if (changed(17)) gpr.a1 = gpr.a2 * 264; }
 
     // Etch 'n' Catch: X positions - 52 and - 26
-    at(18, 0x8010720C, { gpr.v0 -= HALF; });
-    at(18, 0x80109F74, { gpr.v0 -= HALF / 2; });
+    @Exec(0x8010720C) void etchNCatch() { if (changed(18)) gpr.v0 -= HALF; }
+    @Exec(0x80109F74) void etchNCatchHalf() { if (changed(18)) gpr.v0 -= HALF / 2; }
 
     // Slot Synch, Swing 'n' Swipe and overlay 116: func_8000B364's left side (a1) at 52.0 instead of 0 (with the right
     // side at 372.0, a "lui" change in the tables); All Fired Up: the same, a1 having been f20
-    0x8000B364.onExec({
+    @Exec(0x8000B364) void rectangleLeft() {
         if (!mainChanged) return;
         if ((gpr.ra == 0x80105A70 && changed(20)) || (gpr.ra == 0x80105A80 && changed(64)) || (gpr.ra == 0x80105A98 && changed(116))) {
             gpr.a1 = bits(cast(float)HALF);
         }
-    });
-    at(41, 0x80105D90, { gpr.a1 = bits(cast(float)HALF); });
+    }
+    @Exec(0x80105D90) void allFiredUp() { if (changed(41)) gpr.a1 = bits(cast(float)HALF); }
 
     // Slot Synch: x = 52 instead of 0 for func_80054904
-    foreach (a; [0x8010787C, 0x80107908, 0x80107A14]) at(20, a, { gpr.a2 = HALF; });
+    @Exec(0x8010787C, 0x80107908, 0x80107A14) void slotSynch() { if (changed(20)) gpr.a2 = HALF; }
 
     // Toadstool Titan: X positions + 52
-    at(22, 0x80107840, { fpr.f14 += HALF; });
-    at(22, 0x8010789C, { fpr.f2 += HALF; });
-    at(22, 0x80107AC4, { gpr.v0 += HALF; });
+    @Exec(0x80107840) void toadstoolTitan() { if (changed(22)) fpr.f14 += HALF; }
+    @Exec(0x8010789C) void toadstoolTitanF2() { if (changed(22)) fpr.f2 += HALF; }
+    @Exec(0x80107AC4) void toadstoolTitanV0() { if (changed(22)) gpr.v0 += HALF; }
 
     // Awful Tower: x * 376 + 288 instead of x * 272 + 236
-    at(37, 0x80105ADC, { gpr.v0 = gpr.s2 * 376 + 288; });
+    @Exec(0x80105ADC) void awfulTower() { if (changed(37)) gpr.v0 = gpr.s2 * 376 + 288; }
 
     // Storm Chasers: the rectangle's left side at x = 52 (10.2 fixed point, << 12) instead of 0
-    at(47, 0x801065C8, { gpr.v0 |= (HALF * 4) << 12; });
+    @Exec(0x801065C8) void stormChasers() { if (changed(47)) gpr.v0 |= (HALF * 4) << 12; }
 
     // Vine With Me: 1220.0 instead of 900.0
-    at(49, 0x8010D68C, { gpr.at = bits(1220.0f); });
+    @Exec(0x8010D68C) void vineWithMe() { if (changed(49)) gpr.at = bits(1220.0f); }
 
     // End of the Line: x * 212 (+ 106) instead of x * 160 (+ 80)
-    at(51, 0x80106874, { gpr.s0 = gpr.s3 * 212 + 106; });
-    at(51, 0x80109830, { gpr.v0 = gpr.v1 * 212; });
-    at(51, 0x801098B8, { gpr.v0 = gpr.a0 * 212; });
+    @Exec(0x80106874) void endOfTheLine() { if (changed(51)) gpr.s0 = gpr.s3 * 212 + 106; }
+    @Exec(0x80109830) void endOfTheLineV1() { if (changed(51)) gpr.v0 = gpr.v1 * 212; }
+    @Exec(0x801098B8) void endOfTheLineA0() { if (changed(51)) gpr.v0 = gpr.a0 * 212; }
 
     // Bowser Toss: always the second case
-    at(52, 0x80108CD8, { gpr.v0 = 1; });
+    @Exec(0x80108CD8) void bowserToss() { if (changed(52)) gpr.v0 = 1; }
 
     // Fowl Play: x * 212 instead of x * 160
-    at(58, 0x80107060, { gpr.v0 = gpr.s2 * 212; });
+    @Exec(0x80107060) void fowlPlay() { if (changed(58)) gpr.v0 = gpr.s2 * 212; }
 
     // Bobbing Bow-loons: func_801065C8 isn't called
-    at(61, 0x801065C8, { if (gpr.ra == 0x80105A24) jump(gpr.ra); });
+    @Exec(0x801065C8) void bobbingBowLoons() { if (changed(61) && gpr.ra == 0x80105A24) jump(gpr.ra); }
 
     // Game Guy's Magic Boxes: x * 212 instead of x * 160
-    at(68, 0x8010A280, { gpr.v0 = gpr.v1 * 212; });
-    at(68, 0x8010A438, { gpr.v0 = gpr.v1 * 212; });
-    at(68, 0x8010BC7C, { gpr.a0 = gpr.v0 * 212; });
-    at(68, 0x8010BE80, { gpr.v1 = gpr.t2 * 212; });
-    at(68, 0x8010C0AC, { gpr.v0 = gpr.a2 * 212; });
-    at(68, 0x8010C194, { gpr.v0 = gpr.a2 * 212; });
+    @Exec(0x8010A280, 0x8010A438) void magicBoxes() { if (changed(68)) gpr.v0 = gpr.v1 * 212; }
+    @Exec(0x8010BC7C) void magicBoxesA0() { if (changed(68)) gpr.a0 = gpr.v0 * 212; }
+    @Exec(0x8010BE80) void magicBoxesV1() { if (changed(68)) gpr.v1 = gpr.t2 * 212; }
+    @Exec(0x8010C0AC, 0x8010C194) void magicBoxesA2() { if (changed(68)) gpr.v0 = gpr.a2 * 212; }
 
     // Chilly Waters, Spiny Desert and Creepy Cavern: x * 104 (+ 55) instead of x * 70
-    at(72, 0x8011A2E4, { gpr.a2 = gpr.s3 * 104; });
-    at(74, 0x801189BC, { gpr.a2 = gpr.s3 * 104; });
-    at(76, 0x80117EE4, { gpr.a2 = gpr.s3 * 104; });
+    @Exec(0x8011A2E4) void chillyWaters() { if (changed(72)) gpr.a2 = gpr.s3 * 104; }
+    @Exec(0x801189BC) void spinyDesert() { if (changed(74)) gpr.a2 = gpr.s3 * 104; }
+    @Exec(0x80117EE4) void creepyCavern() { if (changed(76)) gpr.a2 = gpr.s3 * 104; }
 
     // The final results (party and duel): x * 258 (+ 133) instead of x * 154
-    at(85, 0x80108100, { gpr.a2 = gpr.s3 * 258; });
-    at(99, 0x80107B80, { gpr.a2 = gpr.s3 * 258; });
+    @Exec(0x80108100) void finalResults() { if (changed(85)) gpr.a2 = gpr.s3 * 258; }
+    @Exec(0x80107B80) void duelFinalResults() { if (changed(99)) gpr.a2 = gpr.s3 * 258; }
 
     // The staff credits: random X positions % 424 (and % 212) instead of % 320 (and % 160)
-    at(124, 0x8010796C, { gpr.a2 = gpr.s1 % SCREEN_WIDTH; });
-    at(124, 0x80107C4C, { savedA1 = gpr.a1; });
-    at(124, 0x80107C8C, { gpr.v1 = savedA1 % (SCREEN_WIDTH / 2) + (savedA1 >> 5) % (SCREEN_WIDTH / 2); });
-    at(124, 0x80107CC8, { gpr.v0 = gpr.a1 % SCREEN_WIDTH; });
+    @Exec(0x8010796C) void creditsX() { if (changed(124)) gpr.a2 = gpr.s1 % SCREEN_WIDTH; }
+    @Exec(0x80107C4C) void creditsRandom() { if (changed(124)) savedA1 = gpr.a1; }
+    @Exec(0x80107C8C) void creditsHalfX() {
+        if (changed(124)) gpr.v1 = savedA1 % (SCREEN_WIDTH / 2) + (savedA1 >> 5) % (SCREEN_WIDTH / 2);
+    }
+    @Exec(0x80107CC8) void creditsXV0() { if (changed(124)) gpr.v0 = gpr.a1 % SCREEN_WIDTH; }
 
     // Added: the end-of-game scene's sky (FINISH_BOARD) is a 320x240 background (5 x 5 tiles of 64x48), drawn by the
     // board code's tile drawing, which skips the grid's empty slots: the sides of the wider screen. There, the nearest
@@ -615,14 +615,8 @@ private void setUpHooks() {
     // shows (like the cannon's) are left alone.
     // (v0 = the slot's address: the board arrays + column (s0) * 48 + row * 4, for 8 columns; a slot holds a tile's
     // entry, with its ROM offset at 16)
-    static bool skyTile(Address entry) {
-        Address directories = HVQ_DIRECTORIES.val!uint;
-        if (HVQ_COUNT.val!uint < 3 || directories < 0x80000000 || directories >= 0x80800000) return false;
-        auto rom = (entry + 16).val!uint - HVQ_ROM.val!uint;
-        return rom >= (directories + 4).val!uint && rom < (directories + 8).val!uint;
-    }
-    at(129, 0x800E7B68, {
-        if (!changed(79) || (cast(Address)gpr.v0).val!uint) return;
+    @Exec(0x800E7B68) void skySlot() {
+        if (!changed(129) || !changed(79) || (cast(Address)gpr.v0).val!uint) return;
         auto column = cast(short)gpr.s0;
         foreach (distance; 1..8) {
             foreach (c; [column - distance, column + distance]) {
@@ -633,27 +627,81 @@ private void setUpHooks() {
                 return;
             }
         }
-    });
+    }
+
     // The draw (func_800E5FB0(gfx, tile, x, y): y is s1 >> 16, set in the call's delay slot; v0 = the tile's entry).
-    // For the extra tile on the left, this hook runs again when the call it makes returns, and lets the game's happen.
-    at(129, 0x800E7B8C, {
-        if (!changed(79)) return;
-        if (leftSkyTile) { leftSkyTile = false; return; } // Back from the left one
+    // The extra tile on the left is drawn first, then the game's.
+    @Exec(0x800E7B8C) void skyDraw() {
+        if (!changed(129) || !changed(79)) return;
         Address gfx = gpr.a0;
         Address before = gfx.val!uint;
         skyGfx = before;
-        if (extraSkyTile) return;                         // A substituted tile (fixed at 0x800E7B94)
+        if (extraSkyTile) return; // A substituted tile (fixed at 0x800E7B94)
         if (cast(short)gpr.s0 != 0 || !skyTile(gpr.v0)) return;
-        leftSkyTile = true;
-        0x800E5FB0.jal(gfx, gpr.a1, cast(uint)(cast(short)gpr.a2 - 64), cast(uint)(cast(int)gpr.s1 >> 16), {
-            repeatSkyColumn(before, gfx.val!uint);
-        });
-    });
-    at(129, 0x800E7B94, {
-        if (!changed(79) || !extraSkyTile) return;
+        callGame(0x800E5FB0, gfx, gpr.a1, cast(short)gpr.a2 - 64, cast(int)gpr.s1 >> 16);
+        repeatSkyColumn(before, gfx.val!uint);
+    }
+
+    @Exec(0x800E7B94) void skyDrawn() {
+        if (!changed(129) || !changed(79) || !extraSkyTile) return;
         extraSkyTile = false;
         repeatSkyColumn(skyGfx, (cast(Address)gpr.s2).val!uint);
-    });
+    }
+
+    // The widened images (see IMAGES). The game reads a file in its main file system by opening its directory
+    // (func_80009EAC(47, directory)), reading its header (func_80009B64(46, file, info): info = its data's ROM offset,
+    // decompressed size and compression), allocating the size, and decompressing it (func_8000B000(rom, buffer, size,
+    // compression)). A widened file says it's bigger, is decompressed as it is, and is widened in its buffer. Only
+    // files the size the US ROM's are are widened. One widened image is smaller than the original (52, 16), so its
+    // buffer is the original's size: the original is decompressed into it first (in Log Jam, a buffer of the widened
+    // size overflowed into the background's and froze the game).
+    @Exec(0x80009EAC) void directoryOpened() {
+        if (gpr.a0 == 47) fileDirectory = gpr.a1;
+    }
+
+    @Exec(0x80009B64) void fileInfo() {
+        if (gpr.a0 != 46 || !mainChanged) return;
+        auto key = fileDirectory << 16 | (gpr.a1 & 0xFFFF);
+        auto i = IMAGES.countUntil!(m => m.key == key);
+        if (i < 0) return;
+        Address info = gpr.a2;
+        waitExec(gpr.ra);
+        if ((info + 4).val!uint != IMAGES[i].size || (info + 8).val!uint != 1) return;
+        widening[info.val!uint] = cast(uint)i;
+        (info + 4).val!uint = max(IMAGES[i].room, IMAGES[i].size); // Room to decompress the original too
+    }
+
+    @Exec(0x8000B000) void decompressing() {
+        auto i = gpr.a0 in widening;
+        if (!i) return;
+        auto image = IMAGES[*i];
+        widening.remove(gpr.a0);
+        gpr.a2 = image.size;
+        Address buffer = gpr.a1;
+        waitExec(gpr.ra);
+        auto original = new ubyte[image.size];
+        foreach (j, ref b; original) b = (buffer + cast(uint)j).val!ubyte;
+        bool right = image.key == (19 << 16 | 450) || image.key == (19 << 16 | 452);
+        bool left = image.key == (19 << 16 | 449) || image.key == (19 << 16 | 451);
+        if (right) curtainRight[image.key] = original.dup;
+        auto widened = widen(image, original, left ? curtainRight.get(image.key + 1, null) : null);
+
+        if (right) { // Its left piece is waiting for it
+            if (auto l = image.key in curtainLeft) {
+                if (hasBytes(l.buffer, l.written)) {
+                    auto piece = parse(l.written);
+                    curtainColumns(piece, parse(curtainRight[image.key]));
+                    writeBytes(l.buffer, build(piece));
+                }
+                curtainLeft.remove(image.key);
+            }
+        } else if (left && (image.key + 1) !in curtainRight) {
+            curtainLeft[image.key + 1] = LeftPiece(buffer, widened);
+        }
+
+        if (widened is null || widened.length > image.room) return;
+        writeBytes(buffer, widened);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -823,10 +871,8 @@ private uint colorIndex(ref ushort[] palette, ushort c) {
 // The curtain is 4 pieces of 80x120 (19/449 top left, 450 top right, 451 bottom left, 452 bottom right), 106x120
 // widened: the original curtain (160 wide) is followed by its last 17 columns mirrored, fading to black, and black.
 // So the left pieces end with the right pieces' first 26 columns. The right pieces' originals are kept for that, and
-// a left piece loaded before its right piece gets them when it's loaded.
-private __gshared Sprite[uint] curtainRight;  // Right pieces' originals
-private struct LeftPiece { Sprite sprite; Address buffer; ubyte[] written; }
-private __gshared LeftPiece[uint] curtainLeft; // Left pieces waiting for their right piece, by the right piece
+// a left piece loaded before its right piece gets them when it's loaded (see Widescreen.curtainRight).
+private struct LeftPiece { Address buffer; const(ubyte)[] written; } // A left piece waiting, and what it was widened to
 
 private void curtainColumns(ref Sprite left, const Sprite right) {
     uint[uint] remap;
@@ -841,8 +887,9 @@ private void curtainColumns(ref Sprite left, const Sprite right) {
 private void writeBytes(Address a, const(ubyte)[] bytes) { foreach (i, b; bytes) (a + cast(uint)i).val!ubyte = b; }
 private bool hasBytes(Address a, const(ubyte)[] bytes) { foreach (i, b; bytes) if ((a + cast(uint)i).val!ubyte != b) return false; return true; }
 
-// The widened file, from the original's (decompressed) file, at `buffer`
-private ubyte[] widen(const Image image, ubyte[] original, Address buffer) {
+// The widened file, from the original's (decompressed) file (and for the curtain's left pieces, their right piece's
+// original if it was loaded)
+private ubyte[] widen(const Image image, ubyte[] original, const(ubyte)[] rightOriginal) {
     if (image.frames.empty) return widenModel(original);
 
     auto s = parse(original);
@@ -857,9 +904,7 @@ private ubyte[] widen(const Image image, ubyte[] original, Address buffer) {
             columns(extend(w, 424, HALF, Side.EDGE)); break;
         case 19 << 16 | 71, 19 << 16 | 72, 19 << 16 | 73, 19 << 16 | 74, 19 << 16 | 76: // Bars: their last 104 columns again
             columns(segments([0, w], [w - MORE, MORE])); break;
-        case 19 << 16 | 450, 19 << 16 | 452: {              // The curtain's right pieces (see curtainRight)
-            auto key = image.key;
-            curtainRight[key] = parse(original);
+        case 19 << 16 | 450, 19 << 16 | 452: {              // The curtain's right pieces
             ushort black = pack(0, 0, 0);
             auto blackIndex = colorIndex(s.palette, black);
             uint[] px;
@@ -881,9 +926,8 @@ private ubyte[] widen(const Image image, ubyte[] original, Address buffer) {
             break;
         }
         case 19 << 16 | 449, 19 << 16 | 451: {              // The curtain's left pieces: + the right piece's first 26 columns
-            auto right = image.key + 1;
             columns(iota(80).array ~ 79.repeat(26).array); // Its last column, until the right piece's columns are there
-            if (auto r = right in curtainRight) curtainColumns(s, *r);
+            if (rightOriginal) curtainColumns(s, parse(rightOriginal));
             break;
         }
         case 20 << 16 | 103: columns(cloneSides(w, 424, HALF, 202, 202)); break; // Starry sky: sides from its middle
@@ -935,20 +979,7 @@ private ubyte[] widen(const Image image, ubyte[] original, Address buffer) {
         fr.cy = image.frames[i][3];
     }
     s.word14 = image.word14;
-    auto widened = build(s);
-
-    if (image.key == (19 << 16 | 450) || image.key == (19 << 16 | 452)) { // Its left piece is waiting for it
-        if (auto left = image.key in curtainLeft) {
-            if (hasBytes(left.buffer, left.written)) {
-                curtainColumns(left.sprite, curtainRight[image.key]);
-                writeBytes(left.buffer, build(left.sprite));
-            }
-            curtainLeft.remove(image.key);
-        }
-    } else if ((image.key == (19 << 16 | 449) || image.key == (19 << 16 | 451)) && (image.key + 1) !in curtainRight) {
-        curtainLeft[image.key + 1] = LeftPiece(s, buffer, widened);
-    }
-    return widened;
+    return build(s);
 }
 
 // (63, 2): a picture frame on a wall. The wall, bricks and pipe are zoomed by 424/320, while the frame (x 18 to 99,
@@ -997,52 +1028,6 @@ private ubyte[] widenModel(ubyte[] d) {
     }
     return d;
 }
-
-// The game reads a file in its main file system by opening its directory (func_80009EAC(47, directory)), reading its
-// header (func_80009B64(46, file, info): info = its data's ROM offset, decompressed size and compression), allocating
-// the size, and decompressing it (func_8000B000(rom, buffer, size, compression)). A widened file says it's bigger, is
-// decompressed as it is, and is widened in its buffer. Only files the size the US ROM's are are widened. One widened
-// image is smaller than the original (52, 16), so its buffer is the original's size: the original is decompressed
-// into it first (in Log Jam, a buffer of the widened size overflowed into the background's and froze the game).
-private __gshared uint fileDirectory;
-private __gshared uint[uint] widening; // ROM offset of a file's data -> IMAGES index
-
-private void setUpImages() {
-    widening.clear();
-    curtainLeft.clear();
-
-    0x80009EAC.onExec({ if (gpr.a0 == 47) fileDirectory = gpr.a1; });
-
-    0x80009B64.onExec({
-        if (gpr.a0 != 46 || !mainChanged) return;
-        auto key = fileDirectory << 16 | (gpr.a1 & 0xFFFF);
-        auto i = IMAGES.countUntil!(m => m.key == key);
-        if (i < 0) return;
-        Address info = gpr.a2;
-        gpr.ra.onExecOnce({
-            if ((info + 4).val!uint != IMAGES[i].size || (info + 8).val!uint != 1) return;
-            widening[info.val!uint] = cast(uint)i;
-            (info + 4).val!uint = max(IMAGES[i].room, IMAGES[i].size); // Room to decompress the original too
-        });
-    });
-
-    0x8000B000.onExec({
-        auto i = gpr.a0 in widening;
-        if (!i) return;
-        auto image = IMAGES[*i];
-        widening.remove(gpr.a0);
-        Address buffer = gpr.a1;
-        gpr.a2 = image.size;
-        gpr.ra.onExecOnce({
-            auto original = new ubyte[image.size];
-            foreach (j, ref b; original) b = (buffer + cast(uint)j).val!ubyte;
-            auto widened = widen(image, original, buffer);
-            if (widened is null || widened.length > image.room) return;
-            writeBytes(buffer, widened);
-        });
-    });
-}
-
 
 // The widened images (and models): (directory, file), the original's size, room for the widened one, and the
 // widened one's header word 0x14 and frames (width, height, center X, center Y), which the patch's code expects
@@ -2530,3 +2515,5 @@ immutable Address[2][] OVERLAY_UNCHECKED = [
     [0x8010BCD0, 0x8010BCD4], [0x8010D218, 0x8010D220], [0x8010FD58, 0x8010FD60], [0x80111800, 0x80111804],
     [0x80111820, 0x80111824],
 ];
+
+mixin NoMutableGlobals;

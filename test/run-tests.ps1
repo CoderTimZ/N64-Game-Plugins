@@ -60,11 +60,6 @@ $env:N64TEST = ($Tests -join ",")
 $env:N64TEST_LOG = $log
 $env:N64TEST_ARG = $Arg
 
-# The plugin keeps a backup of its State in %APPDATA%\N64-Game-Plugins: give the test RMG its own, so tests never
-# touch the real plugin's files (and always start from the test folder's)
-$env:APPDATA = "$Rmg\AppData"
-New-Item -ItemType Directory -Force "$Rmg\AppData" | Out-Null
-
 # RMG shouldn't take the focus or cover other windows: tests get their input from the test plugin, and RMG keeps running
 # without the focus (PauseEmulationOnFocusLoss is off). Once its window shows, it goes behind the others, and the
 # window that had the focus gets it back.

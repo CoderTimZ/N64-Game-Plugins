@@ -15,21 +15,21 @@
       "targetType": "dynamicLibrary",
       "targetName": "MarioParty1",
       "targetPath": "bin",
-      "sourceFiles": ["plugin.d", "marioparty.d", "marioparty1.d"]
+      "sourceFiles": ["plugin.d", "util.d", "state.d", "game.d", "marioparty.d", "marioparty1.d"]
     },
     {
       "name": "mp2",
       "targetType": "dynamicLibrary",
       "targetName": "MarioParty2",
       "targetPath": "bin",
-      "sourceFiles": ["plugin.d", "marioparty.d", "marioparty2.d"]
+      "sourceFiles": ["plugin.d", "util.d", "state.d", "game.d", "marioparty.d", "marioparty2.d"]
     },
     {
       "name": "mp3",
       "targetType": "dynamicLibrary",
       "targetName": "MarioParty3",
       "targetPath": "bin",
-      "sourceFiles": ["plugin.d", "marioparty.d", "marioparty3.d", "mp3map.d", "mp3widescreen.d"]
+      "sourceFiles": ["plugin.d", "util.d", "state.d", "game.d", "marioparty.d", "marioparty3.d", "mp3map.d", "mp3widescreen.d"]
     },
     {
       "name": "mp1-test",
@@ -37,7 +37,7 @@
       "targetName": "MarioParty1",
       "targetPath": "test-bin",
       "versions": ["TestDriver"],
-      "sourceFiles": ["plugin.d", "marioparty.d", "marioparty1.d", "test/driver.d", "test/mp1test.d"]
+      "sourceFiles": ["plugin.d", "util.d", "state.d", "game.d", "marioparty.d", "marioparty1.d", "test/driver.d", "test/mp1test.d"]
     },
     {
       "name": "mp2-test",
@@ -45,7 +45,7 @@
       "targetName": "MarioParty2",
       "targetPath": "test-bin",
       "versions": ["TestDriver"],
-      "sourceFiles": ["plugin.d", "marioparty.d", "marioparty2.d", "test/driver.d", "test/mp2test.d"]
+      "sourceFiles": ["plugin.d", "util.d", "state.d", "game.d", "marioparty.d", "marioparty2.d", "test/driver.d", "test/mp2test.d"]
     },
     {
       "name": "mp3-test",
@@ -53,14 +53,14 @@
       "targetName": "MarioParty3",
       "targetPath": "test-bin",
       "versions": ["TestDriver"],
-      "sourceFiles": ["plugin.d", "marioparty.d", "marioparty3.d", "mp3map.d", "mp3widescreen.d", "test/driver.d", "test/mp3test.d"]
+      "sourceFiles": ["plugin.d", "util.d", "state.d", "game.d", "marioparty.d", "marioparty3.d", "mp3map.d", "mp3widescreen.d", "test/driver.d", "test/mp3test.d"]
     },
     {
       "name": "mg64",
       "targetType": "dynamicLibrary",
       "targetName": "MarioGolf64",
       "targetPath": "bin",
-      "sourceFiles": ["plugin.d", "mariogolf.d"]
+      "sourceFiles": ["plugin.d", "util.d", "state.d", "game.d", "mariogolf.d"]
     }
   ]
 }

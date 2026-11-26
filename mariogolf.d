@@ -1,6 +1,6 @@
 module me.timz.n64.mariogolf;
 
-import me.timz.n64.plugin;
+import me.timz.n64.game;
 import std.algorithm;
 import std.math;
 import std.stdio;
@@ -60,84 +60,99 @@ class Config {
 }
 
 class MarioGolf64 : Game!Config {
-    Memory* data;
+    @Fixed Memory* data;
 
     this(string name, string hash) {
-        super(name, hash);
-
+        // (the heap: malloc, free, InitHeap, and the function that reads the controllers each frame, in the game's thread)
+        super(name, hash, Heap(0x8004E2DC, 0x8004E47C, 0x8004E1E0, 0x8002A310, true));
         data = cast(Memory*)memory.ptr;
+
+        feature(new Percentages);
+        feature(new ExpandMeetArea);
+        feature(new ImproveMaple);
+        feature(new AutoSwing);
+        feature(new ImperfectCPUMeetArea);
     }
 
     ref Player currentPlayer() {
         return data.players[data.currentPlayerId];
     }
+}
 
-    override void onStart() {
-        super.onStart();
+// The shot's percentages: the meet area's and the power's, as the game would use them
+final class Percentages : Feature!MarioGolf64 {
+    Address format;   // The percentage's format string, while it's replaced
+    char[] oldFormat; // ... and what it was
 
-        // Smooth Grid
-        //float f2, f4;
-        //0x80065798.onExec({ f2 = fpr.f2; f4 = fpr.f4; });
-        //0x80082D78.onExec({ gpr.v0 += cast(int)(f4 * 4) % 4; });
-        //0x80082D8C.onExec({ gpr.v1 += cast(int)(f2 * 4) % 4; });
-        //0x800833FC.onExec({ gpr.v0 += cast(int)(fpr.f6); }); // Most important lines
-        //0x80083434.onExec({ gpr.v1 += cast(int)(fpr.f6); }); // Most important lines
-        //0x80083868.onExec({ gpr.v0 -= cast(int)(fpr.f6 / 2) + 2; });
-        //0x800838A0.onExec({ gpr.v0 -= cast(int)(fpr.f6 / 2) + 2; });
-        //0x800838CC.onExec({ gpr.v0 -= cast(int)(fpr.f6 / 2) + 2; });
-        //0x800838F0.onExec({ gpr.v0 -= cast(int)(fpr.f6 / 2) + 2; });
+    @Exec(0x8008B908) void adjustPercentage() {
+        gpr.a2 = cast(uint)round(data.currentClubType == ClubType.PUTTER
+            ? (data.isRaining ? 0.80 : 1) * 100
+            : (data.isRaining ? 0.95 : 1) * (0.25 * gpr.a2 + 0.75 * gpr.a3));
 
-        // Adjust Percentages
-        0x8008B908.onExec({
-            gpr.a2 = cast(uint)round(data.currentClubType == ClubType.PUTTER
-                ? (data.isRaining ? 0.80 : 1) * 100
-                : (data.isRaining ? 0.95 : 1) * (0.25 * gpr.a2 + 0.75 * gpr.a3));
+        format = gpr.a1;
+        oldFormat = null;
+        for (auto c = Ptr!char(format); *c; c++) oldFormat ~= *c;
+        oldFormat ~= '\0';
+        "%3d%%\0".each!((i, c) { Ptr!char(format)[i] = c; });
+        hookExecOnce!restoreFormat(0x8008B910);
+    }
 
-            auto a = Ptr!char(gpr.a1);
-            char[] oldFormat;
-            for (auto c = a; *c; c++) { oldFormat ~= *c; }
-            oldFormat ~= '\0';
-            "%3d%%\0".each!((i, c) { a[i] = c; });
-            0x8008B910.onExecOnce({ oldFormat.each!((i, c) { a[i] = c; }); });
-        });
-        // Move text to the right a bit
-        0x8008B934.onExec({ gpr.a1 += 15; });
-        // Show actual shot power
-        0x8008B9BC.onExec({ if (data.shotPower) { gpr.v0 = gpr.v0 * data.shotPower / 30; } });
-        0x8008B9E4.onExec({ if (data.shotPower) { gpr.v0 = gpr.v0 * data.shotPower / 30; } });
+    void restoreFormat() {
+        oldFormat.each!((i, c) { Ptr!char(format)[i] = c; });
+    }
 
-        if (config.expandMeetArea) {
-            data.clubs.each!((ref c) {
-                c.meetArea.onRead((ref ushort m) { m = m / 2 + 59; });
-            });
+    @Exec(0x8008B934) void moveText() { gpr.a1 += 15; } // A bit to the right
+
+    // The actual shot power
+    @Exec(0x8008B9BC, 0x8008B9E4) void shotPower() {
+        if (data.shotPower) gpr.v0 = gpr.v0 * data.shotPower / 30;
+    }
+}
+
+final class ExpandMeetArea : Feature!MarioGolf64 {
+    override bool enabled() { return config.expandMeetArea; }
+
+    override void setUp() {
+        foreach (ref club; data.clubs) hookRead!expand(club.meetArea);
+    }
+
+    void expand(ref ushort meetArea) { meetArea = meetArea / 2 + 59; }
+}
+
+// The maple clubs (28 to 41) go further and faster
+final class ImproveMaple : Feature!MarioGolf64 {
+    override bool enabled() { return config.improveMaple; }
+
+    override void setUp() {
+        foreach (i; 28..42) {
+            hookRead!longer(data.clubs[i].distance);
+            hookRead!faster(data.clubs[i].powerSpeed);
+            hookRead!faster(data.clubs[i].normalSpeed);
         }
+    }
 
-        if (config.improveMaple) {
-            foreach (i; 28..42) {
-                data.clubs[i].distance.onRead((ref ushort distance) { distance = cast(ushort)(distance * 1.08); });
-                data.clubs[i].powerSpeed.onRead( (ref uint speed) { speed = cast(uint)(speed * 1.125); });
-                data.clubs[i].normalSpeed.onRead((ref uint speed) { speed = cast(uint)(speed * 1.125); });
-            }
-        }
+    void longer(ref ushort distance) { distance = cast(ushort)(distance * 1.08); }
+    void faster(ref uint speed) { speed = cast(uint)(speed * 1.125); }
+}
 
-        if (config.autoSwing) {
-            0x8020AB78.onExec({
-                if (data.powerCursor == 69) {
-                    int offset = cast(int)round(random.normal * 0.75); // 0 ~ 50%, ≤1 ~ 95%, ≤2 ~ 99.9%, ≤3 ~ 100.0%
-                    data.powerCursor = clamp(60 + offset, 0, 69);      // 0 ~ 50%, ±1 ~ 45%, ±2 ~  4.9%, ±3 ~   0.1%
-                }
-            });
-        }
+final class AutoSwing : Feature!MarioGolf64 {
+    override bool enabled() { return config.autoSwing; }
 
-        if (config.imperfectCPUMeetArea) {
-            0x8020AB78.onExec({
-                if (data.currentPlayerId >= 4) return;
-                if (currentPlayer.cpu) {
-                    int offset = cast(int)round(random.normal * 0.5);
-                    data.powerCursor = clamp(60 + offset, 0, 69);
-                }
-            });
+    @Exec(0x8020AB78) void swing() {
+        if (data.powerCursor == 69) {
+            int offset = cast(int)round(random.normal * 0.75); // 0 ~ 50%, ≤1 ~ 95%, ≤2 ~ 99.9%, ≤3 ~ 100.0%
+            data.powerCursor = clamp(60 + offset, 0, 69);      // 0 ~ 50%, ±1 ~ 45%, ±2 ~  4.9%, ±3 ~   0.1%
         }
+    }
+}
+
+final class ImperfectCPUMeetArea : Feature!MarioGolf64 {
+    override bool enabled() { return config.imperfectCPUMeetArea; }
+
+    @Exec(0x8020AB78) void cpuSwing() {
+        if (data.currentPlayerId >= 4 || !currentPlayer.cpu) return;
+        int offset = cast(int)round(random.normal * 0.5);
+        data.powerCursor = clamp(60 + offset, 0, 69);
     }
 }
 
@@ -147,8 +162,9 @@ extern (C) {
     }
 
     int startup() {
-        pluginFactory = (name, hash) => new MarioGolf64(name, hash);
-
+        usePlugin!MarioGolf64();
         return 0;
     }
 }
+
+mixin NoMutableGlobals;

@@ -7,7 +7,7 @@ version (TestDriver):
 import me.timz.n64.marioparty;
 import me.timz.n64.marioparty3;
 import me.timz.n64.mp3map;
-import me.timz.n64.plugin;
+import me.timz.n64.game;
 import me.timz.n64.testdriver;
 import std.algorithm;
 import std.array;
@@ -17,7 +17,7 @@ import std.range;
 import std.string;
 
 // States the tests start from, in the test emulator's folder (TestStates/), made from boot with the plugin's options
-// off (test/mp3-config-plain.json) and an empty State
+// off (test/mp3-config-plain.json) and none of the plugin's state
 // Chilly Waters, a new game of 20 turns (with bonuses, all mini-games): turn 1, as P2's turn starts (P1's move is
 // done). P1 Daisy, P2 Luigi, P4 Peach (computers, normal), P3 Mario (human), 10 coins each but P1's 8.
 enum STATE_CHILLY_TURN_1 = "TestStates/mp3-chilly-turn1.st";
@@ -43,9 +43,10 @@ class TestMarioParty3 : MarioParty3 {
     }
 
     // Tests never connect to a Bingo page, whatever the config says
-    override void loadConfig() {
-        super.loadConfig();
+    override Config readConfig() {
+        auto config = super.readConfig();
         config.bingoURL = "";
+        return config;
     }
 
     override void onStart() {
@@ -54,8 +55,8 @@ class TestMarioParty3 : MarioParty3 {
         clampForcedRolls();
     }
 
-    override void onFrame(ulong frame) {
-        super.onFrame(frame);
+    override void onFrame() {
+        super.onFrame();
         driver.onFrame();
     }
 
@@ -221,6 +222,7 @@ class TestMarioParty3 : MarioParty3 {
             Test("logJamMistakes", &logJamMistakes, 60 * 60 * 20),
             Test("slotSynchHumanPartner", &slotSynchHumanPartner, 60 * 60 * 40),
             Test("frigidBridgesFps", &frigidBridgesFps, 60 * 60 * 20),
+            Test("saveStateInCall", &saveStateInCall, 60 * 60 * 20),
             Test("explore", &explore, 60 * 60 * 30),
             Test("serve", &serve, ulong.max),
         ];
@@ -295,7 +297,7 @@ class TestMarioParty3 : MarioParty3 {
                     }
                     auto start = directory + be(directory + 4 + 4 * (t + 2)), end = directory + be(directory + 4 + 4 * (t + 3));
                     foreach (i; 0..end - start) (cast(Address)(input + i)).val!ubyte = rom[start + i];
-                    0x800698E8.jal(input + 4, pixels, 64, work, {
+                    0x800698E8.jal(input + 4, pixels, 64, work, (uint) {
                         foreach (i; 0..0x1800) output[t * 0x1800 + i] = (cast(Address)(pixels + i)).val!ubyte;
                         decodeTile(t + 1);
                     });
@@ -393,7 +395,7 @@ class TestMarioParty3 : MarioParty3 {
                     int[2][] at;
                     foreach (c; 0..chainCount) foreach (k; 0..chainLength(c)) if (chainSpace(c, k) == sp) at ~= [c, k];
                     d.note("Space ", sp, ": ", data.spaces[sp].type,
-                           i < state.spaces.length ? ", custom " ~ state.spaces[i].to!string : "", ", at ", at);
+                           i < spaces.length ? ", custom " ~ spaces[i].to!string : "", ", at ", at);
                 }
             } else if (step.startsWith("turn:")) { // turn:<player>: waits for a player's (1-4) turn on the board
                 waitForTurn(step[5..$].to!int - 1);
@@ -457,7 +459,6 @@ class TestMarioParty3 : MarioParty3 {
                 });
             } else if (step.startsWith("lucky:")) { // lucky:<P1>,<P2>,<P3>,<P4>: each player's Lucky Space count
                 foreach (i, v; step[6..$].split(",").map!(v => v.to!int).array) players[i].state.luckySpaceCount = v;
-                saveState();
                 d.note("Lucky Space counts: ", players.map!(p => p.state.luckySpaceCount));
             } else if (step.startsWith("untilshop")) { // untilshop[:<state>]: until a player enters an item shop (func_800EC590), which gives them 50 coins (to buy something), then saves a state there
                 bool entered;
@@ -586,10 +587,12 @@ class TestMarioParty3 : MarioParty3 {
                 hvqDump(v[0].to!uint(16), v[1]);
             } else if (step.startsWith("mapbg:")) { // mapbg:<background dir>,<map dir>: sharperCustomBoardMaps' map from that background
                 auto v = step[6..$].split(",").map!(x => x.to!uint).array;
-                0x8004F074.onExecOnce({ useCustomBoardMapBackground(v[0], v[1]); }); // From HuPrcVSleep
+                auto maps = featureOf!(CustomBoardMaps!MarioParty3);
+                d.check(maps !is null, "No sharperCustomBoardMaps");
+                0x8004F074.onExecOnce({ maps.useBackground(v[0], v[1]); }); // From HuPrcVSleep
                 auto start = d.frame;
                 watch(2);
-                while (customBoardMapPreparing() && d.frame - start < 1800) watch(1);
+                while (maps.preparing && d.frame - start < 1800) watch(1);
                 d.note("Map background: ", v[0], " (made in ", d.frame - start, " frames)");
             } else if (step.startsWith("poke:")) { // poke:<hex address>,<byte>: writes a byte
                 auto v = step[5..$].split(",");
@@ -707,7 +710,7 @@ class TestMarioParty3 : MarioParty3 {
 
     // singleUseBattleSpaces (run with test/mp3-config.json, and test/mp3-config-lucky.json for it alongside Lucky
     // Spaces). P2 lands on a Battle Space and a battle is played (the roulette made to give 10 coins), after which the
-    // space is a Blue Space, in the game and in the plugin's State. Then P3 lands on it, and gets a Blue Space's 3 coins
+    // space is a Blue Space, in the game and in the plugin's spaces. Then P3 lands on it, and gets a Blue Space's 3 coins
     // instead of a battle. Then P4 lands on another Battle Space, and the battle is cancelled (the roulette made to give
     // 0 coins), which leaves it a Battle Space.
     void singleUseBattleSpaces() {
@@ -720,8 +723,8 @@ class TestMarioParty3 : MarioParty3 {
         auto battleSpaces = reachableSpaces(Space.Type.BATTLE);
         d.check(battleSpaces.length >= 2, "Fewer than 2 Battle Spaces can be reached in one step");
         auto target = battleSpaces[0], other = battleSpaces[1];
-        auto lucky = state.spaces.count!(s => s == CustomSpace.LUCKY);
-        d.note("Battle Spaces ", target, " and ", other, "; custom spaces: ", state.spaces.length, " (", lucky,
+        auto lucky = spaces.count!(s => s == CustomSpace.LUCKY);
+        d.note("Battle Spaces ", target, " and ", other, "; custom spaces: ", spaces.length, " (", lucky,
                " lucky)");
 
         // The used Battle Space stays a Blue Space: the other custom spaces don't take it, or change because of it
@@ -736,11 +739,11 @@ class TestMarioParty3 : MarioParty3 {
             if (data.spaces[target].type != Space.Type.BLUE) {
                 problems ~= format("space %d is a %s %s", target, data.spaces[target].type, when);
             }
-            if (target >= state.spaces.length || state.spaces[target] != CustomSpace.BLUE) {
-                problems ~= format("the State has space %d as %s %s", target,
-                                   target < state.spaces.length ? state.spaces[target].to!string : "nothing", when);
+            if (target >= spaces.length || spaces[target] != CustomSpace.BLUE) {
+                problems ~= format("the custom spaces have space %d as %s %s", target,
+                                   target < spaces.length ? spaces[target].to!string : "nothing", when);
             }
-            auto nowLucky = state.spaces.count!(s => s == CustomSpace.LUCKY);
+            auto nowLucky = spaces.count!(s => s == CustomSpace.LUCKY);
             if (nowLucky != lucky) problems ~= format("%d Lucky Spaces %s, not %d", nowLucky, when, lucky);
         }
 
@@ -785,8 +788,8 @@ class TestMarioParty3 : MarioParty3 {
         if (data.spaces[other].type != Space.Type.BATTLE) {
             problems ~= format("space %d is a %s after a cancelled battle", other, data.spaces[other].type);
         }
-        if (other < state.spaces.length && state.spaces[other] == CustomSpace.BLUE) {
-            problems ~= format("the State has space %d as BLUE after a cancelled battle", other);
+        if (other < spaces.length && spaces[other] == CustomSpace.BLUE) {
+            problems ~= format("the custom spaces have space %d as BLUE after a cancelled battle", other);
         }
 
         d.screenshot("singleUseBattleSpaces");
@@ -806,7 +809,6 @@ class TestMarioParty3 : MarioParty3 {
         waitForBoard();
         data.totalTurns = data.currentTurn; // This turn is the last
         players.each!(p => p.state.luckySpaceCount = 5);
-        saveState();
         auto board = data.currentBoard;
         d.note("Last turn on board ", board, ": ", describe());
 
@@ -836,24 +838,92 @@ class TestMarioParty3 : MarioParty3 {
                 problems ~= format("P%d's Lucky Space count is still %d", p.index + 1, p.state.luckySpaceCount);
             }
         }
-        if (state.miniGameQueue.byValue.any!(q => !q.empty)) problems ~= "the mini-game order wasn't started over";
-        if (state.spacesBoard != data.currentBoard) {
-            problems ~= format("the custom spaces are board %d's, not board %d's", state.spacesBoard, data.currentBoard);
+        if (featureOf!MiniGameRoulette3.queues.byValue.any!(q => !q.empty)) {
+            problems ~= "the mini-game order wasn't started over";
+        }
+        if (spacesBoard != data.currentBoard) {
+            problems ~= format("the custom spaces are board %d's, not board %d's", spacesBoard, data.currentBoard);
         }
         d.check(problems.empty, problems.join("; "));
     }
+
+    // saveStateInCall: a save state made while the game is in a call that waits for the game (a message shown at the
+    // start of a turn, then waiting for A, as the Superstars message does) has the call and what comes after it in
+    // the plugin's state. Loaded, the game carries on exactly as in the run the state was made in: the message waits
+    // for A and closes, what was to run after it runs, and the turn plays the same.
+    void saveStateInCall() {
+        enum STATE = "TestStates/mp3-in-call.st";
+        enum Address SHOW_MESSAGE = 0x800EC92C;
+        string[] problems;
+        bool showing() { return hooks.calls.length && hooks.calls[0].function_ == SHOW_MESSAGE; }
+
+        setUp(STATE_CHILLY_TURN_1);
+        waitForBoard();
+        onExecDoneOnce(0x800FEF1C, { showTestMessage(); }); // A turn starting (see DoubleCoinMiniGames)
+        d.waitUntil(() => showing, "the message");
+        d.wait(5);
+        d.check(showing, "The message was shown in under 5 frames");
+        auto call = hooks.calls[0];
+        auto player = data.currentPlayerIndex;
+        d.note("Showing the message, returning to ", call.at.to!string(16), " then ", call.next.method, ": ",
+               describe());
+        d.saveEmulatorState(STATE);
+        if (!showing) problems ~= "the message was shown before the state was saved";
+
+        d.waitUntil(() => messageClosed, "the message to close");
+        d.note("The message closed: ", describe());
+        d.wait(10);
+        d.screenshot("saveStateInCall, after the message");
+        auto turnEnd = playTurn(player);
+        auto board = describe();
+        d.note("The turn ended (", turnEnd, "): ", board);
+
+        messageClosed = false;
+        d.loadEmulatorState(STATE);
+        if (hooks.calls.length != 1) {
+            problems ~= format("%d calls in progress after loading the state", hooks.calls.length);
+        } else {
+            auto restored = hooks.calls[0];
+            if (restored.at != call.at || restored.sp != call.sp || restored.function_ != SHOW_MESSAGE ||
+                restored.next != call.next) {
+                problems ~= format("the restored call returns to %08X (sp %08X) from %08X, then %s", restored.at,
+                                   restored.sp, restored.function_, restored.next.method);
+            }
+            if (!restored.gpr.r[].map!(r => r.v).equal(call.gpr.r[].map!(r => r.v))) {
+                problems ~= "the restored call's registers aren't the call's";
+            }
+        }
+        d.waitUntil(() => messageClosed, "the message to close after loading", 60 * 60);
+        d.note("The message closed again: ", describe());
+        d.wait(10);
+        d.screenshot("saveStateInCall, after the message after loading");
+        auto loadedTurnEnd = playTurn(player);
+        d.note("The turn ended again (", loadedTurnEnd, "): ", describe());
+        if (loadedTurnEnd != turnEnd) problems ~= format("the turn went %s, and %s after loading", turnEnd, loadedTurnEnd);
+        if (describe() != board) problems ~= "after loading, the turn ended with " ~ describe();
+        d.check(problems.empty, problems.join("; "));
+    }
+
+    bool messageClosed;
+
+    void showTestMessage() {
+        showGlobalMessage("A save state made during this message\nputs the game back in it.", -1, true,
+                          then!testMessageClosed());
+    }
+
+    void testMessageClosed() { messageClosed = true; }
 
     // Logs the code that reads and writes the save's flag bytes that unlockEverything changes (GwCommon.flag[5] and
     // [6]), and the calls that set or clear flags and encode the save, while the game plays to its end (the final
     // results save the game)
     void flagReaders() {
         int[Address] readers;
-        foreach (Address a; [0x800CC158, 0x800CC159]) {
+        [0x800CC158, 0x800CC159].each!((Address a) {
             a.val!ubyte.onRead((ref ubyte v, Address pc) { readers[pc]++; });
             a.val!ubyte.onWrite((ref ubyte v, Address pc) {
                 d.note("WRITE ", a.to!string(16), " = ", v.to!string(16), " from ", pc.to!string(16));
             });
-        }
+        });
         0x80035EF4.onExec({ d.note("CALL _SetFlag(", cast(int)gpr.a0, ") from ", (cast(uint)gpr.ra).to!string(16)); });
         0x80035F44.onExec({ d.note("CALL _ClearFlag(", cast(int)gpr.a0, ") from ", (cast(uint)gpr.ra).to!string(16)); });
         0x8004F5A4.onExec({
@@ -884,7 +954,7 @@ class TestMarioParty3 : MarioParty3 {
         d.check(config.balanceSuperHardCPU, "Run this with test/mp3-config-logjam.json");
         int[string] reads;
         string[] problems;
-        foreach (p; players) {
+        players.each!((p) {
             p.data.cpuDifficulty.onRead((ref ubyte v, Address pc) {
                 auto key = format("%s from %08X: %s", data.currentScene, pc, cast(CPUDifficulty)v);
                 if (key !in reads) d.note("READ P", p.index + 1, " ", key);
@@ -894,7 +964,7 @@ class TestMarioParty3 : MarioParty3 {
                                        cast(CPUDifficulty)v, pc);
                 }
             });
-        }
+        });
 
         setUp(STATE_CHILLY_TURN_1);
         waitForBoard();

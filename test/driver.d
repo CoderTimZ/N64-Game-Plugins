@@ -8,7 +8,7 @@ module me.timz.n64.testdriver;
 
 version (TestDriver):
 
-import me.timz.n64.plugin;
+import me.timz.n64.game;
 import core.sys.windows.windows;
 import core.thread;
 import std.algorithm;
@@ -16,11 +16,12 @@ import std.array;
 import std.conv;
 import std.datetime.stopwatch;
 import std.datetime.systime : SysTime;
-import core.time : msecs;
+import core.time : Duration, msecs;
 import std.file;
 import std.format;
 import std.path;
 import std.process : environment;
+import std.range : take;
 import std.stdio;
 import std.string;
 
@@ -52,6 +53,7 @@ final class TestDriver {
     private string[] failures;
     private bool finished;
     private StopWatch clock;
+    private Duration testClock; // When the running test started
 
     string arg;              // N64TEST_ARG: an argument for the tests (like which case to run)
 
@@ -98,6 +100,7 @@ final class TestDriver {
             auto test = tests[current];
             note("START ", test.name);
             testStart = frame;
+            testClock = clock.peek;
             holding[] = false;
             fiber = new Fiber({ test.run(); }, 1024 * 1024);
         }
@@ -140,6 +143,10 @@ final class TestDriver {
     }
 
     private void next() {
+        auto seconds = (clock.peek - testClock).total!"msecs" / 1000.0;
+        note(format!"  %.0f frames per second; hooks at %d addresses, %d calls in progress, %d fibers, %d once-hooks"(
+            (frame - testStart) / max(seconds, 0.001), hooks.hooked[0].length, hooks.calls.length, hookFibers.length,
+            hooks.execOnce.length + hooks.execDoneOnce.length));
         fiber = null;
         current++;
     }
@@ -147,6 +154,12 @@ final class TestDriver {
     private void finish() {
         finished = true;
         note("DONE ", passed, " passed, ", failed, " failed, in ", clock.peek.total!"seconds", " s");
+        note("Hook runs: ", hookRun, ", ", hookRun / max(frame, 1), " per frame");
+        auto total = profileTicks.byValue.sum;
+        note(format!"Time in hooks: %.0f us per frame"(total / 10.0 / max(frame, 1)));
+        foreach (a; profileTicks.keys.sort!((x, y) => profileTicks[x] > profileTicks[y]).take(12)) {
+            note(format!"  %08X: %.1f us per frame, %d runs"(a, profileTicks[a] / 10.0 / max(frame, 1), profileRuns[a]));
+        }
         failures.each!(f => note("  FAILED ", f));
         stopEmulation();
     }
@@ -291,3 +304,55 @@ final class TestDriver {
         command(Command.STOP, 0, null);
     }
 }
+
+// Hooks for tests: any delegate (a test build doesn't roll back, so closures are fine here; the games' own hooks are
+// methods, see game.d)
+void onExec(Address address, void delegate(Address) callback) { addHandler(hooks.exec, HookKind.EXECUTE, address, ExecHandler([null, null], callback)); }
+void onExec(Address address, void delegate() callback) { onExec(address, (Address) { callback(); }); }
+void onExecOnce(Address address, void delegate(Address) callback) { addHandler(hooks.execOnce, HookKind.EXECUTE, address, ExecHandler([null, null], callback)); }
+void onExecOnce(Address address, void delegate() callback) { onExecOnce(address, (Address) { callback(); }); }
+void onExecDone(Address address, void delegate(Address) callback) { addHandler(hooks.execDone, HookKind.EXECUTE, address, ExecHandler([null, null], callback)); }
+void onExecDone(Address address, void delegate() callback) { onExecDone(address, (Address) { callback(); }); }
+void onExecDoneOnce(Address address, void delegate(Address) callback) { addHandler(hooks.execDoneOnce, HookKind.EXECUTE, address, ExecHandler([null, null], callback)); }
+void onExecDoneOnce(Address address, void delegate() callback) { onExecDoneOnce(address, (Address) { callback(); }); }
+void clearExec(Address address) { removeHandlers(hooks.exec, HookKind.EXECUTE, address); }
+
+void onRead(T)(ref T field, void delegate() callback)               { onRead!T(field, (ref T v, Address p, Address a) { callback(); }); }
+void onRead(T)(ref T field, void delegate(ref T) callback)          { onRead!T(field, (ref T v, Address p, Address a) { callback(v); }); }
+void onRead(T)(ref T field, void delegate(ref T, Address) callback) { onRead!T(field, (ref T v, Address p, Address a) { callback(v, p); }); }
+void onRead(T)(ref T field, void delegate(ref T, Address, Address) callback) {
+    addHandler(hooks.read[sizeIndex(T.sizeof)], HookKind.READ, field.addr,
+               MemHandler([null, null], (void* v, Address p, Address a) { callback(*cast(T*)v, p, a); }));
+}
+
+void onWrite(T)(ref T field, void delegate() callback)               { onWrite!T(field, (ref T v, Address p, Address a) { callback(); }); }
+void onWrite(T)(ref T field, void delegate(ref T) callback)          { onWrite!T(field, (ref T v, Address p, Address a) { callback(v); }); }
+void onWrite(T)(ref T field, void delegate(ref T, Address) callback) { onWrite!T(field, (ref T v, Address p, Address a) { callback(v, p); }); }
+void onWrite(T)(ref T field, void delegate(ref T, Address, Address) callback) {
+    addHandler(hooks.write[sizeIndex(T.sizeof)], HookKind.WRITE, field.addr,
+               MemHandler([null, null], (void* v, Address p, Address a) { callback(*cast(T*)v, p, a); }));
+}
+
+// Calls a game function from a hook and then the callback with its result, with the registers put back as they were
+// (for tests of the jump mechanism: the games call the game with callGame())
+void jal(Address addr, uint a0 = 0, uint a1 = 0, uint a2 = 0, uint a3 = 0, void delegate(uint) callback = null) {
+    GPR g = *gpr;
+    FPR f = *fpr;
+    gpr.ra = pc();
+    gpr.a0 = a0;
+    gpr.a1 = a1;
+    gpr.a2 = a2;
+    gpr.a3 = a3;
+    jump(addr);
+    gpr.ra.onExecOnce({
+        uint v0 = gpr.v0;
+        *gpr = g;
+        *fpr = f;
+        if (callback) callback(v0);
+    });
+}
+void jal(Address addr, void delegate(uint) callback) { jal(addr, 0, 0, 0, 0, callback); }
+void jal(Address addr, uint a0, void delegate(uint) callback) { jal(addr, a0, 0, 0, 0, callback); }
+void jal(Address addr, uint a0, uint a1, void delegate(uint) callback) { jal(addr, a0, a1, 0, 0, callback); }
+void jal(Address addr, void delegate() callback) { jal(addr, 0, 0, 0, 0, (uint) { callback(); }); }
+void jal(Address addr, uint a0, void delegate() callback) { jal(addr, a0, 0, 0, 0, (uint) { callback(); }); }

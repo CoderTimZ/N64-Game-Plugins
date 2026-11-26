@@ -1,9 +1,10 @@
 /*
  * Sharper zoomed-out maps for custom boards made with PartyPlanner64 (Mario Party 3, US): the map (Z on a turn) is the
  * board's background shrunk to 640x480 (from 1152x864 for most boards, averaging the area each pixel covers) instead
- * of PartyPlanner64's 320x240 copy, drawn in the same place: 2 texels for each of the 320x240 pixels. It's made from the background the board uses this turn, so boards whose background
- * changes (like Seasonal Woodland's seasons, PartyPlanner64's "additional backgrounds") get a matching map. It looks
- * sharper when the emulator renders above the N64's resolution.
+ * of PartyPlanner64's 320x240 copy, drawn in the same place: 2 texels for each of the 320x240 pixels. It's made from
+ * the background the board uses this turn, so boards whose background changes (like Seasonal Woodland's seasons,
+ * PartyPlanner64's "additional backgrounds") get a matching map. It looks sharper when the emulator renders above the
+ * N64's resolution.
  *
  * The original boards' maps are drawn by hand (their routes and arrows over a darkened background), so they're kept.
  * A custom board is told apart by its background's tiles: PartyPlanner64 writes them compressed with the game's type
@@ -18,10 +19,11 @@
  */
 module me.timz.n64.mp3map;
 
-import me.timz.n64.plugin;
+import me.timz.n64.game;
 import std.algorithm;
 import std.array;
 import std.conv;
+import std.exception : assumeUnique;
 
 private enum TILE_W = 64, TILE_H = 48, TILE_BYTES = TILE_W * TILE_H * 2;
 private enum MAP_W = 320, MAP_H = 240; // Where the game draws the map
@@ -41,6 +43,7 @@ private enum Address MAP_VIEW = 0x800D7F5C, MAP_DIR = 0x80102700, SHOWN_DIR = 0x
 
 private enum Address MALLOC = 0x80035934, FREE = 0x80035958; // HuMemMemoryAllocTemp, HuMemMemoryFreeTemp
 private enum Address DMA = 0x8004DB14;                       // (ROM, address, size), returns once it's copied
+private enum uint BUFFER = 0x10000;                          // The ROM is copied through a buffer this big
 
 private struct Directory {
     uint rom;        // Its ROM offset
@@ -50,49 +53,60 @@ private struct Directory {
     uint tileEnd(uint i) const { return files[3 + i]; }
 }
 
-// A shrunk background: 64x48 tiles (RGBA5551, big-endian), from the top left, row by row
+// A shrunk background: its size in 64x48 tiles and in pixels (0 for a background that isn't a custom board's). Its
+// tiles (RGBA5551, big-endian, from the top left, row by row) are in a MapCache.
 private struct Map {
-    uint columns, rows; // Tiles
-    uint width, height; // Pixels
-    ubyte[] tiles;
+    uint columns, rows;
+    uint width, height;
 }
 
-private __gshared {
+// The shrunk backgrounds' tiles, by background directory: what the ROM's background makes, the same every time (on
+// every netplay machine too), so they aren't state, which only says which backgrounds were made (see
+// CustomBoardMaps.maps)
+final class MapCache {
+    immutable(ubyte)[][uint] tiles;
+}
+
+// sharperCustomBoardMaps (see the module's description)
+final class CustomBoardMaps(G) : Feature!G {
     bool ready;            // The map's directory is known (preparedMapDir)
     uint preparedMapDir;
     uint backgroundDir, mapDir;
     uint[2] mapTiles;      // The map's tiles' ROM range
     uint mapColumns, mapRows;
-    Map[uint] maps;        // By background directory (empty for one that isn't a custom board's)
+    uint[uint] mapTileIndices;
+    // The backgrounds made, by directory (a Map.init for one that isn't a custom board's). Like the cache, they're
+    // the session's: loading a save state keeps them.
+    @Session Map[uint] maps;
+    @Fixed MapCache cache;
     bool preparing;
 
     Address buffer;        // The map's tiles and display list in the N64's memory, while the map is shown (after a
                            // marker: a save state loaded since may not have it)
     uint bufferStamp;
     uint bufferDir;        // The background they're from
-    bool allocating;
     int builtX = int.min, builtY = int.min; // The map's position the display list is for
     Address displayList;
-}
 
-void setUpCustomBoardMaps() {
-    maps.clear();
-    ready = false;
-    buffer = 0;
+    this() { cache = new MapCache; }
+
+    override bool enabled() { return config.sharperCustomBoardMaps; }
+
+    override void onStateLoaded() { preparing = false; }
 
     // The board's setup (overlay 128): note the background and map, and make the map if it's a custom board's
-    SETUP.onExec({
+    @Exec(SETUP) void boardSetUp() {
         if (!overlay128()) return;
         auto background = cast(uint)gpr.a0, map = cast(uint)gpr.a2;
         if (background > 0xFF || map > 0xFF || preparing) return;
         backgroundDir = background;
         mapDir = map;
         prepare();
-    });
+    }
 
     // Opening the map: the background it's for is the one shown (the setup's, or another a board's code chose since).
     // This also covers a save state loaded since the setup. A new background's map is made here (about 15 frames).
-    MAP_VIEW.onExec({
+    @Exec(MAP_VIEW) void mapOpened() {
         if (!overlay128() || preparing) return;
         auto background = SHOWN_DIR.val!uint, map = MAP_DIR.val!uint;
         if (background > 0xFF || map > 0xFF) return;
@@ -100,27 +114,27 @@ void setUpCustomBoardMaps() {
         backgroundDir = background;
         mapDir = map;
         prepare();
-    });
+    }
 
     // Drawing the map's tiles: our map instead (once, at its top left tile), or the game's until ours is ready
-    DRAW_CALL.onExec({
+    @Exec(DRAW_CALL) void tileDrawn() {
         if (!overlay128() || !ready) return;
         Address entry = gpr.s0;
         auto rom = (entry + 16).val!uint;
         bool mapTile = rom >= mapTiles[0] && rom < mapTiles[1];
         if (!mapTile) {
-            if (buffer && !allocating) release(); // Back to the board
+            if (buffer) release(); // Back to the board
             return;
         }
         auto map = backgroundDir in maps;
-        if (!map || map.tiles.empty) return;      // Not a custom board's: the game's map
+        if (!map || !map.columns || backgroundDir !in cache.tiles) return; // Not a custom board's: the game's map
         if (buffer && !bufferValid()) buffer = 0; // A save state was loaded: its memory doesn't have the buffer
         if (!buffer || bufferDir != backgroundDir) {
-            if (!allocating) allocate(*map);
-            return;                               // The game's tile this time
+            allocate(backgroundDir);
+            if (!buffer) return; // The game's tile
         }
         // Which map tile this is (the directory's tiles go from the bottom row up), and so where the map is
-        auto index = mapTileIndex(rom);
+        auto index = mapTileIndices.get(rom, 0);
         auto column = index % mapColumns, row = mapRows - 1 - index / mapColumns;
         int x = cast(short)gpr.a2 - cast(int)(column * TILE_W), y = (cast(int)gpr.a3 >> 16) - cast(int)(row * TILE_H);
         if (column == 0 && row == 0) {
@@ -131,106 +145,230 @@ void setUpCustomBoardMaps() {
             gfx.val!uint = p + 8;
         }
         jump(AFTER_DRAW);
-    });
-}
+    }
 
-// For tests: makes the map from another background (as the board's setup does), from a safe point in the game's code
-void useCustomBoardMapBackground(uint background, uint map) {
-    if (!overlay128() || preparing) return;
-    backgroundDir = background;
-    mapDir = map;
-    prepare();
-}
+    // For tests: makes the map from another background (as the board's setup does), from a safe point in the game's
+    // code
+    void useBackground(uint background, uint map) {
+        if (!overlay128() || preparing) return;
+        backgroundDir = background;
+        mapDir = map;
+        prepare();
+    }
 
-// For tests: whether a map is being made
-bool customBoardMapPreparing() { return preparing; }
+    // Reads the file system's table, the directories, and (for a custom board, the first time) the background's tiles,
+    // through a buffer the ROM is copied to. Started at the setup's start: the calls run before it continues.
+    void prepare() {
+        preparing = true;
+        auto fs = cast(uint)(HVQ_FS_HI.val!ushort << 16) + cast(short)HVQ_FS_LO.val!ushort;
+        Address buf = callGame(MALLOC, BUFFER);
+        if (buf) {
+            readMaps(buf, fs);
+            callGame(FREE, buf);
+        }
+        preparing = false;
+    }
+
+    // In prepare(): copies `size` bytes of the ROM from `rom` (rounded down to 2) to the buffer, and returns where they
+    // are
+    Address readRom(Address buf, uint rom, uint size) {
+        auto aligned = rom & ~1u;
+        callGame(DMA, aligned, buf, min(size + (rom - aligned), BUFFER));
+        return buf + (rom - aligned);
+    }
+
+    // In prepare(): a directory of the file system (at `fs` in the ROM)
+    Directory directory(Address buf, uint fs, uint index) {
+        Address t = readRom(buf, fs, 4 + 4 * (index + 2));
+        Directory dir;
+        dir.rom = fs + (t + 4 + 4 * index).val!uint;
+        Address d = readRom(buf, dir.rom, 0x800);
+        auto count = min(d.val!uint, 0x1F0);
+        foreach (i; 0..count) dir.files ~= dir.rom + (d + 4 + 4 * i).val!uint;
+        Address info = readRom(buf, dir.files[0], 16);
+        dir.columns = (info + 8).val!uint;
+        dir.rows = (info + 12).val!uint;
+        return dir;
+    }
+
+    // In prepare(): the map's directory, then the background's map if it isn't made yet. The pixels are kept until all
+    // the tiles are read: they're the ROM's, so if a rollback runs this again, it writes them the same way again.
+    void readMaps(Address buf, uint fs) {
+        auto map = directory(buf, fs, mapDir);
+        mapColumns = map.columns;
+        mapRows = map.rows;
+        mapTileIndices = null;
+        foreach (i; 0..map.columns * map.rows) mapTileIndices[map.tile(i)] = i;
+        mapTiles = [map.tile(0), map.tileEnd(map.columns * map.rows - 1)];
+        preparedMapDir = mapDir;
+        ready = true;
+        if (backgroundDir in maps) return;
+
+        auto background = directory(buf, fs, backgroundDir);
+        if (readRom(buf, background.tile(0), 4).val!uint != 3) { // HVQ: an original board
+            maps[backgroundDir] = Map.init;
+            return;
+        }
+        auto count = background.columns * background.rows;
+        auto pixels = new ushort[count * TILE_W * TILE_H];
+        // The tiles, read a chunk (as many as fit in the buffer) at a time
+        for (uint i = 0; i < count; ) {
+            auto start = background.tile(i) & ~1u;
+            auto last = i;
+            while (last + 1 < count && background.tileEnd(last + 1) - start <= BUFFER) last++;
+            auto end = min(background.tileEnd(last), start + BUFFER);
+            Address data = readRom(buf, start, end - start);
+            auto chunk = new ubyte[end - start];
+            foreach (j, ref v; chunk) v = (data + cast(uint)j).val!ubyte;
+            foreach (t; i..last + 1) {
+                auto decoded = decompress(chunk[background.tile(t) - start..min(background.tileEnd(t), end) - start]);
+                // Tile t: column t % columns, row (from the top) rows - 1 - t / columns
+                auto column = t % background.columns, row = background.rows - 1 - t / background.columns;
+                auto width = background.columns * TILE_W;
+                foreach (y; 0..TILE_H) foreach (x; 0..TILE_W) {
+                    auto o = (y * TILE_W + x) * 2;
+                    pixels[(row * TILE_H + y) * width + column * TILE_W + x] =
+                        o + 1 < decoded.length ? cast(ushort)(decoded[o] << 8 | decoded[o + 1]) : 1;
+                }
+            }
+            i = last + 1;
+        }
+        ubyte[] tiles;
+        auto shrunk = shrink(pixels, background.columns, background.rows, tiles);
+        cache.tiles[backgroundDir] = assumeUnique(tiles);
+        maps[backgroundDir] = shrunk;
+        info("Made the zoomed-out map of background ", backgroundDir, " (", shrunk.width, "x", shrunk.height, ")");
+    }
+
+    // Puts the map's tiles in the N64's memory (and room for the display list after them)
+    void allocate(uint dir) {
+        auto map = maps[dir];
+        auto tiles = cache.tiles[dir];
+        Address b = callGame(MALLOC, cast(uint)(MARKER + tiles.length + displayListSize(map)));
+        if (!b) return;
+        bufferStamp++;
+        b.val!uint = MAGIC;
+        (b + 4).val!uint = bufferStamp;
+        buffer = b + MARKER;
+        bufferDir = dir;
+        displayList = buffer + cast(uint)tiles.length;
+        foreach (i, v; tiles) (buffer + cast(uint)i).val!ubyte = v;
+        builtX = builtY = int.min;
+    }
+
+    bool bufferValid() {
+        Address start = buffer - MARKER;
+        return start.val!uint == MAGIC && (start + 4).val!uint == bufferStamp;
+    }
+
+    void release() {
+        auto valid = bufferValid();
+        Address start = buffer - MARKER;
+        buffer = 0;
+        if (!valid) return;
+        start.val!uint = 0;
+        callGame(FREE, start);
+    }
+
+    // Where the display list's commands start
+    Address commands(const Map map) { return displayList + VERTICES + map.columns * map.rows * 8 * 16; }
+
+    // The display list drawing the map's tiles over the 320x240 the game's map covers, at (x, y), as textured
+    // triangles: unlike texture rectangles, which some emulators draw at the N64's resolution (like Parallel's "native
+    // resolution TEX_RECT"), they're drawn at the emulator's. Positions are in 1/4 pixels (VTX), mapped to the screen
+    // by an orthographic projection and a viewport covering 0 to 1024 pixels (wider than any screen, which clips them).
+    // Each tile's two parts (rows 0 to 31 and 32 to 47, as the game loads them: a tile doesn't fit in the texture
+    // memory) are loaded and drawn in turn, filtered bilinearly and clamped at their edges. The game sets its own
+    // viewport, projection and modes after the background, so only the background pass's texture modes are restored at
+    // the end.
+    void buildDisplayList(const Map map, int x, int y) {
+        builtX = x;
+        builtY = y;
+        Address data = displayList;                      // The viewport, matrices and vertices, then the commands
+        Address p = commands(map);
+        void command(uint w0, uint w1) { p.val!uint = w0; (p + 4).val!uint = w1; p += 8; }
+        void half(Address a, int v) { a.val!ubyte = cast(ubyte)(v >> 8); (a + 1).val!ubyte = cast(ubyte)v; }
+        uint physical(Address a) { return a & 0x1FFFFFFF; }
+
+        // The viewport: scale and translation (x, y, z, 0) in 1/4 pixels, 512 pixels: x and y from 0 to 1024
+        foreach (i, v; [2048, 2048, 511, 0, 2048, 2048, 511, 0]) half(data + VIEWPORT + cast(uint)i * 2, v);
+        // A 4x4 matrix in 16.16 fixed point (integer parts, then fractions), row by row, for row vectors
+        void matrix(Address m, const int[16] values) { // In 1/65536
+            foreach (i, v; values) {
+                half(m + cast(uint)i * 2, v >> 16);
+                half(m + 32 + cast(uint)i * 2, v & 0xFFFF);
+            }
+        }
+        // x (1/4 pixels) to x / 2048 - 1, y to 1 - y / 2048: the viewport makes those x / 4 and y / 4 pixels
+        matrix(data + PROJECTION, [32, 0, 0, 0,  0, -32, 0, 0,  0, 0, 65536, 0,  -65536, 65536, 0, 65536]);
+        matrix(data + MODELVIEW, [65536, 0, 0, 0,  0, 65536, 0, 0,  0, 0, 65536, 0,  0, 0, 0, 65536]);
+
+        command(0xE7000000, 0);                                       // gDPPipeSync
+        command(0xDC080008, physical(data + VIEWPORT));               // gSPViewport
+        command(0xDA380007, physical(data + PROJECTION));             // gSPMatrix (projection, load)
+        command(0xDA380003, physical(data + MODELVIEW));              // gSPMatrix (modelview, load)
+        command(0xD9000000, 0);                                       // gSPLoadGeometryMode(0): no z-buffer, culling, lighting
+        command(0xD7000002, 0xFFFFFFFF);                              // gSPTexture (on, scale 1)
+        command(0xE3000A01, 0);                                       // gDPSetCycleType(G_CYC_1CYCLE)
+        command(0xE3001201, 0x2000);                                  // gDPSetTextureFilter(G_TF_BILERP)
+        command(0xE3000C00, 0x80000);                                 // gDPSetTexturePersp(G_TP_PERSP): the RSP's
+                                                                      // texture coordinates are always perspective's
+        command(0xFCFFFFFF, 0xFFFCF279);                              // gDPSetCombineMode(G_CC_DECALRGBA)
+        command(0xE200001C, 0x00552248);                              // The background's render mode
+        command(0xE7000000, 0);                                       // gDPPipeSync
+
+        auto scaleX = cast(double)MAP_W / map.width, scaleY = cast(double)MAP_H / map.height;
+        Address vertex = data + VERTICES;
+        foreach (row; 0..map.rows) foreach (column; 0..map.columns) {
+            Address texture = buffer + (row * map.columns + column) * TILE_BYTES;
+            Address first = vertex;
+            // Its 8 vertices: the corners of its two parts, with their texture coordinates (10.5 fixed point, half a
+            // texel in, for the bilinear filter's texel centers)
+            foreach (part; 0..2) {
+                auto top = part * 32, height = part ? 16 : 32;
+                auto x0 = cast(int)((x + column * TILE_W * scaleX) * 4 + 0.5);
+                auto x1 = cast(int)((x + (column + 1) * TILE_W * scaleX) * 4 + 0.5);
+                auto y0 = cast(int)((y + (row * TILE_H + top) * scaleY) * 4 + 0.5);
+                auto y1 = cast(int)((y + (row * TILE_H + top + height) * scaleY) * 4 + 0.5);
+                foreach (corner; 0..4) {
+                    bool right = corner == 1 || corner == 2, bottom = corner >= 2;
+                    half(vertex, right ? x1 : x0);
+                    half(vertex + 2, bottom ? y1 : y0);
+                    half(vertex + 4, 0);
+                    half(vertex + 6, 0);
+                    half(vertex + 8, (right ? TILE_W : 0) * 32 - 16);
+                    half(vertex + 10, (bottom ? height : 0) * 32 - 16);
+                    (vertex + 12).val!uint = 0xFFFFFFFF;
+                    vertex += 16;
+                }
+            }
+            command(0x01008010, physical(first));                     // gSPVertex(first, 8, 0)
+            foreach (part; 0..2) {
+                auto top = part * 32, height = part ? 16 : 32;
+                auto clamp = 0x00080200;                              // Clamped (no mirroring or masks) in s and t
+                command(0xFD100000, physical(texture + top * TILE_W * 2));                 // gDPSetTextureImage (RGBA16)
+                command(0xF5100000, 0x07000000 | clamp);                                  // gDPSetTile (load)
+                command(0xE6000000, 0);                                                   // gDPLoadSync
+                command(0xF3000000, 0x07000000 | (TILE_W * height - 1) << 12 | 0x080);   // gDPLoadBlock
+                command(0xE7000000, 0);                                                   // gDPPipeSync
+                command(0xF5102000, clamp);                                               // gDPSetTile (render)
+                command(0xF2000000, 63 << 14 | (height - 1) << 2);                        // gDPSetTileSize (0..63, 0..h-1)
+                auto v = part * 4 * 2;                                                    // Vertex indices (times 2)
+                command(0x06000000 | v << 16 | (v + 2) << 8 | (v + 4), (v << 16) | (v + 4) << 8 | (v + 6)); // gSP2Triangles
+            }
+        }
+
+        // The background pass's modes again (for the game's tiles drawn after this)
+        command(0xE7000000, 0);                                       // gDPPipeSync
+        command(0xE3001201, 0x3000);                                  // Its texture filter
+        command(0xE3000C00, 0);                                       // Its texture perspective (off)
+        command(0xD9FFFFFF, 0x00220401);                              // Its geometry mode
+        command(0xE7000000, 0);                                       // gDPPipeSync
+        command(0xDF000000, 0);                                       // gSPEndDisplayList
+    }
+}
 
 private bool overlay128() { return DECODE_CALL.val!uint == DECODE_CALL_WORD && SETUP.val!uint == SETUP_WORD; }
-
-private __gshared uint[uint] mapTileIndices;
-private uint mapTileIndex(uint rom) { return mapTileIndices.get(rom, 0); }
-
-// Reads the file system's table, the directories, and (for a custom board, the first time) the background's tiles,
-// through a buffer the ROM is copied to. Called at the setup's start: the calls run before it continues.
-private void prepare() {
-    preparing = true;
-    auto fs = cast(uint)(HVQ_FS_HI.val!ushort << 16) + cast(short)HVQ_FS_LO.val!ushort;
-    enum BUFFER = 0x10000;
-    MALLOC.jal(BUFFER, (uint b) {
-        Address buf = b;
-        if (!buf) { preparing = false; return; }
-        void finish() { FREE.jal(buf, { preparing = false; }); }
-        uint word(Address a) { return a.val!uint; }
-        // Copies `size` bytes of the ROM from `rom` (rounded down to 2) and calls `then` with the buffer
-        void read(uint rom, uint size, void delegate(Address) then) {
-            auto aligned = rom & ~1u;
-            DMA.jal(aligned, buf, min(size + (rom - aligned), BUFFER), { then(buf + (rom - aligned)); });
-        }
-        void directory(uint index, void delegate(Directory) then) {
-            read(fs, 4 + 4 * (index + 2), (Address t) {
-                auto rom = fs + word(t + 4 + 4 * index);
-                read(rom, 0x800, (Address d) {
-                    Directory dir;
-                    dir.rom = rom;
-                    auto count = min(word(d), 0x1F0);
-                    foreach (i; 0..count) dir.files ~= rom + word(d + 4 + 4 * i);
-                    read(dir.files[0], 16, (Address info) {
-                        dir.columns = word(info + 8);
-                        dir.rows = word(info + 12);
-                        then(dir);
-                    });
-                });
-            });
-        }
-        directory(mapDir, (Directory map) {
-            mapColumns = map.columns;
-            mapRows = map.rows;
-            mapTileIndices.clear();
-            foreach (i; 0..map.columns * map.rows) mapTileIndices[map.tile(i)] = i;
-            mapTiles = [map.tile(0), map.tileEnd(map.columns * map.rows - 1)];
-            preparedMapDir = mapDir;
-            ready = true;
-            if (backgroundDir in maps) return finish();
-            directory(backgroundDir, (Directory background) {
-                read(background.tile(0), 4, (Address first) {
-                    if (word(first) != 3) { maps[backgroundDir] = Map.init; return finish(); } // HVQ: an original board
-                    auto count = background.columns * background.rows;
-                    auto pixels = new ushort[count * TILE_W * TILE_H];
-                    // The tiles, read a chunk (as many as fit in the buffer) at a time
-                    void tiles(uint i) {
-                        if (i == count) {
-                            maps[backgroundDir] = shrink(pixels, background.columns, background.rows);
-                            info("Made the zoomed-out map of background ", backgroundDir, " (",
-                                 maps[backgroundDir].width, "x", maps[backgroundDir].height, ")");
-                            return finish();
-                        }
-                        auto start = background.tile(i) & ~1u;
-                        auto last = i;
-                        while (last + 1 < count && background.tileEnd(last + 1) - start <= BUFFER) last++;
-                        auto end = min(background.tileEnd(last), start + BUFFER);
-                        read(start, end - start, (Address data) {
-                            auto chunk = new ubyte[end - start];
-                            foreach (j, ref v; chunk) v = (data + cast(uint)j).val!ubyte;
-                            foreach (t; i..last + 1) {
-                                auto decoded = decompress(chunk[background.tile(t) - start..min(background.tileEnd(t), end) - start]);
-                                // Tile t: column t % columns, row (from the top) rows - 1 - t / columns
-                                auto column = t % background.columns, row = background.rows - 1 - t / background.columns;
-                                auto width = background.columns * TILE_W;
-                                foreach (y; 0..TILE_H) foreach (x; 0..TILE_W) {
-                                    auto o = (y * TILE_W + x) * 2;
-                                    pixels[(row * TILE_H + y) * width + column * TILE_W + x] =
-                                        o + 1 < decoded.length ? cast(ushort)(decoded[o] << 8 | decoded[o + 1]) : 1;
-                                }
-                            }
-                            tiles(last + 1);
-                        });
-                    }
-                    tiles(0);
-                });
-            });
-        });
-    });
-}
 
 // A type 3 file (u32 3, u32 size, then the data compressed with the sliding window method)
 private ubyte[] decompress(const ubyte[] file) {
@@ -273,14 +411,14 @@ private ubyte[] decompress(const ubyte[] file) {
 // The background (columns x rows tiles of RGBA5551 pixels, row by row) resized to MAP_SCALE times the map's size
 // (smaller only: one that's already smaller keeps its size), as 64x48 tiles. Each new pixel is the average of the
 // background's area it covers, with the pixels at its edges weighted by how much of them it covers.
-private Map shrink(const ushort[] pixels, uint columns, uint rows) {
+private Map shrink(const ushort[] pixels, uint columns, uint rows, out ubyte[] tiles) {
     auto width = columns * TILE_W, height = rows * TILE_H;
     Map map;
     map.width = min(width, MAP_W * MAP_SCALE);
     map.height = min(height, MAP_H * MAP_SCALE);
     map.columns = (map.width + TILE_W - 1) / TILE_W;
     map.rows = (map.height + TILE_H - 1) / TILE_H;
-    map.tiles = new ubyte[map.columns * map.rows * TILE_BYTES];
+    tiles = new ubyte[map.columns * map.rows * TILE_BYTES];
 
     // For each new column (or row): the source pixels it covers and how much of each (in 1/newSize of a pixel)
     static struct Span { uint first; uint[] weights; }
@@ -307,150 +445,22 @@ private Map shrink(const ushort[] pixels, uint columns, uint rows) {
         }
         auto c = cast(ushort)((r + total / 2) / total << 11 | (g + total / 2) / total << 6 | (b + total / 2) / total << 1 | 1);
         auto o = ((y / TILE_H * map.columns + x / TILE_W) * TILE_H + y % TILE_H) * TILE_W * 2 + x % TILE_W * 2;
-        map.tiles[o] = cast(ubyte)(c >> 8);
-        map.tiles[o + 1] = cast(ubyte)c;
+        tiles[o] = cast(ubyte)(c >> 8);
+        tiles[o + 1] = cast(ubyte)c;
     }
     return map;
 }
 
-// Puts the map's tiles in the N64's memory (and room for the display list after them)
-private void allocate(const Map map) {
-    allocating = true;
-    auto dir = backgroundDir;
-    auto tiles = map.tiles.length;
-    auto size = MARKER + tiles + displayListSize(map);
-    MALLOC.jal(cast(uint)size, (uint b) {
-        allocating = false;
-        if (!b) return;
-        bufferStamp++;
-        (cast(Address)b).val!uint = MAGIC;
-        (cast(Address)(b + 4)).val!uint = bufferStamp;
-        buffer = b + MARKER;
-        bufferDir = dir;
-        displayList = buffer + cast(uint)tiles;
-        foreach (i, v; map.tiles) (buffer + cast(uint)i).val!ubyte = v;
-        builtX = builtY = int.min;
-    });
-}
-
 private enum uint MAGIC = 0x4D50334D; // "MP3M"
 private enum uint MARKER = 16;         // Before the tiles (keeping them 16-byte aligned)
-
-private bool bufferValid() {
-    Address start = buffer - MARKER;
-    return start.val!uint == MAGIC && (start + 4).val!uint == bufferStamp;
-}
-
-private void release() {
-    auto valid = bufferValid();
-    Address start = buffer - MARKER;
-    buffer = 0;
-    if (!valid) return;
-    start.val!uint = 0;
-    FREE.jal(start);
-}
 
 // After the tiles: the viewport, the projection and modelview matrices, the vertices (8 for each tile), and the
 // display list (its commands: the setup, 17 for each tile, the restoring and the end)
 private enum uint VIEWPORT = 0, PROJECTION = 16, MODELVIEW = 80, VERTICES = 144;
 private enum uint SETUP_COMMANDS = 12, TILE_COMMANDS = 17, END_COMMANDS = 6;
 
-// Where the display list's commands start
-private Address commands(const Map map) { return displayList + VERTICES + map.columns * map.rows * 8 * 16; }
-
 private size_t displayListSize(const Map map) {
     return VERTICES + map.columns * map.rows * 8 * 16 + (SETUP_COMMANDS + map.columns * map.rows * TILE_COMMANDS + END_COMMANDS) * 8;
 }
 
-// The display list drawing the map's tiles over the 320x240 the game's map covers, at (x, y), as textured triangles:
-// unlike texture rectangles, which some emulators draw at the N64's resolution (like Parallel's "native resolution
-// TEX_RECT"), they're drawn at the emulator's. Positions are in 1/4 pixels (VTX), mapped to the screen by an
-// orthographic projection and a viewport covering 0 to 1024 pixels (wider than any screen, which clips them). Each
-// tile's two parts (rows 0 to 31 and 32 to 47, as the game loads them: a tile doesn't fit in the texture memory) are
-// loaded and drawn in turn, filtered bilinearly and clamped at their edges. The game sets its own viewport,
-// projection and modes after the background, so only the background pass's texture modes are restored at the end.
-private void buildDisplayList(const Map map, int x, int y) {
-    builtX = x;
-    builtY = y;
-    Address data = displayList;                      // The viewport, matrices and vertices, then the commands
-    Address p = commands(map);
-    void command(uint w0, uint w1) { p.val!uint = w0; (p + 4).val!uint = w1; p += 8; }
-    void half(Address a, int v) { a.val!ubyte = cast(ubyte)(v >> 8); (a + 1).val!ubyte = cast(ubyte)v; }
-    uint physical(Address a) { return a & 0x1FFFFFFF; }
-
-    // The viewport: scale and translation (x, y, z, 0) in 1/4 pixels, 512 pixels: x and y from 0 to 1024
-    foreach (i, v; [2048, 2048, 511, 0, 2048, 2048, 511, 0]) half(data + VIEWPORT + cast(uint)i * 2, v);
-    // A 4x4 matrix in 16.16 fixed point (integer parts, then fractions), row by row, for row vectors
-    void matrix(Address m, const int[16] values) { // In 1/65536
-        foreach (i, v; values) {
-            half(m + cast(uint)i * 2, v >> 16);
-            half(m + 32 + cast(uint)i * 2, v & 0xFFFF);
-        }
-    }
-    // x (1/4 pixels) to x / 2048 - 1, y to 1 - y / 2048: the viewport makes those x / 4 and y / 4 pixels
-    matrix(data + PROJECTION, [32, 0, 0, 0,  0, -32, 0, 0,  0, 0, 65536, 0,  -65536, 65536, 0, 65536]);
-    matrix(data + MODELVIEW, [65536, 0, 0, 0,  0, 65536, 0, 0,  0, 0, 65536, 0,  0, 0, 0, 65536]);
-
-    command(0xE7000000, 0);                                       // gDPPipeSync
-    command(0xDC080008, physical(data + VIEWPORT));               // gSPViewport
-    command(0xDA380007, physical(data + PROJECTION));             // gSPMatrix (projection, load)
-    command(0xDA380003, physical(data + MODELVIEW));              // gSPMatrix (modelview, load)
-    command(0xD9000000, 0);                                       // gSPLoadGeometryMode(0): no z-buffer, culling, lighting
-    command(0xD7000002, 0xFFFFFFFF);                              // gSPTexture (on, scale 1)
-    command(0xE3000A01, 0);                                       // gDPSetCycleType(G_CYC_1CYCLE)
-    command(0xE3001201, 0x2000);                                  // gDPSetTextureFilter(G_TF_BILERP)
-    command(0xE3000C00, 0x80000);                                 // gDPSetTexturePersp(G_TP_PERSP): the RSP's
-                                                                  // texture coordinates are always perspective's
-    command(0xFCFFFFFF, 0xFFFCF279);                              // gDPSetCombineMode(G_CC_DECALRGBA)
-    command(0xE200001C, 0x00552248);                              // The background's render mode
-    command(0xE7000000, 0);                                       // gDPPipeSync
-
-    auto scaleX = cast(double)MAP_W / map.width, scaleY = cast(double)MAP_H / map.height;
-    Address vertex = data + VERTICES;
-    foreach (row; 0..map.rows) foreach (column; 0..map.columns) {
-        Address texture = buffer + (row * map.columns + column) * TILE_BYTES;
-        Address first = vertex;
-        // Its 8 vertices: the corners of its two parts, with their texture coordinates (10.5 fixed point, half a
-        // texel in, for the bilinear filter's texel centers)
-        foreach (part; 0..2) {
-            auto top = part * 32, height = part ? 16 : 32;
-            auto x0 = cast(int)((x + column * TILE_W * scaleX) * 4 + 0.5);
-            auto x1 = cast(int)((x + (column + 1) * TILE_W * scaleX) * 4 + 0.5);
-            auto y0 = cast(int)((y + (row * TILE_H + top) * scaleY) * 4 + 0.5);
-            auto y1 = cast(int)((y + (row * TILE_H + top + height) * scaleY) * 4 + 0.5);
-            foreach (corner; 0..4) {
-                bool right = corner == 1 || corner == 2, bottom = corner >= 2;
-                half(vertex, right ? x1 : x0);
-                half(vertex + 2, bottom ? y1 : y0);
-                half(vertex + 4, 0);
-                half(vertex + 6, 0);
-                half(vertex + 8, (right ? TILE_W : 0) * 32 - 16);
-                half(vertex + 10, (bottom ? height : 0) * 32 - 16);
-                (vertex + 12).val!uint = 0xFFFFFFFF;
-                vertex += 16;
-            }
-        }
-        command(0x01008010, physical(first));                     // gSPVertex(first, 8, 0)
-        foreach (part; 0..2) {
-            auto top = part * 32, height = part ? 16 : 32;
-            auto clamp = 0x00080200;                              // Clamped (no mirroring or masks) in s and t
-            command(0xFD100000, physical(texture + top * TILE_W * 2));                 // gDPSetTextureImage (RGBA16)
-            command(0xF5100000, 0x07000000 | clamp);                                  // gDPSetTile (load)
-            command(0xE6000000, 0);                                                   // gDPLoadSync
-            command(0xF3000000, 0x07000000 | (TILE_W * height - 1) << 12 | 0x080);   // gDPLoadBlock
-            command(0xE7000000, 0);                                                   // gDPPipeSync
-            command(0xF5102000, clamp);                                               // gDPSetTile (render)
-            command(0xF2000000, 63 << 14 | (height - 1) << 2);                        // gDPSetTileSize (0..63, 0..h-1)
-            auto v = part * 4 * 2;                                                    // Vertex indices (times 2)
-            command(0x06000000 | v << 16 | (v + 2) << 8 | (v + 4), (v << 16) | (v + 4) << 8 | (v + 6)); // gSP2Triangles
-        }
-    }
-
-    // The background pass's modes again (for the game's tiles drawn after this)
-    command(0xE7000000, 0);                                       // gDPPipeSync
-    command(0xE3001201, 0x3000);                                  // Its texture filter
-    command(0xE3000C00, 0);                                       // Its texture perspective (off)
-    command(0xD9FFFFFF, 0x00220401);                              // Its geometry mode
-    command(0xE7000000, 0);                                       // gDPPipeSync
-    command(0xDF000000, 0);                                       // gSPEndDisplayList
-}
+mixin NoMutableGlobals;

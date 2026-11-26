@@ -1,10 +1,9 @@
 module me.timz.n64.marioparty1;
 
 import me.timz.n64.marioparty;
-import me.timz.n64.plugin;
+import me.timz.n64.game;
 import std.algorithm;
 import std.range;
-import std.stdio;
 import std.json;
 import std.conv;
 import std.random;
@@ -56,16 +55,6 @@ class Config : MarioPartyConfig {
             Character.DK:    1
         ];
     }
-}
-
-class PlayerState {
-
-}
-
-class State : MarioPartyState!PlayerState {
-    ShuffleStream!MiniGame[MiniGameType] miniGameQueue;
-    CustomSpace[] spaces;
-    int spacesBoard = -1; // The board (data.currentBoard) spaces are for (-1: none yet)
 }
 
 union Space {
@@ -183,42 +172,28 @@ union PlayerPanel {
     mixin Field!(0x03, PanelColor, "color");
 }
 
-class MarioParty1 : MarioParty!(Config, State, Memory) {
-    bool coinsEqualizing; // In the Bowser Space event that sets everyone's coins to the average
+class MarioParty1 : MarioParty!(Config, Memory) {
+    mixin CustomSpaces!CustomSpace;
 
     this(string name, string hash) {
-        super(name, hash);
+        // (the permanent heap: HuMemDirectMalloc, HuMemDirectFree, MakePermHeap, and HuPrcVSleep; MallocTemp, FreeTemp)
+        super(name, hash, Heap(0x8003B6A4, 0x8003B6C8, 0x8003B680, 0x800635B4), TempHeap(0x8003B774, 0x8003B798));
 
-        // Keep the State on the permanent heap (D_800D6030, MakePermHeap, HuMemDirectMalloc, HuMemDirectFree, HuPrcVSleep)
-        permanentHeap = PermanentHeap(0x800D6030, 0x8003B680, 0x8003B6A4, 0x8003B6C8, 0x800635B4);
-        tempHeap = TempHeap(0x8003B774, 0x8003B798); // MallocTemp, FreeTemp (on D_800D6040)
+        alias G = MarioParty1;
+        feature(new ConfiguredCharacters!G);
+        feature(new RandomizeState!G);
+        feature(new TeamScores1);
+        feature(new TeamMiniGames!G);
+        feature(new TeamControl1);
+        feature(new BlockWeights);
+        feature(new MiniGameRoulette1);
+        feature(new RandomBonus1);
+        feature(new CustomSpaces1);
+        feature(new MapScrollSpeed!G(0x80058F5C));
+        feature(new BingoRanking!G(0x8004FEBC, 0x8004FF60, 0x8004FEE4, 0x846332BC));
+        feature(new ChanceTimeFix!G(0x800FC830, 0x800FE1A0));
+        feature(new PlayerInfo1); // (last: see PlayerInfo)
     }
-
-    // A Chance Time between teammates changes nothing for the team. Once the blocks stop, chancePlayer1 and
-    // chancePlayer2 are player indices (Chance Time's own result window reads GwPlayer[] with them).
-    override bool lockTeamScores() const {
-        if (data.currentScene == Scene.CHANCE_TIME) {
-            if (data.chancePlayer1 < players.length && data.chancePlayer2 < players.length) {
-                return team(players[data.chancePlayer1])
-                    == team(players[data.chancePlayer2]);
-            }
-        }
-        return false;
-    }
-
-    // The Bowser Space event that sets every player's coins to the average moves each player's coins one at a time, so
-    // syncing teammates would count each change twice (like Mario Party 3's Bowser Revolution)
-    override bool disableTeamScores() const {
-        return data.currentScene == Scene.BOWSER && coinsEqualizing;
-    }
-
-    override bool disableTeamControl() const {
-        return data.currentScene == Scene.GAME_SETUP
-            || data.currentScene == Scene.FINAL_RESULTS_2;
-    }
-
-    alias isBoardScene = typeof(super).isBoardScene;
-    alias isScoreScene = typeof(super).isScoreScene;
 
     override bool isBoardScene(Scene scene) const {
         switch (scene) {
@@ -279,13 +254,129 @@ class MarioParty1 : MarioParty!(Config, State, Memory) {
         }
     }
 
+    alias isBoardScene = typeof(super).isBoardScene;
+    alias isScoreScene = typeof(super).isScoreScene;
+
     // The bonus stars are given in scene FINISH_BOARD, or FINISH_BOARD_NO_STARS when nobody has a Star yet (a copy of
     // it, at other addresses)
     bool isBonusScene() const {
         return data.currentScene == Scene.FINISH_BOARD || data.currentScene == Scene.FINISH_BOARD_NO_STARS;
     }
+}
 
-    override uint getBonusStat(Player player, BonusType type) {
+// blockWeights: how often the dice block is each kind
+final class BlockWeights : Feature!MarioParty1 {
+    override bool enabled() { return config.blockWeights.length > 0; }
+
+    @Exec(0x80040828) void rollBlock() {
+        gpr.v0 = weighted(config.blockWeights, random);
+    }
+}
+
+final class TeamScores1 : TeamScores!MarioParty1 {
+    bool coinsEqualizing; // In the Bowser Space event that sets everyone's coins to the average
+
+    // A Chance Time between teammates changes nothing for the team. Once the blocks stop, chancePlayer1 and
+    // chancePlayer2 are player indices (Chance Time's own result window reads GwPlayer[] with them).
+    override bool locked() const {
+        return data.currentScene == Scene.CHANCE_TIME && data.chancePlayer1 < players.length &&
+               data.chancePlayer2 < players.length && team(players[data.chancePlayer1]) == team(players[data.chancePlayer2]);
+    }
+
+    // The Bowser Space event that sets every player's coins to the average moves each player's coins one at a time, so
+    // syncing teammates would count each change twice (like Mario Party 3's Bowser Revolution)
+    override bool disabled() const {
+        return data.currentScene == Scene.BOWSER && coinsEqualizing;
+    }
+
+    @Exec(0x800F6AF8) void bowserEqualizing() { // func_800F6AF8_BowserSpaceEvent: sets every player's coins to the average
+        if (data.currentScene == Scene.BOWSER) coinsEqualizing = true;
+    }
+
+    @Write("data.currentScene") void bowserSceneChanged(ref Scene scene) {
+        if (scene != Scene.BOWSER) coinsEqualizing = false;
+    }
+
+    // The final results add each player's own bonus stars to their stars, outside the scenes where teammates' scores
+    // are kept the same. Each player's bonus stars are made their team's, before the board's winner is shown, so the
+    // final results give every teammate the team's.
+    @Write("data.currentScene") void teamBonusStars(ref Scene scene) {
+        if (scene != Scene.BOARD_WINNER || data.currentScene == Scene.BOARD_WINNER) return;
+        ushort[4] team;
+        foreach (p; players) team[p.index] = cast(ushort)teamMembers(p).map!(t => cast(int)data.bonusStars[t.index]).sum;
+        foreach (i, b; team) data.bonusStars[i] = b;
+    }
+
+    // Boo can't steal from the player's teammates. The Boo scene (func_800F884C) enables "Steal Coins" and "Steal Stars"
+    // if another player has coins or stars, and each player in "From whom?" if they have them: these loads (of player
+    // s1's coins or stars) read 0 for teammates, so teammates are greyed out.
+    @ExecDone(0x800F890C, 0x800F8988, 0x800F8B10, 0x800F8B54) void booGreysOutTeammate() {
+        if (booTeammate(gpr.s1)) gpr.v0 = 0;
+    }
+
+    // A CPU player decides in func_800F7278, which leaves here with its choice and victim. The menus move the cursor to
+    // them, so a teammate (greyed out) can't be the victim: steal from the opponent with the most of what it's stealing
+    // instead, or don't steal if no opponent has any.
+    @Exec(0x800F7628) void booCpuVictim() {
+        if (data.currentScene != Scene.BOO) return;
+        auto choice = data.booCpuChoice;
+        if ((choice != 0 && choice != 1) || !booTeammate(data.booCpuVictim)) return;
+
+        auto amount(Player p) { return choice == 0 ? p.data.coins : p.data.stars; }
+        auto opponents = players.filter!(p => p.index != data.booPlayer && !booTeammate(p.index) && amount(p) > 0);
+        if (opponents.empty) {
+            data.booCpuChoice = 2; // Don't do anything
+        } else {
+            data.booCpuVictim = cast(int)opponents.maxElement!(p => amount(p)).index;
+        }
+    }
+
+    // In the Boo scene: whether player i is a teammate of the player Boo steals for
+    bool booTeammate(uint i) {
+        return data.currentScene == Scene.BOO && i < players.length && data.booPlayer < players.length
+            && i != data.booPlayer && team(players[i]) == team(players[data.booPlayer]);
+    }
+}
+
+final class TeamControl1 : TeamControl!MarioParty1 {
+    override bool disabled() const {
+        return data.currentScene == Scene.GAME_SETUP || data.currentScene == Scene.FINAL_RESULTS_2;
+    }
+}
+
+final class MiniGameRoulette1 : MiniGameRoulette!(MarioParty1, MiniGameType, MiniGame) {
+    // Populate mini-game roulette (func_8004388C). For each slot it picks a random mini-game of the type (s2) and stores
+    // it here (slot s0), then picks again if it's a duplicate, recently played, or needs more coins than players have.
+    // The plugin fills every slot itself, so it skips all of that: picking again would throw its choice away (or never
+    // end).
+    @Exec(0x80043AC4) void populate() {
+        if (!isBoardScene() || gpr.s2 > MiniGameType.max) return;
+        if (gpr.s0 == 0) {
+            auto type = cast(MiniGameType)gpr.s2;
+            // (the roulette, func_80042BAC, stores the slot it will stop on at 0x80042DB0, in v1)
+            fill!"v1"(type, [EnumMembers!MiniGame].filter!(g => g.type == type).array,
+                      data.miniGameRouletteSizes[gpr.s2], 0x80042DB0);
+        }
+        jump(0x80043C90); // Show the slot's mini-game
+    }
+
+    // The roulette doesn't jump backward
+    @Exec(0x80043060) void forward() {
+        if (isBoardScene()) gpr.v0 = 1;
+    }
+}
+
+final class RandomBonus1 : RandomBonus!(MarioParty1, "s3") {
+    ushort messageId;   // The message being loaded
+    string replacement; // ... and the bonus star text loaded instead
+
+    this() {
+        super([Scene.FINISH_BOARD: [[0x800F828C, 0x800F82D0], [0x800F8648, 0x800F868C], [0x800F8A04, 0x800F8A48]],
+               Scene.FINISH_BOARD_NO_STARS: [[0x800F8454, 0x800F8498], [0x800F87E0, 0x800F8824], [0x800F8B6C, 0x800F8BB0]]],
+              true);
+    }
+
+    override uint stat(Player player, BonusType type) {
         final switch (type) {
             case BonusType.MINI_GAME:       return cast(uint)cast(int)player.data.miniGameCoins; // Signed, as the game compares it
             case BonusType.COIN:            return player.data.maxCoins;
@@ -299,10 +390,39 @@ class MarioParty1 : MarioParty!(Config, State, Memory) {
         }
     }
 
-    // Text (game bytes) for the bonus star messages, or null for other messages. Each bonus star has 5 messages
-    // (264, 269, 274): the award, then the winner, or a 2-, 3- or 4-way tie. The lines and line counts follow the
-    // game's own messages, which have to fit fixed-size windows. Mario Party 1's text uses 0x10 for spaces.
-    string bonusMessage(ushort id) {
+    // Every message is loaded by ID through func_8005B7E8(id), which reads it from ROM into a newly allocated buffer of
+    // its length. Loading a different length and writing the bonus star text into that buffer replaces the message
+    // with nothing else to manage: the game frees the buffer itself.
+    @Exec(0x8005B7E8) void messageLoading() {
+        messageId = cast(ushort)gpr.a0;
+    }
+
+    @Exec(0x8005B7FC) void messageLength() { // 16(sp) = ROM address, 20(sp) = length; next, it allocates and reads that many bytes
+        if (!isBonusScene() || bonus.length < 3) return;
+        replacement = message(messageId);
+        if (replacement is null) return;
+        if (replacement.length % 2) replacement ~= '\0';
+        (gpr.sp + 20).val!ushort = cast(ushort)replacement.length;
+    }
+
+    @Exec(0x8005B824) void messageText() { // s0 = the buffer
+        if (replacement is null) return;
+        foreach (i, c; replacement) Ptr!char(gpr.s0)[i] = c;
+        replacement = null;
+    }
+
+    // The bonus star windows (at 30, 42) are sized for the game's own text, 15 to 18 wide: make them all 18, the widest
+    // the game uses there, so other stars' names fit
+    @Exec(0x8004D930) void windowWidth() { // CreateTextWindow(x, y, w, h)
+        if (!isBonusScene() || bonus.length < 3) return;
+        if (cast(short)gpr.a0 != 30 || cast(short)gpr.a1 != 42) return;
+        if (cast(short)gpr.a2 < 18) gpr.a2 = 18;
+    }
+
+    // Text (game bytes) for the bonus star messages, or null for other messages. Each bonus star has 5 messages (264,
+    // 269, 274): the award, then the winner, or a 2-, 3- or 4-way tie. The lines and line counts follow the game's own
+    // messages, which have to fit fixed-size windows. Mario Party 1's text uses 0x10 for spaces.
+    string message(ushort id) {
         if (id < 264 || id > 278) return null;
 
         auto i = (id - 264) / 5;
@@ -318,172 +438,42 @@ class MarioParty1 : MarioParty!(Config, State, Memory) {
         }
         return formatText(text ~ "<END><NUL>").replace(" ", "\x10");
     }
+}
 
-    override void onStart() {
-        super.onStart();
+// standardSpaceRatio (see CustomSpaces)
+final class CustomSpaces1 : Feature!MarioParty1 {
+    override bool enabled() { return config.standardSpaceRatio.values.any!(v => v > 0.0); }
 
-        0x80040828.onExec({
-            gpr.v0 = weighted(config.blockWeights, random);
-        });
+    @Exec(0x8004BA04) void renderSpaces() { // RenderSpaces: draws every space with its type's texture, each frame
+        if (isBoardScene() && data.spaces) assignCustomSpaces();
+    }
 
-        if (config.preventRepeatMiniGames || config.blockedMiniGames.length > 0) {
-            data.currentScene.onWrite((ref Scene scene) {
-                if (scene == Scene.START_BOARD) {
-                    state.miniGameQueue.clear();
-                    saveState();
-                }
-            });
-            // Populate mini-game roulette (func_8004388C). For each slot it picks a random mini-game of the type (s2)
-            // and stores it here (slot s0), then picks again if it's a duplicate, recently played, or needs more coins
-            // than players have. The plugin fills every slot itself, so it skips all of that: picking again would
-            // throw its choice away (or never end).
-            0x80043AC4.onExec({
-                if (!isBoardScene()) return;
-                if (gpr.s2 > MiniGameType.max) return;
-                if (gpr.s0 == 0) {
-                    auto type = cast(MiniGameType)gpr.s2;
-                    auto games = [EnumMembers!MiniGame].filter!(g => g.type == type).array;
-                    // The roulette (func_80042BAC) stores the slot it will stop on at 0x80042DB0 (v1)
-                    fillMiniGameRoulette!"v1"(type, games, data.miniGameRouletteSizes[gpr.s2], 0x80042DB0);
-                    saveState();
-                }
-                jump(0x80043C90); // Show the slot's mini-game
-            });
-            // Prevent the mini-game roulette from jumping backward
-            0x80043060.onExec({ if (isBoardScene()) gpr.v0 = 1; });
-        }
+    // Chance Time comes from an event the board gives each of its ! Spaces, not from the space type, so converted
+    // ! Spaces would do nothing. RunSpaceEvents (0x8004C968, a0 = space, a1 = activation) has the space in s0 and the
+    // activation in s3 here: on landing (3) on a converted ! Space, do what the boards' own ! Space event does (like
+    // 0x800F79BC on Peach's Birthday Cake)
+    @Exec(0x8004CA28) void convertedChanceSpace() {
+        if (cast(short)gpr.s3 != 3) return;
+        auto space = cast(short)gpr.s0;
+        if (space < 0 || space >= data.spaceCount || space >= spaces.length) return;
+        if (spaces[space] != CustomSpace.CHANCE || data.spaces[space].type != Space.Type.CHANCE) return;
 
-        if (config.teamScores) {
-            data.currentScene.onWrite((ref Scene scene) {
-                if (scene != Scene.BOWSER) coinsEqualizing = false;
-            });
+        // The current player is on one side, everyone else on the other
+        players.each!(p => p.data.group = (p.index == data.currentPlayerIndex ? 0 : 1));
+        // func_800587BC(1, 0, 5, 1): Chance Time (scene 1), back to the board after it
+        data.boardRequestOverlay = Scene.CHANCE_TIME;
+        data.boardRequestEntrance = 0;
+        data.boardRequest = 8;
+        data.boardRequestFade = 5;
+        data.boardRequestSound = 1;
+    }
+}
 
-            // The final results add each player's own bonus stars to their stars, outside the scenes where teammates'
-            // scores are kept the same. Each player's bonus stars are made their team's, before the board's winner is
-            // shown, so the final results give every teammate the team's.
-            data.currentScene.onWrite((ref Scene scene) {
-                if (scene != Scene.BOARD_WINNER || data.currentScene == Scene.BOARD_WINNER) return;
-                ushort[4] team;
-                foreach (p; players) team[p.index] = cast(ushort)teamMembers(p).map!(t => cast(int)data.bonusStars[t.index]).sum;
-                foreach (i, b; team) data.bonusStars[i] = b;
-            });
-
-            0x800F6AF8.onExec({ // func_800F6AF8_BowserSpaceEvent: sets every player's coins to the average
-                if (data.currentScene == Scene.BOWSER) coinsEqualizing = true;
-            });
-
-            // Boo can't steal from the player's teammates. The Boo scene (func_800F884C) enables "Steal Coins" and
-            // "Steal Stars" if another player has coins or stars, and each player in "From whom?" if they have them:
-            // these loads (of player s1's coins or stars) read 0 for teammates, so teammates are greyed out.
-            bool booTeammate(uint i) {
-                return data.currentScene == Scene.BOO && i < players.length && data.booPlayer < players.length
-                    && i != data.booPlayer && team(players[i]) == team(players[data.booPlayer]);
-            }
-            foreach (load; [0x800F890C, 0x800F8988, 0x800F8B10, 0x800F8B54]) {
-                load.onExecDone({ if (booTeammate(gpr.s1)) gpr.v0 = 0; });
-            }
-            // A CPU player decides in func_800F7278, which leaves here with its choice and victim. The menus move the
-            // cursor to them, so a teammate (greyed out) can't be the victim: steal from the opponent with the most
-            // of what it's stealing instead, or don't steal if no opponent has any.
-            0x800F7628.onExec({
-                if (data.currentScene != Scene.BOO) return;
-                auto choice = data.booCpuChoice;
-                if (choice != 0 && choice != 1) return;
-                if (!booTeammate(data.booCpuVictim)) return;
-
-                uint amount(Player p) { return choice == 0 ? p.data.coins : p.data.stars; }
-                auto opponents = players.filter!(p => p.index != data.booPlayer && !booTeammate(p.index) && amount(p) > 0);
-                if (opponents.empty) {
-                    data.booCpuChoice = 2; // Don't do anything
-                } else {
-                    data.booCpuVictim = cast(int)opponents.maxElement!(p => amount(p)).index;
-                }
-            });
-        }
-
-        if (config.randomBonus) {
-            setUpRandomBonus!"s3"([[0x800F828C, 0x800F82D0], [0x800F8648, 0x800F868C], [0x800F8A04, 0x800F8A48]], true);
-            setUpRandomBonus!"s3"([[0x800F8454, 0x800F8498], [0x800F87E0, 0x800F8824], [0x800F8B6C, 0x800F8BB0]], true,
-                                  Scene.FINISH_BOARD_NO_STARS);
-
-            // Every message is loaded by ID through func_8005B7E8(id), which reads it from ROM into a newly allocated
-            // buffer of its length. Loading a different length and writing the bonus star text into that buffer
-            // replaces the message with nothing else to manage: the game frees the buffer itself.
-            ushort messageId;
-            string replacement;
-            0x8005B7E8.onExec({ messageId = cast(ushort)gpr.a0; });
-            0x8005B7FC.onExec({ // 16(sp) = ROM address, 20(sp) = length; next, it allocates and reads that many bytes
-                if (!isBonusScene() || bonus.length < 3) return;
-                replacement = bonusMessage(messageId);
-                if (replacement is null) return;
-                if (replacement.length % 2) replacement ~= '\0';
-                (gpr.sp + 20).val!ushort = cast(ushort)replacement.length;
-            });
-            0x8005B824.onExec({ // s0 = the buffer
-                if (replacement is null) return;
-                foreach (i, c; replacement) Ptr!char(gpr.s0)[i] = c;
-                replacement = null;
-            });
-            // The bonus star windows (at 30, 42) are sized for the game's own text, 15 to 18 wide: make them all 18,
-            // the widest the game uses there, so other stars' names fit
-            0x8004D930.onExec({ // CreateTextWindow(x, y, w, h)
-                if (!isBonusScene() || bonus.length < 3) return;
-                if (cast(short)gpr.a0 != 30 || cast(short)gpr.a1 != 42) return;
-                if (cast(short)gpr.a2 < 18) gpr.a2 = 18;
-            });
-        }
-
-        if (config.standardSpaceRatio.values.any!(v => v > 0.0)) {
-            resetCustomSpacesAtStart();
-            0x8004BA04.onExec({ // RenderSpaces: draws every space with its type's texture, each frame
-                if (!isBoardScene()) return;
-                if (!data.spaces) return;
-
-                if (assignCustomSpaces()) {
-                    saveState();
-                }
-            });
-
-            // Chance Time comes from an event the board gives each of its ! Spaces, not from the space type, so
-            // converted ! Spaces would do nothing. RunSpaceEvents (0x8004C968, a0 = space, a1 = activation) has the
-            // space in s0 and the activation in s3 here: on landing (3) on a converted ! Space, do what the boards'
-            // own ! Space event does (like 0x800F79BC on Peach's Birthday Cake)
-            0x8004CA28.onExec({
-                if (cast(short)gpr.s3 != 3) return;
-                auto space = cast(short)gpr.s0;
-                if (space < 0 || space >= data.spaceCount || space >= state.spaces.length) return;
-                if (state.spaces[space] != CustomSpace.CHANCE) return;
-                if (data.spaces[space].type != Space.Type.CHANCE) return;
-
-                // The current player is on one side, everyone else on the other
-                players.each!(p => p.data.group = (p.index == data.currentPlayerIndex ? 0 : 1));
-                // func_800587BC(1, 0, 5, 1): Chance Time (scene 1), back to the board after it
-                data.boardRequestOverlay = Scene.CHANCE_TIME;
-                data.boardRequestEntrance = 0;
-                data.boardRequest = 8;
-                data.boardRequestFade = 5;
-                data.boardRequestSound = 1;
-            });
-        }
-
-        // The Bingo page gets the players' stars with the bonus stars, which the final results add (in the loop
-        // ending at 0x800FB158) outside the scenes where star changes are sent
-        0x800FB158.onExec({
-            if (data.currentScene != Scene.FINAL_RESULTS) return;
-            players.each!(p => sendPlayerInfo(p));
-        });
-
-        if (config.mapScrollSpeedMultiplier != 1.0) {
-            setUpMapScrollSpeed(0x80058F5C);
-        }
-
-        if (config.rankPlayersByBingoScore) {
-            setUpBingoRanking(0x8004FEBC, 0x8004FF60, 0x8004FEE4, 0x846332BC);
-        }
-
-        fixChanceTimeDuplicates(0x800FC830, 0x800FE1A0); // Chance Time duplicate character fix
-
-        watchPlayerInfo(); // Keep this at the bottom
+final class PlayerInfo1 : PlayerInfo!MarioParty1 {
+    // The Bingo page gets the players' stars with the bonus stars, which the final results add (in the loop ending
+    // here) outside the scenes where star changes are sent
+    @Exec(0x800FB158) void finalResultsSent() {
+        if (data.currentScene == Scene.FINAL_RESULTS) players.each!(p => sendPlayerInfo(p));
     }
 }
 
@@ -495,11 +485,10 @@ extern (C) {
     int startup() {
         version (TestDriver) {
             import me.timz.n64.mp1test : TestMarioParty1;
-            pluginFactory = (name, hash) => new TestMarioParty1(name, hash); // The test build (test/mp1test.d)
+            usePlugin!(TestMarioParty1, MarioParty1); // The test build (test/mp1test.d)
         } else {
-            pluginFactory = (name, hash) => new MarioParty1(name, hash);
+            usePlugin!MarioParty1();
         }
-
         return 0;
     }
 }
@@ -806,3 +795,5 @@ enum Scene : uint {
     MINI_GAME_STADIUM_START_2   = 130,
     DEBUG_MINI_GAME_MENU        = 131
 }
+
+mixin NoMutableGlobals;

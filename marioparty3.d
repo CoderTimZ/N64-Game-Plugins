@@ -3,19 +3,14 @@ module me.timz.n64.marioparty3;
 import me.timz.n64.marioparty;
 import me.timz.n64.mp3map;
 import me.timz.n64.mp3widescreen;
-import me.timz.n64.plugin;
-import core.time;
+import me.timz.n64.game;
 import std.algorithm;
 import std.random;
 import std.range;
 import std.conv;
 import std.traits;
-import std.stdio;
 import std.string;
-import std.file;
 import std.json;
-import std.container.array;
-import vibe.vibe;
 
 immutable DEFAULT_BATTLE_DIST = [0.7, 0.3, 0.0, 0.0];
 
@@ -91,18 +86,8 @@ class Config : MarioPartyConfig {
     }
 }
 
-class PlayerState {
-    int luckySpaceCount = 0;
-}
-
-class State : MarioPartyState!PlayerState {
-    ShuffleStream!MiniGame[MiniGameType] miniGameQueue;
-    ShuffleStream!SuperstarsMiniGame[MiniGameType] superstarsMiniGameQueue;
-    CustomSpace[] spaces;
-    int spacesBoard = -1; // The board (data.currentBoard) spaces are for (-1: none yet)
-    uint luckySpaceTexturePtr;
-    uint goldSpaceTexturePtr;
-    string[] boardNames;
+struct PlayerState {
+    int luckySpaceCount; // Lucky Spaces landed on (see LuckySpaces)
 }
 
 union Memory {
@@ -303,49 +288,6 @@ string getDescription(BonusType type) {
     }
 }
 
-void showPlayerMessage(string message, byte character = -1) {
-    message = formatText(message ~ "<END><NUL>");
-    gpr.sp -= cast(uint)(message.length + 0b111) & ~0b111;
-    message.each!((i, c) { Ptr!char(gpr.sp)[i] = c; });
-    gpr.sp -= 32;
-    (gpr.sp + 16).val!uint = 0;
-    (gpr.sp + 20).val!uint = 0;
-    (gpr.sp + 24).val!uint = 0;
-    0x800EC8EC.jal(character, gpr.sp + 32, 0, 0, { // ShowPlayerMessage
-        0x800EC9DC.jal({
-            0x800EC6C8.jal({                       // CloseMessage
-                0x800EC6EC.jal({
-                    gpr.sp += 32 + (cast(uint)(message.length + 0b111) & ~0b111);
-                });
-            });
-        });
-    });
-}
-
-void showGlobalMessage(string message, byte character = -1, bool waitForInput = false, void delegate() done = null) {
-    message = formatText(message ~ "<END><NUL>");
-    gpr.sp -= cast(uint)(message.length + 0b111) & ~0b111;
-    message.each!((i, c) { Ptr!char(gpr.sp)[i] = c; });
-    gpr.sp -= 32;
-    (gpr.sp + 16).val!uint = 0;
-    (gpr.sp + 20).val!uint = 0;
-    (gpr.sp + 24).val!uint = 0;
-    auto close = {
-        0x800EC6C8.jal({                           // MBDlgWinClose
-            0x800EC6EC.jal({                       // MBDlgWinKill
-                gpr.sp += 32 + (cast(uint)(message.length + 0b111) & ~0b111);
-                if (done) done();
-            });
-        });
-    };
-    0x800EC92C.jal(character, gpr.sp + 32, 0, 0, { // ShowGlobalMessage
-        if (waitForInput) {
-            0x800ECA38.jal(close);                 // Wait for any player to press A
-        } else {
-            close();
-        }
-    });
-}
 
 // Colors the plugin adds to windows (RGBA5551): the character name colors, indexed by Character. Mario, Peach, Yoshi
 // and Wario use the text palette's own red, magenta, green and yellow; the others get colors of their own.
@@ -390,78 +332,127 @@ struct WindowColors {
     ushort[16] value;   // And after (to tell if the game has since replaced them)
 }
 
-class MarioParty3 : MarioParty!(Config, State, Memory) {
-    ushort messageId;            // Message being loaded by func_800364DC
-    string messageReplacement;   // Text (game bytes) to load instead, from replaceMessage()
-    short messageWindow = -1;    // Window whose message is being set, or -1
-    char nameColor;              // The game's color for a name given as text (see nameMessageId()), or 0
-    WindowColors[short] windowColors;
-    int lastFiveTurnsBonus = 20;
+// A message for a board window: the text, then the default color, the end (waiting for A) and the terminator
+string windowText(string text) {
+    return formatText("<CLEAR>" ~ text ~ "<RESET><END><NUL>");
+}
 
-    // Superstars mini-game mode
-    enum SuperstarsPhase { NONE, SELECTED, WAITING, READY }
-    SuperstarsPhase ssPhase = SuperstarsPhase.NONE;
-    SuperstarsMiniGame[MiniGame] ssRoulette; // Placeholder MP3 mini-game -> Superstars mini-game shown in its roulette slot
-    SuperstarsMiniGame ssGame;               // Selected Superstars mini-game
-    MiniGameType ssType;             // MP3 roulette category of the selected mini-game
-    uint[] ssDuelists;               // Player indices taking part in a duel
-    SuperstarsResults* ssResults;    // Results entered on the Bingo page
-    Address ssNameBuffer;            // Board temp heap buffer holding the roulette names
+class MarioParty3 : MarioParty!(Config, Memory, PlayerState) {
+    mixin CustomSpaces!CustomSpace;
+
+    // Shows a message to everyone in a window (as the speaker `character`, -1 for none), waits for any player to press
+    // A if waitForInput, closes it, then runs `next`. The text is on the temporary heap while it's shown. Each step
+    // waits for the game, and goes on in the next method.
+    void showGlobalMessage(string message, byte character = -1, bool waitForInput = false, Then next = Then.init) {
+        message = formatText(message ~ "<END><NUL>");
+        auto text = mallocTemp(message.length);
+        foreach (i, c; message) Ptr!char(text)[i] = c;
+        startCall(0x800EC92C, character, text, 0, 0, 0, 0, 0).then!globalMessageShown(text, waitForInput, next);
+    }
+
+    void globalMessageShown(Address text, bool waitForInput, Then next) {
+        if (waitForInput) startCall(0x800ECA38).then!globalMessageRead(text, next); // Wait for any player to press A
+        else globalMessageRead(text, next);
+    }
+
+    void globalMessageRead(Address text, Then next) {
+        startCall(0x800EC6C8).then!globalMessageClosed(text, next); // MBDlgWinClose
+    }
+
+    void globalMessageClosed(Address text, Then next) {
+        callGame(0x800EC6EC); // MBDlgWinKill
+        freeTemp(text);
+        if (next) runThen(next, 0);
+    }
+
+    // A feature that changes messages as the game loads them (see messageLoaded())
+    interface MessageChanger {
+        // What message `id` should say: `text` is what it says (the game's text, or what the features before this
+        // one changed it to)
+        string changeMessage(ushort id, string text);
+    }
+
+    ushort messageId;          // The message being loaded (see messageLoaded())
+    string messageReplacement; // Text (game bytes) to load instead, or null
+    @Fixed Widescreen!MarioParty3 widescreen;
 
     this(string name, string hash) {
-        super(name, hash);
+        // (the permanent heap: HuMemMemoryAllocPerm, HuMemMemoryFreePerm, HuMemHeapInitPerm, and HuPrcVSleep;
+        // HuMemMemoryAllocTemp, HuMemMemoryFreeTemp)
+        super(name, hash, Heap(0x80035864, 0x80035888, 0x80035840, 0x8004F074), TempHeap(0x80035934, 0x80035958));
 
-        // Keep the State on the permanent heap (perm_heap_addr, HuMemHeapInitPerm, HuMemMemoryAllocPerm, HuMemMemoryFreePerm, HuPrcVSleep)
-        permanentHeap = PermanentHeap(0x800B1A10, 0x80035840, 0x80035864, 0x80035888, 0x8004F074);
-        tempHeap = TempHeap(0x80035934, 0x80035958); // HuMemMemoryAllocTemp, HuMemMemoryFreeTemp
+        alias G = MarioParty3;
+        feature(new ConfiguredCharacters!G);
+        feature(new RandomizeState!G);
+        feature(new TeamScores3);
+        feature(new TeamMiniGames!G);
+        feature(new LastPlaceDoubleRoll!G);
+        feature(new TeamControl3);
+        widescreen = feature(new Widescreen!G);
+        feature(new CustomBoardMaps!G);
+        feature(new JunctionArrowFix);
+        feature(new ReverseMovementFix);
+        feature(new ExtraItemShopFix);
+        feature(new TurnCounter);
+        feature(new TeamDuels!G(data.duelRoutine.addr));
+        feature(new TeamBattles!G(data.battleRoutine.addr));
+        feature(new AlwaysDuel!G(0x800FA854));
+        feature(new RandomBonus3([[data.loadBonusStat1a.addr, data.loadBonusStat1b.addr],
+                                  [data.loadBonusStat2a.addr, data.loadBonusStat2b.addr],
+                                  [data.loadBonusStat3a.addr, data.loadBonusStat3b.addr]]));
+        auto superstars = new Superstars;
+        feature(new MiniGameRoulette3(superstars));
+        feature(new EnhancedTaunts);
+        feature(new RandomChanceOrder);
+        feature(new ItemsOnFinalTurn);
+        feature(new CustomSpaces3);
+        feature(new LuckySpaces);
+        feature(new LuckyResultsColumn);
+        feature(new DoubleCoinMiniGames);
+        feature(new MpiqPermadeath);
+        feature(new FinalResultsDoNotProceed);
+        feature(new LastFiveTurnsBonus);
+        feature(new SingleUseBattleSpaces);
+        feature(new UnlockEverything);
+        feature(new MapScrollSpeed!G(0x80100350));
+        feature(new ItemGameVariety);
+        feature(new ItemShopVariety);
+        feature(new ToadShopChance);
+        feature(new NoEarlyWackyWatch);
+        feature(new AutoStartNextBoard);
+        feature(new BalanceSuperHardCPU);
+        feature(new ChanceSwap);
+        feature(new ChancePrizeReplace);
+        feature(new BingoRanking!G(0x800EE9C0, 0x800EEA50, 0x800EE9E0, 0x0C03BB2C));
+        feature(new BattleCoinDistribution);
+        feature(new ChanceTimeFix3);
+        feature(new BingoNames); // (the last to change messages: it colors what the others leave)
+        feature(superstars);     // (after BingoNames: it gives the roulette's windows its own names)
+        feature(new PlayerInfo3); // (last: see PlayerInfo)
     }
 
-    override void loadConfig() {
-        super.loadConfig();
-
-        if (config.battleCoinDistribution.length != 4) {
-            while (config.battleCoinDistribution.length < 4) {
-                config.battleCoinDistribution ~= 0.0;
-            }
-            config.battleCoinDistribution = config.battleCoinDistribution[0..4];
+    // battleCoinDistribution: a fraction of the pot for each rank (0 for the ranks it leaves out), none negative,
+    // adding up to at most 1
+    override Config readConfig() {
+        auto c = super.readConfig();
+        auto dist = c.battleCoinDistribution;
+        while (dist.length < 4) dist ~= 0.0;
+        c.battleCoinDistribution = dist[0 .. 4];
+        auto problem = dist.any!(e => e < 0.0) ? "battleCoinDistribution has a negative fraction"
+                     : fixRoundingError(dist.sum) > 1.0 ? "battleCoinDistribution.sum > 1.0" : null;
+        if (problem) {
+            c.battleCoinDistribution = DEFAULT_BATTLE_DIST.dup;
+            error(problem);
+            showError(romName ~ ".json", problem);
         }
-
-        if (config.battleCoinDistribution.any!(e => e < 0.0)) {
-            config.battleCoinDistribution = DEFAULT_BATTLE_DIST.dup;
-            throw new Exception("battleCoinDistribution has a negative fraction");
-        }
-
-        if (fixRoundingError(config.battleCoinDistribution.sum) > 1.0) {
-            config.battleCoinDistribution = DEFAULT_BATTLE_DIST.dup;
-            throw new Exception("battleCoinDistribution.sum > 1.0");
-        }
+        return c;
     }
 
-    override bool lockTeamScores() const {
-        if (data.currentScene == Scene.CHANCE_TIME) {
-            if (data.chancePlayer1 < players.length && data.chancePlayer2 < players.length) {
-                return team(players[data.chancePlayer1])
-                    == team(players[data.chancePlayer2]);
-            }
+    override void setUp() {
+        if (config.superstarsMiniGames && config.bingoURL.empty) {
+            warning("superstarsMiniGames requires bingoURL to be set; Superstars mini-games are disabled");
         }
-        return false;
     }
-
-    override bool disableTeamScores() const {
-        if (data.currentScene == Scene.BOWSER_EVENT) {
-            return data.bowserEventType == BowserEventType.COIN_POTLUCK
-                || data.bowserEventType == BowserEventType.REVOLUTION;
-        }
-        return false;
-    }
-
-    override bool disableTeamControl() const {
-        return data.currentScene == Scene.GAME_SETUP
-            || data.currentScene == Scene.FINAL_RESULTS;
-    }
-
-    alias isBoardScene = typeof(super).isBoardScene;
-    alias isScoreScene = typeof(super).isScoreScene;
 
     override bool isBoardScene(Scene scene) const {
         switch (scene) {
@@ -523,1106 +514,19 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         }
     }
 
-    GamePhase getGamePhase() {
-        auto i = clamp(cast(int)data.totalTurns, 10, 50) / 5 - 2;
+    alias isBoardScene = typeof(super).isBoardScene;
+    alias isScoreScene = typeof(super).isScoreScene;
 
-        if (data.currentTurn < data.gamePhaseTable[3 * i]) {
-            return GamePhase.EARLY;
-        } else if (data.currentTurn < data.gamePhaseTable[3 * i + 1]) {
-            return GamePhase.MID;
-        } else {
-            return GamePhase.END;
-        }
+    // On a board made with PartyPlanner64: the board code (overlay 128) is loaded, and the board's own code and data
+    // (file 19/618) are at 0x807B0000, starting "PP64"
+    bool customBoard() {
+        return isBoardScene() && 0x800E6E58.val!uint == 0x0C01A63A && 0x807B0000.val!uint == 0x50503634;
     }
 
-    string getCurrentBoardName() {
-        if (!isBoardScene()) return null;
-        int index;
-        if (data.currentScene <= Scene.WALUIGIS_ISLAND_BOARD) {
-            index = data.currentScene - Scene.CHILLY_WATERS_BOARD;
-        } else {
-            index = data.currentScene - Scene.GATE_GUY_BOARD + 6;
-        }
-        if (index < state.boardNames.length) {
-            return state.boardNames[index];
-        } else {
-            return "N/A";
-        }
-    }
-
-    override uint getBonusStat(Player player, BonusType type) {
-        final switch (type) {
-            case BonusType.MINI_GAME: return player.data.miniGameCoins;
-            case BonusType.COIN:      return player.data.maxCoins;
-            case BonusType.HAPPENING: return player.data.happeningSpaces;
-            case BonusType.RED:       return player.data.redSpaces;
-            case BonusType.BLUE:      return player.data.blueSpaces;
-            case BonusType.CHANCE:    return player.data.chanceSpaces;
-            case BonusType.BOWSER:    return player.data.bowserSpaces;
-            case BonusType.BATTLE:    return player.data.battleSpaces;
-            case BonusType.ITEM:      return player.data.itemSpaces;
-            case BonusType.BANK:      return player.data.bankSpaces;
-            case BonusType.GAME_GUY:  return player.data.gameGuySpaces;
-            case BonusType.LUCKY:     return player.state.luckySpaceCount;
-        }
-    }
-
-    override void onStart() {
-        super.onStart();
-
-        if (config.widescreen) setUpWidescreen();
-        if (config.sharperCustomBoardMaps) setUpCustomBoardMaps();
-        if (config.customCPUJunctionArrowFix) setUpCustomCPUJunctionArrowFix();
-        if (config.customReverseMovementFix) setUpCustomReverseMovementFix();
-        if (config.customExtraItemShopFix) setUpCustomExtraItemShopFix();
-
-        /*
-        bool[uint] seen;
-        0x800843F0.onExec({
-            if (gpr.a0 !in seen) {
-                info((cast(uint)gpr.a0).to!string(16), " ", (cast(uint)gpr.a1).to!string(16), " ", (cast(uint)gpr.a2).to!string(16), " ", (cast(uint)gpr.a3).to!string(16));
-                seen[gpr.a0] = true;
-            }
-
-            if (gpr.a0 == 0x801D73D0) return;
-
-            gpr.a0 = gpr.a1 = 0x80240340;
-        });
-        */
-
-        data.currentScene.onWrite((ref Scene scene) {
-            if (scene != Scene.START_BOARD) return;
-            state.currentPlayerTurn = 0;
-            saveState();
-        });
-
-        data.currentScene.onWrite((ref Scene scene) {
-            if (scene != Scene.CASTLE_GROUNDS) return;
-            state.boardNames.length = 0;
-            saveState();
-        });
-
-        0x800364A0.onExec({
-            if (data.currentScene != Scene.CASTLE_GROUNDS) return;
-            if (!state.boardNames.empty) return;
-            auto result = searchMemory([0x0A4E6F74, 0x20626164, 0x20617420, 0x616C6C85, 0x19FF0000]); // "Not bad at all";
-            if (result.empty) return;
-            auto c = Ptr!char(result.front + 20);
-            for (auto i = 0; i < 12; i++) {
-                string boardName;
-                while (*c <= 0x1F) c++;
-                while (*c >= 0x20) boardName ~= *(c++);
-                state.boardNames ~= unformatText(boardName);
-            }
-            saveState();
-        });
-
-        // Every message is loaded by ID through func_800364DC(id), id = (directory << 8) | index. Window message
-        // arguments (<1>-<5>) can be message IDs too, which it also loads. It copies the message into a newly
-        // allocated buffer, so replacing text here needs no memory management: the game allocates the new length
-        // and frees the buffer itself.
-        0x800364DC.onExec({ messageId = cast(ushort)gpr.a0; });
-        0x80036574.onExec({ // s0 = message (length, then text), s1 = length; next, it allocates s1 bytes
-            string text;
-            auto c = Ptr!char(gpr.s0 + 2);
-            foreach (i; 0..cast(short)gpr.s1) text ~= c[i];
-            messageReplacement = replaceMessage(messageId, text);
-            if (messageWindow >= 0) {
-                auto colored = colorize(messageWindow, messageReplacement is null ? text : messageReplacement);
-                if (colored != text) messageReplacement = colored;
-            }
-            if (messageReplacement !is null) gpr.s1 = cast(uint)messageReplacement.length;
-        });
-
-        // The turn counter (see maintainTurnCounter())
-        0x8004F074.onExecDone({ maintainTurnCounter(); }); // HuPrcVSleep, after "addiu sp, sp, ..."
-        0x8005F364.onExec({ // func_8005F364 (close window, a0 = window)
-            if (cast(short)gpr.a0 == turnCounterWindow) turnCounterWindow = -1;
-        });
-        data.currentScene.onWrite((ref Scene scene) { // The board's windows go away with it: forget the counter's
-            if (scene != data.currentScene) {
-                turnCounterWindow = -1;
-                turnCounterCovered = 0;
-                turnCounterLowered = 0;
-            }
-        });
-        // Hidden while the pause menu is open (MBPauseCreate), and lowered below the up arrow while the scrolling map is
-        // (MBMapScrollExec): they return once it's closed
-        0x800F1EC8.onExec({
-            if (!isPartyBoardScene()) return;
-            turnCounterCovered++;
-            gpr.ra.onExecOnce({ if (turnCounterCovered > 0) turnCounterCovered--; });
-        });
-        0x8010067C.onExec({
-            if (!isPartyBoardScene()) return;
-            turnCounterLowered++;
-            gpr.ra.onExecOnce({ if (turnCounterLowered > 0) turnCounterLowered--; });
-        });
-
-        // Plugin colors in windows (textColor()): player names
-        if (config.bingoPlayerNames) {
-            // Window creation (func_8005AF84 area): the window has just copied the text palette (0x800A2174) to the
-            // start of its struct, so it has none of the plugin's colors
-            0x8005AF8C.onExec({
-                windowColors.remove(cast(short)((gpr.s1 - windowAddress(0)) / WINDOW_SIZE));
-            });
-            // func_8005B43C (set window message, a0 = window, a1 = message ID or pointer). The previous message's
-            // colors are undone, then the message's names get colors as it's loaded (colorize()), then its arguments'
-            // (colorArgs()). Codes in the arguments are the game's, so they're kept.
-            0x8005B43C.onExec({
-                auto w = cast(short)gpr.a0;
-                resetColors(w);
-                foreach (n; 0..5) markUsed(w, argText(w, n));
-                if (gpr.a1 >= 0x80000000) colorizeInPlace(w, gpr.a1); // Text of the plugin's own (showGlobalMessage)
-                messageWindow = w;
-                gpr.ra.onExecOnce({ // Back in the caller, where the game can be called
-                    messageWindow = -1;
-                    foreach (n; 0..5) colorArg(w, n);
-                    copyTextPaletteIfChanged(w);
-                });
-            });
-            // func_8006022C (measure a window message argument, a0 = message ID or pointer, a1 = argument), which sizes
-            // the window: a name given as text is measured as the message it's replaced with (see 0x8005B6BC)
-            0x8006022C.onExec({
-                if (auto id = nameMessageId(gpr.a0)) gpr.a0 = id;
-                gpr.ra.onExecOnce({ nameColor = 0; });
-            });
-            // func_8005B6BC (set window message argument, a0 = window, a1 = message ID or pointer, a2 = argument).
-            // Arguments are usually set before the message, which colors them again, but some may come after it.
-            0x8005B6BC.onExec({
-                if (auto id = nameMessageId(gpr.a1)) gpr.a1 = id; // A name given as text: load it as a message
-                auto w = cast(short)gpr.a0;
-                auto n = cast(byte)gpr.a2;
-                gpr.ra.onExecOnce({
-                    nameColor = 0;
-                    colorArg(w, n);
-                    copyTextPaletteIfChanged(w);
-                });
-            });
-        }
-        0x800365BC.onExec({ // s2 = the copy (0 if it couldn't be allocated)
-            if (messageReplacement is null) return;
-            if (gpr.s2) foreach (i, c; messageReplacement) Ptr!char(gpr.s2)[i] = c;
-            messageReplacement = null;
-        });
-
-        if (config.teamScores) {
-            setUpTeamDuels(data.duelRoutine.addr);
-            setUpTeamBattles(data.battleRoutine.addr);
-        }
-
-        if (config.alwaysDuel) {
-            setUpAlwaysDuel(0x800FA854);
-        }
-
-        if (config.randomBonus) {
-            setUpRandomBonus!"s2"([[data.loadBonusStat1a.addr, data.loadBonusStat1b.addr],
-                                   [data.loadBonusStat2a.addr, data.loadBonusStat2b.addr],
-                                   [data.loadBonusStat3a.addr, data.loadBonusStat3b.addr]], false);
-            0x800EEA78.onExec({
-                if (0x800EE9E0.val!uint != 0x0C03BB2C) return;
-                gpr.v0 = 0; // Disable vanilla bonus stars for GetPlayerPlacementAtEndOfGame
-            });
-        }
-
-        bool superstarsEnabled = config.superstarsMiniGames;
-        if (superstarsEnabled && config.bingoURL.empty) {
-            warning("superstarsMiniGames requires bingoURL to be set; Superstars mini-games are disabled");
-            superstarsEnabled = false;
-        }
-
-        if (config.preventRepeatMiniGames || config.blockedMiniGames.length > 0 || superstarsEnabled) {
-            data.currentScene.onWrite((ref Scene scene) {
-                if (scene == Scene.START_BOARD) {
-                    state.miniGameQueue.clear();
-                    state.superstarsMiniGameQueue.clear();
-                    saveState();
-                }
-            });
-            // Populate mini-game roulette
-            0x800DFE90.onExec({
-                if (!isPartyBoardScene()) return;
-                0x800DFED4.setCode(NOP);
-                0x800DFF40.setCode(NOP);
-                0x800DFF64.setCode(NOP);
-                0x800DFF78.setCode(NOP);
-                if (gpr.s0 == 0) {
-                    auto type = (cast(MiniGame)gpr.v0).type;
-                    auto count = (0x80100E18 + gpr.s2).val!ubyte;
-                    ssRoulette.clear();
-                    if (!superstarsEnabled || !populateSuperstarsRoulette(type, count)) {
-                        auto games = [EnumMembers!MiniGame].filter!(g => g.type == type).array;
-                        fillMiniGameRoulette(type, games, count, 0x800DF120);
-                    }
-                    saveState();
-                }
-                gpr.v0 = data.miniGameRoulette[gpr.s0];
-            });
-            // Prevent the mini-game roulette from jumping backward
-            0x800DF3C0.onExec({ if (isPartyBoardScene()) gpr.v0 = 1; });
-        }
-
-        if (superstarsEnabled) {
-            data.currentScene.onWrite((ref Scene scene) {
-                if (scene == data.currentScene) return;
-                if (scene == Scene.START_BOARD || scene == Scene.CASTLE_GROUNDS || scene == Scene.TITLE_SCREEN) {
-                    resetSuperstars();
-                }
-            });
-
-            // MBMgCallListCreate: Allocate a buffer on the board's temp heap for this roulette's names.
-            // Allocating per roulette (instead of when the board loads) also works right after loading a save state.
-            0x800DFBA8.onExecDone({
-                if (!isPartyBoardScene()) return;
-                allocateSuperstarsNameBuffer();
-
-                // Make the duel roulette (category 5) 3 long, laid out like the other 3-long roulettes (category 1).
-                // These tables are the board overlay's data, which is reloaded with the board.
-                0x80100E1D.val!ubyte = 3;                           // Number of entries
-                0x80100E89.val!ubyte = 0x80100E85.val!ubyte;        // Window Y
-                0x80100E91.val!ubyte = 0x80100E8D.val!ubyte;        // Cursor Y
-                0x801020C4.val!uint  = 0x801020B4.val!uint;         // Entry rectangles
-            });
-
-            // GWMgUnlockCheck: Show every roulette slot, even if the placeholder MP3 mini-game is still locked
-            0x80035BD8.onExec({
-                if (ssRoulette.empty || !isPartyBoardScene()) return;
-                gpr.ra.onExecOnce({ gpr.v0 = 1; });
-            });
-
-            // func_8005B43C (set window message): Swap the MP3 mini-game name for the Superstars name
-            0x8005B43C.onExec({
-                if (ssRoulette.empty || !isPartyBoardScene() || !ssNameBuffer) return;
-                if (gpr.a1 < 0x4700 || gpr.a1 >= 0x4748) return; // Mini-game name messages
-                auto game = cast(MiniGame)(gpr.a1 - 0x4700 + 1);
-                if (game !in ssRoulette) return;
-                foreach (i; 0..data.miniGameRoulette.length) {
-                    if (data.miniGameRoulette[i] == game) {
-                        gpr.a1 = ssNameBuffer + cast(uint)(i * SUPERSTARS_NAME_SLOT_SIZE);
-                        return;
-                    }
-                }
-            });
-
-            // func_800E11C0 (duel roulette): Remember who is dueling
-            0x800E11C0.onExec({
-                if (!isPartyBoardScene()) return;
-                ssDuelists = [cast(uint)gpr.a0, cast(uint)gpr.a1];
-            });
-
-            // GWMgNoSet: The roulette has landed on a mini-game
-            0x80035AA8.onExec({
-                if (ssRoulette.empty || !isPartyBoardScene()) return;
-                auto game = cast(MiniGame)cast(byte)gpr.a0;
-                if (auto selected = game in ssRoulette) {
-                    ssGame = *selected;
-                    ssResults = null;
-                    ssPhase = SuperstarsPhase.SELECTED;
-                    info("Superstars mini-game: ", ssGame.fullName, " (", ssType, ")");
-                    sendSuperstarsInfo();
-                }
-                ssRoulette.clear();
-                ssNameBuffer = 0; // Only valid for this roulette
-            });
-
-            // MBVsSprKill: Called by the roulette process (regular, battle and duel) after the roulette closes.
-            // Show the "play on Superstars" message from that process, which keeps the board waiting on it.
-            // (It can't wait for the wipe to Tumble instead: the wipe is drawn over the message.)
-            0x800F5644.onExecDone({
-                if (ssPhase != SuperstarsPhase.SELECTED || !isPartyBoardScene()) return;
-                showSuperstarsMessage();
-            });
-
-            // func_800EE2DC (message waits for any player): If every player is a CPU, the message advances itself.
-            // While waiting for results, report the players as human to this function so it waits for A instead.
-            players.each!((p) {
-                p.data.flags.onRead((ref ubyte flags, Address pc) {
-                    if (ssPhase != SuperstarsPhase.WAITING || !isPartyBoardScene()) return;
-                    if (pc < 0x800EE2DC || pc >= 0x800EE614) return;
-                    if (!players.all!(o => o.isCPU)) return;
-                    flags &= ~0b1;
-                });
-            });
-
-            // omOvlCallEx: Skip the rules screen and mini-game, going straight to the results
-            0x80048128.onExec({
-                if (gpr.a0 != Scene.MINI_GAME_RULES) return;
-                if (ssPhase == SuperstarsPhase.NONE) return;
-
-                if (ssPhase == SuperstarsPhase.READY && ssResults) {
-                    auto next = applySuperstarsResults();
-                    gpr.a0 = next;
-                    if (isBoardScene(cast(Scene)next)) {
-                        // Duels have no results screen: the board pays out the winner itself (MBKettouResultExec).
-                        // Go straight back to the board, as MBOvlCallExec does once a mini-game returns.
-                        gpr.a1 = 2;
-                        gpr.a2 = 0x192;
-                        0x800D4196.val!short = 0; // D_800D4190_main.stat
-                    }
-                } else {
-                    warning("No Superstars results were entered for ", ssGame.fullName, "; playing the MP3 mini-game instead");
-                }
-
-                resetSuperstars();
-            });
-        }
-
-        if (config.enhancedTaunts) {
-            data.storeButtonPress.addr.onExecDone({
-                if (gpr.v0 == 0 || data.totalTurns == 0) return;
-
-                SFX sfx;
-                switch (data.buttons[gpr.t0]) {
-                    case Button.L:   sfx = SFX.TAUNT;               break;
-                    case Button.D_R: sfx = SFX.BEING_CHOSEN;        break;
-                    case Button.D_L: sfx = SFX.GETTING_AN_ITEM;     break;
-                    case Button.D_D: sfx = SFX.WINNING_A_STAR;      break;
-                    case Button.D_U: sfx = SFX.WINNING_A_MINI_GAME; break;
-                    case Button.C_R: sfx = SFX.DESPAIR_1;           break;
-                    case Button.C_L: sfx = SFX.DESPAIR_2;           break;
-                    case Button.C_D: sfx = SFX.LOSING_A_MINI_GAME;  break;
-                    case Button.C_U: sfx = SFX.LOSING_A_MINI_GAME;  break;
-                    default:                                        return;
-                }
-
-                auto p = players.find!(p => p.data.controller == gpr.t0);
-                if (p.empty || p.front.isCPU) return;
-
-                data.playSFX.addr.jal(sfx, p.front.index);
-            });
-        }
-
-        if (config.randomChanceOrder) {
-            0x80105B58.onExec({
-                if (data.currentScene != Scene.CHANCE_TIME) return;
-                [0, 1, 2].randomShuffle(random).each!((i, j) => data.chanceOrder[i] = cast(ubyte)j);
-            });
-        }
-
-        if (config.itemsOnFinalTurn) {
-            data.currentTurn.onRead((ref ubyte turn, Address pc) {
-                if (!isBoardScene()) return;
-                if (turn != data.totalTurns) return;
-                if (pc == 0x800FE420                       || // Item Space
-                   (pc + 32).val!Instruction == 0x0C036783 || // Toad Shop
-                   (pc + 32).val!Instruction == 0x0C03B164) { // Item Shop
-                    turn--;
-                }
-            });
-        }
-
-        immutable customSpaces = config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 ||
-                                 config.standardSpaceRatio.values.any!(v => v > 0.0);
-
-        // The game draws the spaces from lists of each type's spaces, made when the board loads, so a space the plugin
-        // changes would still be drawn as it was: this draws them by their types as they are now instead (with Lucky
-        // Spaces and revealed hidden blocks as types of their own)
-        void drawSpacesByCurrentType() {
-            0x800EAC70.onExecDone({
-                if (!isBoardScene()) return;
-
-                static Array!ubyte[CustomSpace.max+1] spaceLists;
-
-                if (gpr.s3 == Space.Type.BLUE && gpr.s2 == 0) {
-                    spaceLists.each!((ref e) => e.length = 0);
-                    foreach (i; iota(data.spaceCount)) {
-                        if (data.spaces[i].type == Space.Type.BLUE) {
-                            if (remainingTurns() <= config.revealHiddenBlocksOnRemainingTurns &&
-                               (i == data.itemHiddenBlock || i == data.coinHiddenBlock || i == data.starHiddenBlock)) {
-                                spaceLists[CustomSpace.HIDDEN] ~= cast(ubyte)i;
-                                continue;
-                            } else if (i < state.spaces.length && state.spaces[i] == CustomSpace.LUCKY) {
-                                spaceLists[CustomSpace.LUCKY] ~= cast(ubyte)i;
-                                continue;
-                            }
-                        }
-
-                        spaceLists[data.spaces[i].type] ~= cast(ubyte)i;
-                    }
-                }
-
-                gpr.a0 = (gpr.s2 >= spaceLists[gpr.s3].length ? 0xFF : spaceLists[gpr.s3][gpr.s2]);
-            });
-        }
-        if (customSpaces) {
-            bool lumasPlaygroundHiddenIndex(ushort index) {
-                if (getCurrentBoardName() != "Luma's Playground") return false;
-                
-                return index == 0xFFFF || index == 98 || index == 103 || index == 107;
-            }
-
-            bool validHiddenIndex(string exclude = null)(ushort index) {
-                if (lumasPlaygroundHiddenIndex(index)) return true;
-                if (index >= data.spaceCount) return false;
-                if (data.spaces[index].type != Space.Type.BLUE) return false;
-                if (index < state.spaces.length && state.spaces[index] == CustomSpace.LUCKY) return false;
-                static if (exclude != "item") {
-                    if (index == data.itemHiddenBlock) return false;
-                }
-                static if (exclude != "coin") {
-                    if (index == data.coinHiddenBlock) return false;
-                }
-                static if (exclude != "star") {
-                    if (index == data.starHiddenBlock) return false;
-                }
-                return true;
-            }
-
-            ushort randomHiddenIndex() {
-                auto selection = iota(data.spaceCount).filter!(i => validHiddenIndex(i))
-                                                      .filter!(i => !lumasPlaygroundHiddenIndex(i))
-                                                      .array;
-                return selection.empty ? cast(ushort)0xFFFF : selection.choice(random);
-            }
-            
-            0x8003592C.onExecDone({ // Finish making temp heap
-                if (!isBoardScene()) return;
-
-                mallocTemp(LUCKY_SPACE_TEXTURE.length + 0x10, (ptr) {
-                    LUCKY_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
-                    state.luckySpaceTexturePtr = ptr;
-
-                    if (config.revealHiddenBlocksOnRemainingTurns <= 0) {
-                        saveState();
-                        return;
-                    }
-
-                    mallocTemp(GOLD_SPACE_TEXTURE.length + 0x10, (ptr) {
-                        GOLD_SPACE_TEXTURE.each!((i, b) { Ptr!ubyte(ptr + 0x10)[i] = b; });
-                        state.goldSpaceTexturePtr = ptr;
-
-                        saveState();
-                    });
-                });
-            });
-            0x800EA4F0.onExec({ // Force high res space textures on full map view
-                if (!isBoardScene()) return;
-                gpr.a0 = false;
-            });
-            auto selectSpaceTexture = {
-                if (!isBoardScene()) return;
-                switch (gpr.s3) {
-                    case CustomSpace.LUCKY:  gpr.v0 = state.luckySpaceTexturePtr; break;
-                    case CustomSpace.HIDDEN: gpr.v0 = state.goldSpaceTexturePtr;  break;
-                    default:                                                break;
-                }
-            };
-            0x800EA838.onExecDone(selectSpaceTexture);
-            0x800EA8AC.onExecDone(selectSpaceTexture);
-            0x800EA970.onExecDone(selectSpaceTexture);
-            0x800EAA3C.onExecDone(selectSpaceTexture);
-            drawSpacesByCurrentType();
-            0x800EADB8.onExec({
-                if (!isBoardScene()) return;
-                gpr.v0 = (gpr.s3 <= CustomSpace.max);
-            });
-            resetCustomSpacesAtStart();
-            0x800EA6F4.onExec({ // Space render function
-                if (!isBoardScene()) return;
-
-                bool changed = assignCustomSpaces();
-
-                if (!validHiddenIndex!"item"(data.itemHiddenBlock)) data.itemHiddenBlock = randomHiddenIndex();
-                if (!validHiddenIndex!"coin"(data.coinHiddenBlock)) data.coinHiddenBlock = randomHiddenIndex();
-                if (!validHiddenIndex!"star"(data.starHiddenBlock)) data.starHiddenBlock = randomHiddenIndex();
-
-                if (changed) {
-                    saveState();
-                }
-            });
-            0x800FD774.onExec({ // Increment lucky space count
-                if (!isBoardScene()) return;
-                if (state.spaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
-                if (data.spaces[data.currentSpaceIndex].type != Space.Type.BLUE) return;
-
-                gpr.v0--;
-                currentPlayer.state.luckySpaceCount++;
-
-                saveState();
-            });
-            0x800FE258.onExec({ // Trigger lucky space
-                if (!isBoardScene()) return;
-                if (state.spaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
-                if (data.spaces[data.currentSpaceIndex].type != Space.Type.BLUE) return;
-
-                if (random.uniform01() < config.luckySpaceItemChance) {
-                    gpr.v0 = Space.Type.ITEM;
-                }
-            });
-            data.blueOrRedSpaceCoins.addr.onExec({ // Give extra coins on lucky space
-                if (!isBoardScene()) return;
-                if (state.spaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
-                if (data.spaces[data.currentSpaceIndex].type != Space.Type.BLUE) return;
-
-                switch (gpr.s0) {
-                    case 3: gpr.s0 = [7, 10, 12, 15, 20].choice(random); break;
-                    case 6: gpr.s0 =        [12, 15, 20].choice(random); break;
-                    default: break;
-                }
-            });
-            0x800FE478.onExec({ // Force Toad or Baby Bowser on lucky space
-                if (!isBoardScene()) return;
-                if (state.spaces[data.currentSpaceIndex] != CustomSpace.LUCKY) return;
-                if (data.spaces[data.currentSpaceIndex].type != Space.Type.BLUE) return;
-                
-                gpr.v0 = uniform!"[]"(0, 1, random);
-            });
-
-            auto chooseHiddenBlockLocation = (ref ushort index) {
-                if (!isBoardScene()) return;
-                if (lumasPlaygroundHiddenIndex(index)) return;
-                index = randomHiddenIndex();
-            };
-            data.itemHiddenBlock.onWrite(chooseHiddenBlockLocation);
-            data.coinHiddenBlock.onWrite(chooseHiddenBlockLocation);
-            data.starHiddenBlock.onWrite(chooseHiddenBlockLocation);
-        }
-
-        if (config.luckySpaceRatio > 0) {
-            setUpLuckyResultsColumn();
-        }
-
-        if (config.doubleCoinMiniGames) {
-            immutable INTERVAL = 5;
-            auto doubleCoins = (ref ushort amount) {
-                if (data.currentScene != Scene.MINI_GAME_RESULTS) return;
-                if ((data.currentTurn - 1) % INTERVAL == 0) {
-                    amount *= 2;
-                }
-            };
-            players.each!((p) {
-                p.data.gameCoinsMain.onRead(doubleCoins);
-                p.data.gameCoinsExtra.onRead(doubleCoins);
-            });
-
-            0x800FEF1C.onExecDone({
-                if (!isBoardScene()) return;
-                if (data.currentTurn % INTERVAL != 0) return;
-
-                showGlobalMessage("          Bonus Mini-Game!\n\n" ~
-                                  "                 <YELLOW><COIN_OUTLINE> × 2<RESET>", 0x15);
-            });
-        }
-
-        if (config.mpiqPermadeath) {
-            /*
-            0x8010B374.onExec({
-                if (data.currentScene != Scene.MPIQ) return;
-                gpr.v0 = -1; // Force all answers to be incorrect for testing purposes
-            });
-            */
-            0x8010B5B4.onExec({
-                if (data.currentScene != Scene.MPIQ) return;
-
-                bool allNoJump = data.mpiqNoJump[0] && data.mpiqNoJump[1] &&
-                                 data.mpiqNoJump[2] && data.mpiqNoJump[3];
-
-                if (gpr.v0 == 0 && !allNoJump) {
-                    gpr.v0 = 1; // Prevent jumping
-                } else if (gpr.v0 == 1 && allNoJump) {
-                    gpr.v0 = 0; // Allow jumping
-                }
-            });
-        }
-
-        if (config.finalResultsDoNotProceed) {
-            0x80109348.onExec({
-                if (data.currentScene != Scene.FINAL_RESULTS) return;
-                gpr.v0 = input[0..$].map!(i => i.buttons << 8)
-                                    .canFind!(b => (b & Button.A) && (b & Button.Z));
-            });
-        }
-
-        if (config.improveLastFiveTurnsBonus) {
-            0x80107260.onExec({ // Prevent Baby Bowser
-                if (data.currentScene != Scene.LAST_FIVE_TURNS) return;
-                gpr.v0 = 1;
-            });
-
-            0x80106A80.onExec({ // Prevent Whomp
-                if (data.currentScene != Scene.LAST_FIVE_TURNS) return;
-                gpr.v0 = 1;
-            });
-            
-            0x80106ED4.onExec({ // Choose prize amount
-                if (data.currentScene != Scene.LAST_FIVE_TURNS) return;
-                lastFiveTurnsBonus = [10, 20, 20, 20, 30, 30].choice(random);
-            });
-
-            0x80106EF4.onExecDone({ // Apply prize amount
-                if (data.currentScene != Scene.LAST_FIVE_TURNS) return;
-                gpr.a1 = lastFiveTurnsBonus;
-            });
-        }
-
-        if (config.singleUseBattleSpaces) {
-            // Used Battle Spaces become custom blue spaces, so without the other custom space options, keep track of
-            // the custom spaces here
-            if (!customSpaces) {
-                drawSpacesByCurrentType();
-                resetCustomSpacesAtStart();
-                0x800EA6F4.onExec({ // Space render function
-                    if (!isBoardScene()) return;
-                    if (assignCustomSpaces()) {
-                        saveState();
-                    }
-                });
-            }
-
-            data.battleRoutineComplete.addr.onExec({
-                if (!isBoardScene()) return;
-                if (!gpr.v0) return; // Battle cancelled
-                auto index = data.currentSpaceIndex;
-                if (index >= state.spaces.length || index >= data.spaceCount) return;
-                state.spaces[index] = CustomSpace.BLUE;
-                data.spaces[index].type = Space.Type.BLUE;
-                saveState();
-            });
-        }
-
-        // TODO: Not actually everything. Expand later.
-        if (config.unlockEverything) {
-            0x80035C00.onExecDone({ gpr.a0 |= 0xFF; });                        // Mini-Games (800CC0DE - 800CC0E5)
-            // Super Hard and Waluigi's Island are bits in the save's flags (GwCommon.flag[5] and [6]), which are made
-            // to read as set. Not for the code that changes other flags in those bytes (_SetFlag and _ClearFlag read,
-            // change and write back the whole byte) or that writes the save (the saveEncode and saveload code), so the
-            // unlocks never become part of the save.
-            bool keepsSave(Address pc) {
-                return (pc >= 0x80035EF4 && pc < 0x80035F98)  // _SetFlag, _ClearFlag
-                    || (pc >= 0x8004F290 && pc < 0x80050F50); // saveEncode, saveload
-            }
-            0x800CC158.val!ubyte.onRead((ref ubyte flags, Address pc) { // Super Hard
-                if (!keepsSave(pc)) flags |= 0x20;
-            });
-            0x800CC159.val!ubyte.onRead((ref ubyte flags, Address pc) { // Waluigi's Island
-                if (!keepsSave(pc)) flags |= 0x02;
-            });
-        }
-
-        if (config.mapScrollSpeedMultiplier != 1.0) {
-            setUpMapScrollSpeed(0x80100350);
-        }
-
-        if (config.increaseItemGameVariety) {
-            void populateHelpScreen() {
-                iota(5).map!(i => cast(Item)data.itemMiniGameItems[i])
-                       .array.sort!((a, b) => a.to!string < b.to!string)
-                       .each!((i, item) => data.itemMiniGameHelpScreenItems[3*i%5] = item);
-            }
-
-            0x80106CE8.onExec({
-                if (data.currentScene != Scene.MINI_GAME_RULES) return;
-
-                [EnumMembers!Item].filter!(item => item.isCommon)
-                                  .array.randomShuffle(random).take(5)
-                                  .each!((i, item) => data.itemMiniGameItems[i] = item);
-
-                populateHelpScreen();
-            });
-
-            0x80106E90.onExec({
-                if (data.currentScene != Scene.MINI_GAME_RULES) return;
-
-                populateHelpScreen();
-            });
-        }
-
-        if (config.increaseItemShopVariety) {
-            int phase = -1;
-            int rank  = -1;
-
-            data.currentTurn.onRead((ref ubyte turn, Address pc) {
-                if (!isBoardScene()) return;
-                if ((pc + 32).val!Instruction != 0x0C03B164) return; // Not item shop
-
-                phase = -1;
-                rank  = -1;
-            });
-
-            0x800EEA50.onExec({ // Return player rank
-                if (!isBoardScene()) return;
-
-                if ((gpr.ra + 12).val!Instruction != 0x00041840) return; // Not item shop
-                if ((gpr.ra + 16).val!Instruction != 0x00641821) return; // Not item shop
-                if ((gpr.ra + 20).val!Instruction != 0x00031880) return; // Not item shop
-                if ((gpr.ra + 24).val!Instruction != 0x00651821) return; // Not item shop
-
-                if (phase == -1 && rank == -1) {
-                    phase = gpr.s1;
-                    rank  = gpr.v0;
-
-                    if (uniform!"[]"(1, 3, random) == 1) {
-                        switch (phase) {
-                            case GamePhase.EARLY: phase = GamePhase.MID;                                   break;
-                            case GamePhase.MID:   phase = [GamePhase.EARLY, GamePhase.END].choice(random); break;
-                            case GamePhase.END:   phase = GamePhase.MID;                                   break;
-                            default:                                                                       break;
-                        }
-                    }
-
-                    if (uniform!"[]"(1, 3, random) == 1) {
-                        switch (phase) {
-                            case GamePhase.MID: rank = [0, 1]   .remove(min(rank, 1)).choice(random); break;
-                            case GamePhase.END: rank = [0, 1, 2].remove(min(rank, 2)).choice(random); break;
-                            default:                                                                  break;
-                        }
-                    }
-                }
-
-                gpr.s1 = phase;
-                gpr.v0 = rank;
-            });
-        }
-
-        if (config.toadShopChance >= 0) {
-            Address[][Scene] shopTypeAddress;
-            0x800ECEDC.onExec({ // return RNGPercentChance
-                if (!isBoardScene()) return;
-                if (data.currentScene !in shopTypeAddress) {
-                    shopTypeAddress[data.currentScene] = searchMemory([0x0C03B3A7, 0x24040042, 0x00021400, 0x2C420001]);
-                }
-                if (shopTypeAddress[data.currentScene].canFind(gpr.ra - 8)) {
-                    gpr.v0 = random.uniform01() < config.toadShopChance;
-                }
-            });
-        }
-
-        players.each!((p) {
-            foreach (i; iota(3)) {
-                p.data.items[i].onWrite((ref Item item) {
-                    if (remainingTurns() <= config.replaceWackyWatchBeforeRemainingTurns) return;
-
-                    if (item == Item.WACKY_WATCH) {
-                        item = [Item.KOOPA_KARD, Item.BARTER_BOX, Item.LUCKY_CHARM].choice(random);
-                    }
-                });
-            }
-        });
-
-        if (config.autoStartNextBoard) {
-            0x80048228.onExec({
-                if (gpr.a0 == Scene.TRANSITION && data.currentScene == Scene.FINAL_RESULTS) {
-                    gpr.a0 = Scene.CHILLY_WATERS_BOARD + (data.currentBoard + 1) % 6;
-                    gpr.a1 = 0;
-
-                    iota(4).each!((i) {
-                        data.players[i].coins = 0;
-                        data.players[i].stars = 0;
-                        iota(3).each!(j => data.players[i].items[j] = Item.NONE);
-                        data.players[i].miniGameCoins = 0;
-                        data.players[i].maxCoins = 0;
-                        data.players[i].happeningSpaces = 0;
-                        data.players[i].redSpaces = 0;
-                        data.players[i].blueSpaces = 0;
-                        data.players[i].chanceSpaces = 0;
-                        data.players[i].bowserSpaces = 0;
-                        data.players[i].battleSpaces = 0;
-                        data.players[i].itemSpaces = 0;
-                        data.players[i].bankSpaces = 0;
-                        data.players[i].gameGuySpaces = 0;
-                    });
-                }
-            });
-        }
-
-        if (config.balanceSuperHardCPU) {
-            iota(4).each!((i) {
-                data.players[i].cpuDifficulty.onRead((ref ubyte difficulty) {
-                    if (difficulty != CPUDifficulty.SUPER_HARD) return;
-
-                    switch (data.currentScene) {
-                        case Scene.TOADSTOOL_TITAN:
-                            difficulty = CPUDifficulty.NORMAL;
-                            break;
-
-                        case Scene.BABY_BOWSER_BROADSIDE:
-                        case Scene.HYPER_HYDRANTS:
-                        case Scene.THE_BEAT_GOES_ON:
-                        case Scene.CHEEP_CHEEP_CHASE:
-                        case Scene.POPGUN_PICK_OFF:
-                        case Scene.BOWSER_TOSS:
-                        case Scene.SILLY_SCREWS:
-                            difficulty = CPUDifficulty.HARD;
-                            break;
-
-                        default:
-                            break;
-                    }
-                });
-            });
-
-            // In Log Jam, a computer only presses a wrong button if its teammate is a computer too: its two press
-            // decisions check the teammate's computer flag (0x1E in the teammate's Log Jam data), so a human's
-            // partner never makes a mistake. Make the check read as a computer, so it plays like a computer's partner.
-            foreach (address; [0x8010896C, 0x80108BCC]) {
-                address.onExecDone({ if (data.currentScene == Scene.LOG_JAM) gpr.v0 = 1; });
-            }
-
-            // In Slot Synch, a computer teamed with a human ignores its level: it never misses, and stops on whatever
-            // symbol the human stopped on, even -1. Make it play like a computer's partner (its level sets how long it
-            // waits and its chance to miss), aiming for +3, or for the human's symbol once the human has stopped,
-            // unless that's -1 (then it stays off -1, so the round scores nothing instead of -1).
-            // Each player's Slot Synch data (s1, and the teammate's in s2): 0x00 reel, 0x22 computer flag, 0x2C the
-            // symbol it aims for (0: +3, 1: +1, 2: +2, 3: -1).
-            auto humanPartner = () => data.currentScene == Scene.SLOT_SYNCH && (gpr.s2 + 0x22).val!short == 0;
-            auto partnerSymbol = () { // The symbol the teammate's reel stopped on, or -1 while it's spinning
-                Address reel = 0x8010DF7C.val!uint + (gpr.s2 + 0x00).val!short * 0x3C;
-                if ((reel + 0x0C).val!short != 0) return -1;
-                auto angle = (reel + 0x30).val!float + 45;
-                if (angle > 360) angle -= 360; else if (angle < 0) angle += 360;
-                return cast(int)(0x8010D854 + (reel + 0x03).val!ubyte * 4 + cast(int)(angle / 90)).val!ubyte;
-            };
-            0x801071DC.onExecDone({ if (humanPartner()) gpr.v0 = 1; }); // Round setup: take the computer-partner path
-            0x801073AC.onExecDone({ if (humanPartner()) gpr.v0 = 0; }); // The symbol it picks for the team: +3
-            0x80107500.onExecDone({ if (humanPartner()) gpr.v0 = 1; }); // Don't wait to copy the human
-            0x8010746C.onExec({ // Before deciding whether to stop: aim for the human's symbol, unless it's -1
-                if (!humanPartner()) return;
-                auto symbol = partnerSymbol();
-                if (symbol >= 0) (gpr.s1 + 0x2C).val!short = cast(short)(symbol == 3 ? 0 : symbol);
-            });
-            0x801074D4.onExec({ // A miss stops on a symbol other than the one it aims for: not on the human's -1 either
-                if (humanPartner() && gpr.v0 == 3 && partnerSymbol() == 3) gpr.v1 = 3;
-            });
-        }
-
-        if (config.chanceSwapInsteadOfTransfer) {
-            0x8010D5FC.onExecDone({ // Write chance outcome
-                if (data.currentScene != Scene.CHANCE_TIME) return;
-                if (data.chanceCharacter1 == -1) return;
-                if (data.chanceCharacter2 == -1) return;
-                if (data.chancePrize      == -1) return;
-
-                auto p1 = players.find!(p => p.data.character == data.chanceCharacter1).front;
-                auto p2 = players.find!(p => p.data.character == data.chanceCharacter2).front;
-
-                switch (data.chancePrize) {
-                    case ChancePrize.COINS_ALL:
-                        if (p1.data.coins < p2.data.coins) {
-                            data.chanceCharacter1 = p2.data.character;
-                            data.chanceCharacter2 = p1.data.character;
-                        }
-                        break;
-
-                    case ChancePrize.STARS_ALL:
-                        if (p1.data.stars < p2.data.stars) {
-                            data.chanceCharacter1 = p2.data.character;
-                            data.chanceCharacter2 = p1.data.character;
-                        }
-                        break;
-
-                    default:
-                        break;
-                }
-            });
-
-            0x8010FA4C.onExecDone({ // Check if coins will transfer
-                if (data.currentScene != Scene.CHANCE_TIME) return;
-                if (data.chancePrize != ChancePrize.COINS_ALL) return;
-
-                auto p1 = players.find!(p => p.data.character == data.chanceCharacter1).front;
-                auto p2 = players.find!(p => p.data.character == data.chanceCharacter2).front;
-
-                gpr.v0 = p1.data.coins - p2.data.coins;
-            });
-
-            0x8010FA80.onExecDone({ // Check if stars will transfer
-                if (data.currentScene != Scene.CHANCE_TIME) return;
-                if (data.chancePrize != ChancePrize.STARS_ALL) return;
-
-                auto p1 = players.find!(p => p.data.character == data.chanceCharacter1).front;
-                auto p2 = players.find!(p => p.data.character == data.chanceCharacter2).front;
-
-                gpr.v0 = p1.data.stars - p2.data.stars;
-            });
-
-            0x8010E650.onExecDone({ // Determine coin transfer amount
-                if (data.currentScene != Scene.CHANCE_TIME) return;
-                if (data.chancePrize != ChancePrize.COINS_ALL) return;
-
-                gpr.v0 = data.players[data.chancePlayer1].coins - data.players[data.chancePlayer2].coins;
-            });
-
-            0x8010E684.onExecDone({ // Determine star transfer amount
-                if (data.currentScene != Scene.CHANCE_TIME) return;
-                if (data.chancePrize != ChancePrize.STARS_ALL) return;
-
-                gpr.v0 = data.players[data.chancePlayer1].stars - data.players[data.chancePlayer2].stars;
-            });
-        }
-
-        if (!config.chancePrizeReplace.empty) {
-            0x8010D190.onExecDone({
-                if (data.currentScene != Scene.CHANCE_TIME) return;
-
-                auto replacement = cast(ChancePrize)gpr.v0 in config.chancePrizeReplace;
-                if (replacement) gpr.v0 = *replacement;
-            });
-        }
-
-        if (config.rankPlayersByBingoScore) {
-            setUpBingoRanking(0x800EE9C0, 0x800EEA50, 0x800EE9E0, 0x0C03BB2C);
-        }
-
-        if (config.battleCoinDistribution != DEFAULT_BATTLE_DIST) {
-            0x80105BCC.onExec({
-                if (data.currentScene != Scene.BATTLE_GAME_RESULTS) return;
-
-                auto rankCounts = [0, 0, 0, 0];
-                players.each!(p => rankCounts[p.data.battleRank]++);
-
-                auto rankDist = [0.0, 0.0, 0.0, 0.0];
-                size_t r = 0;
-                config.battleCoinDistribution.each!((i, e) {
-                    if (rankCounts[i]) r = i;
-                    rankDist[r] += e;
-                });
-
-                rankDist.each!((i, ref e) {
-                    if (rankCounts[i]) e /= rankCounts[i];
-                });
-
-                auto dist = players.map!(p => rankDist[p.data.battleRank]).array;
-                auto coins = apportion(data.battleCoinTotal, dist);
-                coins.each!((i, c) => players[i].data.battleCoins = cast(ushort)c);
-                data.battlePityCoins = data.battleCoinTotal - cast(ushort)coins.sum;
-            });
-        }
-
-        // Chance Time duplicate character fix
-        0x8010E308.onExec({
-            if (data.currentScene != Scene.CHANCE_TIME) return;
-
-            if (gpr.a1 == 0) {
-                data.chancePlayer1 = players.filter!(p => p.data.character == gpr.v0)
-                                            .filter!(p => p.index != data.chancePlayer2)
-                                            .array.choice(random).index;
-            } else {
-                data.chancePlayer2 = players.filter!(p => p.data.character == gpr.v0)
-                                            .filter!(p => p.index != data.chancePlayer1)
-                                            .array.choice(random).index;
-            }
-
-            gpr.a0 = (gpr.a1 == 0 ? data.chancePlayer1 : data.chancePlayer2);
-        });
-
-        // Chance Time duplicate character fix
-        0x8010F9DC.onExec({
-            if (data.currentScene != Scene.CHANCE_TIME) return;
-
-            gpr.a0 = (gpr.a2 == 0 ? data.chancePlayer1 : data.chancePlayer2);
-        });
-
-        // Chance Time duplicate character fix
-        0x8010E568.onExec({
-            if (data.currentScene != Scene.CHANCE_TIME) return;
-
-            gpr.a0 = (gpr.s2 == 0 ? data.chancePlayer1 : data.chancePlayer2);
-        });
-
-        watchPlayerInfo(); // Keep this at the bottom
-    }
-
-    void allocateSuperstarsNameBuffer() {
-        ssNameBuffer = 0;
-        mallocTemp(SUPERSTARS_NAME_SLOT_SIZE * data.miniGameRoulette.length, (ptr) {
-            ssNameBuffer = ptr;
-        });
-    }
-
-    // Fills the roulette with Superstars mini-games, using MP3 mini-games of the same type as placeholders.
-    // Returns false if the roulette should be populated normally instead.
-    bool populateSuperstarsRoulette(MiniGameType type, uint count) {
-        auto all = superstarsMiniGames(type);
-        if (all.empty || count == 0 || count > data.miniGameRoulette.length) return false;
-
-        auto placeholders = [EnumMembers!MiniGame].filter!(g => g.type == type).take(count).array;
-        if (placeholders.length < count) return false;
-
-        auto choices = all.filter!(g => !config.blockedSuperstarsMiniGames.canFind(g)).array;
-        if (choices.empty) choices = all;
-
-        // The queue holds every (unblocked) mini-game of the list. Battles skip its coin mini-games,
-        // which stay in the queue for regular 4-player roulettes.
-        auto key = superstarsQueueKey(type);
-        auto queue = &state.superstarsMiniGameQueue.require(key);
-        if (queue.empty) queue.initialize(choices, random);
-        auto allowed = (SuperstarsMiniGame g) => isAllowedSuperstarsMiniGame(g, type);
-        auto game = queue.next(random, allowed);
-        auto alternatives = choices.filter!(g => g != game && allowed(g)).array.randomShuffle(random)
-                          ~ all.filter!(g => g != game && !choices.canFind(g) && allowed(g)).array.randomShuffle(random);
-        // At most one coin mini-game and one Bowser mini-game per roulette
-        auto fits = (SuperstarsMiniGame g, SuperstarsMiniGame[] list) =>
-            !(g.isCoinMiniGame && list.any!(o => o.isCoinMiniGame)) &&
-            !(g.isBowserMiniGame && list.any!(o => o.isBowserMiniGame));
-        SuperstarsMiniGame[] names = [game];
-        foreach (g; alternatives) {
-            if (names.length == count) break;
-            if (fits(g, names)) names ~= g;
-        }
-        for (size_t i = 0; names.length < count; i++) {
-            names ~= names[i];
-        }
-        names.randomShuffle(random);
-
-        foreach (i, g; names) {
-            data.miniGameRoulette[i] = placeholders[i];
-            ssRoulette[placeholders[i]] = g;
-        }
-
-        if (ssNameBuffer) {
-            foreach (i, g; names) {
-                // Plain label: no <END>, which would make the window show a "press A" arrow.
-                // Coin mini-games are yellow, Bowser mini-games red.
-                auto name = g.isCoinMiniGame   ? "<YELLOW>" ~ g.fullName ~ "<RESET>"
-                          : g.isBowserMiniGame ? "<RED>"    ~ g.fullName ~ "<RESET>"
-                          : g.fullName;
-                auto text = formatText(name ~ "<NUL><NUL>");
-                if (text.length > SUPERSTARS_NAME_SLOT_SIZE) {
-                    text = text[0..SUPERSTARS_NAME_SLOT_SIZE - 2] ~ formatText("<NUL><NUL>");
-                }
-                auto slot = Ptr!char(ssNameBuffer + cast(uint)(i * SUPERSTARS_NAME_SLOT_SIZE));
-                foreach (j, char c; text) slot[j] = c;
-            }
-        } else {
-            warning("No buffer for Superstars mini-game names; the roulette will show MP3 mini-game names");
-        }
-
-        auto target = names.countUntil(game);
-        0x800DF120.onExecOnce({ gpr.v0 = cast(uint)target; });
-
-        ssType = type;
-        if (type != MiniGameType.DUEL) ssDuelists = null;
-
-        return true;
-    }
-
-    // Fades out the music the same way the board does before a mini-game (func_800F93A4), so it doesn't play
-    // during the Superstars mini-game. Battles and duels play their music on a second track (D_800C9930).
-    void fadeOutBoardMusic(void delegate() done) {
-        enum FRAMES = 60;
-        auto stopSeq = (void delegate() next) {
-            0x8004A950.jal(next);                                  // Stop the main track
-        };
-        auto checkFlag = {
-            if (0x800CE206.val!short != 0) {
-                0x800CE206.val!short = 0;
-                stopSeq(done);
-            } else {
-                done();
-            }
-        };
-        auto fadeExtraTrack = {
-            auto track = 0x800C9930.val!short;
-            if (track != -1) {
-                0x800C9930.val!short = -1;
-                0x800039A4.jal(cast(uint)cast(int)track, FRAMES, { // Fade the battle/duel track
-                    stopSeq(checkFlag);
-                });
-            } else {
-                checkFlag();
-            }
-        };
-        0x8004A994.jal(FRAMES, fadeExtraTrack);                     // HuAudSeqFadeOut: fade the main track
+    // Whether the plugin changes the board's spaces (see CustomSpaces3 and LuckySpaces)
+    bool hasCustomSpaces() const {
+        return config.luckySpaceRatio > 0 || config.revealHiddenBlocksOnRemainingTurns > 0 ||
+               config.standardSpaceRatio.values.any!(v => v > 0.0);
     }
 
     // The bingo card name for a character's player (null if none, or bingoPlayerNames is off)
@@ -1639,8 +543,640 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         return name ? characterColor(c) ~ name ~ (reset ? "<RESET>" : "") : null;
     }
 
-    enum WINDOW_SIZE = 0x27C;
-    Address windowAddress(short w) { return 0x800CC69C.val!uint + w * WINDOW_SIZE; }
+    // A new game's first turn is a new turn (see MarioParty.onFrame())
+    @Write("data.currentScene") final void newGame(ref Scene scene) {
+        if (scene == Scene.START_BOARD) currentPlayerTurn = 0;
+    }
+
+    // Every message is loaded by ID through func_800364DC(id), id = (directory << 8) | index. Window message
+    // arguments (<1>-<5>) can be message IDs too, which it also loads. It copies the message into a newly
+    // allocated buffer, so replacing text here needs no memory management: the game allocates the new length
+    // and frees the buffer itself. The features that change messages are MessageChangers.
+    @Exec(0x800364DC) final void messageLoading() {
+        messageId = cast(ushort)gpr.a0;
+    }
+
+    @Exec(0x80036574) final void messageLoaded() { // s0 = message (length, then text), s1 = length; next, it allocates s1 bytes
+        string text;
+        auto c = Ptr!char(gpr.s0 + 2);
+        foreach (i; 0..cast(short)gpr.s1) text ~= c[i];
+        auto changed = text;
+        foreach (f; activeFeatures) if (auto m = cast(MessageChanger)f) changed = m.changeMessage(messageId, changed);
+        messageReplacement = changed == text ? null : changed;
+        if (messageReplacement !is null) gpr.s1 = cast(uint)messageReplacement.length;
+    }
+
+    @Exec(0x800365BC) final void messageCopied() { // s2 = the copy (0 if it couldn't be allocated)
+        if (messageReplacement is null) return;
+        if (gpr.s2) foreach (i, c; messageReplacement) Ptr!char(gpr.s2)[i] = c;
+        messageReplacement = null;
+    }
+
+    override bool isPlayable(Character c) const {
+        return c >= Character.MARIO && c <= Character.DAISY;
+    }
+
+    override bool overrideItems(Player p, string[] names) {
+        Item[] items;
+        try {
+            items = names.map!(n => n.to!Item).array;
+        } catch (ConvException) {
+            return false;
+        }
+        if (items.canFind(Item.NONE)) return false;
+
+        iota(3).each!(i => p.data.items[i] = (i < items.length ? items[i] : Item.NONE)); // The game keeps them packed
+        return true;
+    }
+
+    override void addPlayerItems(Player player, ref JSONValue msg) {
+        Item[] items;
+        iota(3).filter!(i => player.data.items[i] != Item.NONE).each!(i => items ~= player.data.items[i]);
+        msg["items"] = items.toJSON();
+        msg["itemSlots"] = JSONValue(3);
+    }
+}
+
+final class TeamScores3 : TeamScores!MarioParty3 {
+    // A Chance Time between teammates changes nothing for the team (chancePlayer1 and chancePlayer2 are player indices)
+    override bool locked() const {
+        return data.currentScene == Scene.CHANCE_TIME && data.chancePlayer1 < players.length &&
+               data.chancePlayer2 < players.length && team(players[data.chancePlayer1]) == team(players[data.chancePlayer2]);
+    }
+
+    // Coin Potluck and Bowser Revolution move each player's coins one at a time, so syncing teammates would count each
+    // change twice
+    override bool disabled() const {
+        return data.currentScene == Scene.BOWSER_EVENT &&
+               (data.bowserEventType == BowserEventType.COIN_POTLUCK || data.bowserEventType == BowserEventType.REVOLUTION);
+    }
+}
+
+final class TeamControl3 : TeamControl!MarioParty3 {
+    override bool disabled() const {
+        return data.currentScene == Scene.GAME_SETUP || data.currentScene == Scene.FINAL_RESULTS;
+    }
+}
+
+// customCPUJunctionArrowFix: at a junction on a board made with PartyPlanner64, its junction event (a process,
+// first in the space's events) shows the arrows, has a computer pick one at random (func_800DA190, the board
+// code's AI decision), moves the cursor to it and sets the next space. Some boards add their own event to the space
+// that picks the computer's direction smarter (toward the star, and so on) by setting the next space again
+// (SetNextChainAndSpace, func_800ED998), after the arrows: the computer often walks the other way from its arrow.
+// Here, on a computer's turn, those events run before the junction event (once: they're skipped when the loop
+// reaches them), and the AI decision picks the arrow toward the direction they set.
+final class JunctionArrowFix : Feature!MarioParty3 {
+    // The board code's ExecSpaceEvents(space, activation) loop: s1 = the event list (8-byte entries of
+    // activation, execution type (1: direct, 2: process) and function), s3 = the activation
+    enum Address EXEC_LIST = 0x800EBBA0, EXEC_DIRECT = 0x800EBC10, EXEC_NEXT = 0x800EBC58, EXEC_END = 0x800EBC84;
+    enum Address AI_DECISION = 0x800DA190, SET_NEXT = 0x800ED998;
+    enum uint SET_NEXT_JAL = 0x0C000000 | (SET_NEXT & 0x0FFFFFFF) >> 2;
+
+    Address[] alreadyRun; // The events run early, skipped when the loop reaches them
+    bool running;         // Running them early
+    bool chosen;          // They chose (choiceChain, choiceIndex)
+    short choiceChain, choiceIndex;
+    uint choice;          // The arrow toward it
+
+    override bool enabled() { return config.customCPUJunctionArrowFix; }
+
+    bool boardCode() { return isBoardScene() && 0x800E6E58.val!uint == 0x0C01A63A; } // Overlay 128 (see mp3map.d)
+
+    // Whether an event's code calls SetNextChainAndSpace (up to its return, or its helpers' after it)
+    static bool setsNextSpace(Address f) {
+        if (f < 0x80000000 || f >= 0x80800000) return false;
+        foreach (i; 0..1024) {
+            auto w = (f + i * 4).val!uint;
+            if (w == SET_NEXT_JAL) return true;
+            if (w == 0x03E00008 && (f + i * 4 + 8).val!uint == 0) return false; // jr ra, then nothing
+        }
+        return false;
+    }
+
+    // The space's events about to run: on a computer's turn, the ones after a process (the junction event) that
+    // set the next space run now (alreadyRun: the loop skips them when it gets to them)
+    @Exec(EXEC_LIST) void eventsStarting() {
+        auto player = currentPlayer;
+        if (running || alreadyRun.length || !player || !player.isCPU || !boardCode()) return;
+        chosen = false;
+        Address list = gpr.s1;
+        if (list < 0x80000000 || list >= 0x80800000) return;
+        auto activation = cast(short)gpr.s3;
+        Address[] early;
+        bool afterProcess;
+        for (Address e = list; e.val!short != 0 && early.length < 8; e += 8) {
+            if (e.val!short != activation) continue;
+            Address f = (e + 4).val!uint;
+            if ((e + 2).val!short == 2) afterProcess = true;
+            else if ((e + 2).val!short == 1 && afterProcess && setsNextSpace(f)) early ~= f;
+        }
+        if (early.empty) return;
+        alreadyRun = early;
+        running = true;
+        runEvents(early.idup);
+    }
+
+    // (each event waits for the game)
+    void runEvents(immutable(Address)[] events) {
+        if (events.empty) running = false;
+        else startCall(events[0]).then!runEvents(events[1 .. $]);
+    }
+
+    @Exec(SET_NEXT) void nextSpaceSet() { // While they run early: the direction they set
+        if (!running) return;
+        chosen = true;
+        choiceChain = cast(short)gpr.a1;
+        choiceIndex = cast(short)gpr.a2;
+    }
+
+    @Exec(EXEC_DIRECT) void eventStarting() { // Skipped when the loop reaches them
+        if (alreadyRun.canFind((cast(Address)gpr.s1 + 4).val!uint)) jump(EXEC_NEXT);
+    }
+
+    @Exec(EXEC_END) void eventsDone() {
+        alreadyRun = null;
+        chosen = false;
+    }
+
+    // The junction event's AI decision: the arrow toward their direction (its caller's s3 has the chain and index
+    // of choice 0, then of choice 1 6 bytes later)
+    @Exec(AI_DECISION) void deciding() {
+        if (!chosen || !boardCode()) return;
+        Address choices = gpr.s3;
+        if (choices < 0x80000000 || choices >= 0x80800000) return;
+        foreach (uint c; 0..2) {
+            Address at = choices + c * 6;
+            if (at.val!short != choiceChain || (at + 2).val!short != choiceIndex) continue;
+            chosen = false;
+            choice = c;
+            hookExecOnce!decided(gpr.ra);
+            return;
+        }
+    }
+
+    void decided() { gpr.v0 = choice; }
+}
+
+// customExtraItemShopFix: PartyPlanner64 pairs each item shop event's space with the closest item shop space (where
+// the shop's model stands, made for every one of them when the board is set up). But its shop event, the first
+// original board's shop code, has room for two pairs: the first two spaces with the event, in the board's order.
+// It looks the player's space up among those two, and a shop on any other space (a board's third, like one of Kaos
+// Kore's) gets no shop space. That's the code for the Cellular Shopper, which runs while the board is
+// paused: the camera doesn't go to the shop and its shopkeeper doesn't come out, a computer buys with whichever
+// shop's choices were used last, and "View Map" closes the map at once and leaves the board paused
+// (func_80049FB8) until the turn ends, so the camera stops following the player.
+// Here, a shop the lookup doesn't know gets its closest item shop space (as PartyPlanner64 pairs them) and goes on
+// the way the two it knows do. The extra shops alternate between the two shops' choices for computers. The shop
+// event is in each board's own code, at different addresses, so its code is recognized by its instructions.
+final class ExtraItemShopFix : Feature!MarioParty3 {
+    enum Address GET_SPACE_INDEX = 0x800EB184; // GetAbsSpaceIndexFromChainSpaceIndex(chain, index)
+    enum Address SPACE_COUNT = 0x80105210, SPACES = 0x80105214, BOARD_PAUSED = 0x800D6A90;
+    enum uint SPACE_SIZE = 0x24;
+
+    // The shop event after the lookup of the player's space (in v0): sll v0, v0, 16; sra v1, v0, 16;
+    // li v0, <shop 1>; beq v1, v0, FIRST; li v0, <shop 2>; beq v1, v0, SECOND; li t5, <its shop space>;
+    // j NONE; li t5, -1; FIRST: li t5, <shop 1's shop space>; sh t5, ...(sp); ...; lui at, ...; sw zero, ...(at)
+    // (the shop's number for computers, at FIRST + 0x1C and 0x20). NONE: sh t5, ...(sp), then on as the two do.
+    static immutable uint[2][] LOOKUP = [
+        [0x00021400, ~0], [0x00021C03, ~0], [0x24020000, 0xFFFF0000], [0x10620000, 0xFFFF0000],
+        [0x24020000, 0xFFFF0000], [0x10620000, 0xFFFF0000], [0x240D0000, 0xFFFF0000], [0x08000000, 0xFC000000],
+        [0x240DFFFF, ~0], [0x240D0000, 0xFFFF0000], [0xA7AD0000, 0xFFFF0000],
+    ];
+    static immutable uint[2][] STORE_T5 = [[0xA7AD0000, 0xFFFF0000]];
+    static immutable uint[2][] SHOP_NUMBER = [[0x3C010000, 0xFFFF0000], [0xAC200000, 0xFFFF0000]];
+    enum uint SHOP_1 = 0x08, SHOP_2 = 0x10, JUMP_NONE = 0x1C, FIRST = 0x24, SHOP_NUMBER_AT = FIRST + 0x1C;
+    // The board setup's loop making each item shop space's model: lui s1, <list>; addiu s1, s1, <list>;
+    // sll v0, s0, 1; addu v0, v0, s1; jal GetSpaceData; lh a0, 0(v0); sll v1, s0, 2; li a0, 9; ...;
+    // slti v0, s0, <count>
+    static immutable uint[2][] MODELS = [
+        [0x3C110000, 0xFFFF0000], [0x26310000, 0xFFFF0000], [0x00101040, ~0], [0x00511021, ~0],
+        [0x0C03AC58, ~0], [0x84440000, ~0], [0x00101880, ~0], [0x24040009, ~0],
+    ];
+
+    override bool enabled() { return config.customExtraItemShopFix; }
+
+    static bool valid(Address a) { return a >= 0x80000000 && a < 0x80800000 && a % 4 == 0; }
+
+    // Whether the code at `a` is `words`, each compared where its mask is set
+    static bool code(Address a, const uint[2][] words) {
+        if (!valid(a) || !valid(a + cast(uint)words.length * 4 - 4)) return false;
+        foreach (i, w; words) if (((a + cast(uint)i * 4).val!uint & w[1]) != w[0]) return false;
+        return true;
+    }
+
+    static short immediate(Address a) { return cast(short)(a.val!uint & 0xFFFF); }
+
+    static Address spaceData(int space) { return SPACES.val!uint + space * SPACE_SIZE; }
+
+    // Whether one of a space's events is the shop event (a jump to the function `at` is in)
+    static bool shopEventSpace(int space, Address at) {
+        Address list = (spaceData(space) + 0x20).val!uint;
+        for (Address e = list; valid(e) && e.val!short != 0; e += 8) {
+            Address f = (e + 4).val!uint;
+            if (!valid(f) || f.val!uint >> 26 != 2) continue; // j
+            Address target = (f & 0xF0000000) | (f.val!uint & 0x03FFFFFF) << 2;
+            if (target <= at && at < target + 0x400) return true;
+        }
+        return false;
+    }
+
+    // The item shop spaces (PartyPlanner64's list, from the board setup's loop near the shop event)
+    static short[] shopSpaces(Address near) {
+        for (Address a = max(near, 0x80020000) - 0x20000; a < min(near + 0x20000, 0x80800000); a += 4) {
+            if (!code(a, MODELS)) continue;
+            Address list = (immediate(a) << 16) + immediate(a + 4);
+            foreach (k; 0..16) {
+                auto w = (a + cast(uint)(MODELS.length + k) * 4).val!uint;
+                if (w >> 16 != 0x2A02) continue; // slti v0, s0, <count>
+                short[] spaces;
+                foreach (i; 0..min(w & 0xFFFF, 64)) spaces ~= (list + i * 2).val!short;
+                return spaces;
+            }
+        }
+        return null;
+    }
+
+    @Exec(GET_SPACE_INDEX) void lookingUp() {
+        Address ret = gpr.ra;
+        if (!valid(ret) || ret.val!uint != LOOKUP[0][0] || !customBoard() || BOARD_PAUSED.val!ubyte) return;
+        if (!code(ret, LOOKUP)) return;
+        waitExec(ret);
+        auto space = cast(short)gpr.v0;
+        auto shop1 = immediate(ret + SHOP_1), shop2 = immediate(ret + SHOP_2);
+        if (space == shop1 || space == shop2) return; // One of the two it knows
+        auto count = SPACE_COUNT.val!ushort;
+        if (space < 0 || space >= count || !shopEventSpace(space, ret)) return;
+        Address none = (ret & 0xF0000000) | ((ret + JUMP_NONE).val!uint & 0x03FFFFFF) << 2;
+        if (!code(none, STORE_T5) || !code(ret + SHOP_NUMBER_AT, SHOP_NUMBER)) return;
+
+        // The closest item shop space (PartyPlanner64 measures the board's x and y: the game's x and z)
+        Address at = spaceData(space);
+        short closest = -1;
+        float best = float.max;
+        foreach (s; shopSpaces(ret)) {
+            if (s < 0 || s >= count) continue;
+            Address p = spaceData(s);
+            auto dx = (p + 8).val!float - (at + 8).val!float, dz = (p + 16).val!float - (at + 16).val!float;
+            if (dx * dx + dz * dz < best) { best = dx * dx + dz * dz; closest = s; }
+        }
+        if (closest < 0) return;
+        // Which extra shop it is (the shop event's other spaces, in order)
+        int extra;
+        foreach (s; 0..space) if (s != shop1 && s != shop2 && shopEventSpace(s, ret)) extra++;
+        Address shopNumber = (immediate(ret + SHOP_NUMBER_AT) << 16) + immediate(ret + SHOP_NUMBER_AT + 4);
+        shopNumber.val!uint = extra % 2;
+        gpr.t5 = closest;
+        gpr.s5 = spaceData(closest);
+        gpr.s3 = at;
+        info("Item shop on space ", space, ": its shop is on space ", closest);
+        jump(none);
+    }
+}
+
+// customReverseMovementFix: on boards made with PartyPlanner64, a player walking backward (with a Reverse
+// Mushroom) can be sent to a chain position that doesn't exist. The game doesn't check: it reads a space from
+// whatever follows the chain's list of spaces, and can crash.
+// The board code's walk (func_800FCA7C) steps from the player's current space (+0x0F, +0x10: chain and index) to
+// the next one (+0x11, +0x12), keeps the one they came from (+0x15, +0x16), and sets the next one to the index + 1
+// (- 1 walking backward: +0x17 & 0x01). The space's events change the next space where chains meet. On a Reverse
+// Mushroom (+0x17 & 0x80), the walk starts by turning around: the next space is the previous one. When it ends,
+// the two are swapped back. PartyPlanner64 boards break this in two ways:
+// - The start is a dead end, and its event sends a player who walks into it back out without turning them
+//   around. They walk on still marked as walking backward. If they land right after the start, the next space
+//   they're left with points back toward it, and their next move walks off the end of the start's chain.
+//   Here, a player whose space's event sends them back the way they came on a reverse move is turned around.
+// - PartyPlanner64 starts a chain where paths join. The event there that asks which way to go back runs only
+//   while steps are left, so a reverse move that ends there leaves no previous space, and the next Reverse
+//   Mushroom steps to it. Here, a reverse move from there runs that event first.
+// Any other step to a chain position that doesn't exist turns the player around instead.
+final class ReverseMovementFix : Feature!MarioParty3 {
+    enum Address EXEC_EVENTS = 0x800EBAC8;     // ExecSpaceEvents(space, activation)
+    enum Address REVERSE_START = 0x800FD1A0;   // The walk on a Reverse Mushroom: next = previous (s2 = the player)
+    enum Address REVERSE_TURNED = 0x800FD1BC;  // ... and turned around
+    enum Address STEP = 0x800FD20C;            // The walk, about to step to the next space (s2 = the player)
+    enum Address PLAYERS = 0x800D1108, CHAIN_COUNT = 0x80105212, SPACES = 0x80105214, CHAINS = 0x80105218;
+
+    bool resolving; // Running the junction's event at the start of a reverse move
+
+    override bool enabled() { return config.customReverseMovementFix; }
+
+    static bool valid(Address a) { return a >= 0x80000000 && a < 0x80800000; }
+
+    // The space at a chain position, or -1 if there's no such position
+    static short spaceAt(int chain, int index) {
+        if (chain < 0 || chain >= CHAIN_COUNT.val!ushort || index < 0 || !valid(CHAINS.val!uint)) return -1;
+        Address c = CHAINS.val!uint + chain * 8;
+        if (index >= c.val!short || !valid((c + 4).val!uint)) return -1;
+        return (cast(Address)((c + 4).val!uint + index * 2)).val!short;
+    }
+
+    static short positionSpace(Address player, uint offset) {
+        return spaceAt((player + offset).val!byte, (player + offset + 1).val!byte);
+    }
+
+    // Whether an event's code checks for a Reverse Mushroom (lbu from +0x17, andi 0x80) before its return
+    static bool checksReverseMushroom(Address f) {
+        if (!valid(f)) return false;
+        bool flags;
+        foreach (i; 0..48) {
+            auto w = (f + i * 4).val!uint;
+            if (w >> 26 == 0x24 && (w & 0xFFFF) == 0x17) flags = true;
+            if (flags && w >> 26 == 0x0C && (w & 0xFFFF) == 0x80) return true;
+            if (w == 0x03E00008) return false; // jr ra
+        }
+        return false;
+    }
+
+    // A space's events that send the player back the way they came on a reverse move (like the start's) turn
+    // them around, unless they turned them around themselves (like Seasonal Woodland's at the foot of its left
+    // path: they set +0x17 & 0x01 too)
+    @Exec(EXEC_EVENTS) void eventsStarting() {
+        auto activation = cast(short)gpr.a1;
+        if ((activation != 1 && activation != 8) || !customBoard()) return;
+        Address p = PLAYERS + data.currentPlayerIndex * 0x38;
+        auto flags = (p + 0x17).val!ubyte;
+        if (!(flags & 0x80)) return;
+        auto chain = (p + 0x11).val!ubyte, index = (p + 0x12).val!ubyte;
+        waitExec(gpr.ra);
+        if ((p + 0x11).val!ubyte == chain && (p + 0x12).val!ubyte == index) return; // Not changed
+        if (((p + 0x17).val!ubyte ^ flags) & 1) return; // They turned them around
+        auto next = positionSpace(p, 0x11);
+        if (next >= 0 && next == positionSpace(p, 0x15)) (p + 0x17).val!ubyte = (p + 0x17).val!ubyte ^ 1;
+    }
+
+    // A reverse move from a space with no previous one (where it ended a reverse move): its junction event, if
+    // it has one, picks the way back as if they'd just come to it from the space after it
+    @Exec(REVERSE_START) void reverseStarting() {
+        if (resolving || !customBoard()) return;
+        Address p = gpr.s2;
+        if (positionSpace(p, 0x15) >= 0) return;
+        auto chain = (p + 0x0F).val!byte, index = (p + 0x10).val!byte;
+        auto space = spaceAt(chain, index);
+        if (space < 0 || spaceAt(chain, index + 1) < 0 || !valid(SPACES.val!uint)) return;
+        Address[] junction;
+        Address list = (SPACES.val!uint + space * 0x24 + 0x20).val!uint;
+        for (Address e = list; valid(e) && e.val!short != 0 && junction.length < 4; e += 8) {
+            Address f = (e + 4).val!uint;
+            if (e.val!short == 1 && (e + 2).val!short == 1 && checksReverseMushroom(f)) junction ~= f;
+        }
+        if (junction.empty) return;
+        (p + 0x15).val!byte = chain;
+        (p + 0x16).val!byte = cast(byte)(index + 1);
+        (p + 0x12).val!byte = -1; // Until the event picks
+        resolving = true;
+        resolve(p, junction.idup);
+    }
+
+    // (each event waits for the game)
+    void resolve(Address p, immutable(Address)[] junction) {
+        if (junction.length) return startCall(junction[0]).then!resolve(p, junction[1 .. $]);
+        resolving = false;
+        if (positionSpace(p, 0x11) >= 0) jump(REVERSE_TURNED); // It picked, and set +0x17 & 0x01
+    }
+
+    // A step to a chain position that doesn't exist: back where they came from, or the other way along the chain
+    @Exec(STEP) void stepping() {
+        if (!customBoard()) return;
+        Address p = gpr.s2;
+        if (positionSpace(p, 0x11) >= 0) return;
+        auto flags = (p + 0x17).val!ubyte;
+        if (positionSpace(p, 0x15) >= 0) {
+            (p + 0x11).val!ubyte = (p + 0x15).val!ubyte;
+            (p + 0x12).val!ubyte = (p + 0x16).val!ubyte;
+        } else {
+            auto chain = (p + 0x0F).val!byte, index = (p + 0x10).val!byte + (flags & 1 ? 1 : -1);
+            if (spaceAt(chain, index) < 0) return;
+            (p + 0x11).val!byte = chain;
+            (p + 0x12).val!byte = cast(byte)index;
+        }
+        if (flags & 0x80) (p + 0x17).val!ubyte = flags ^ 1;
+    }
+}
+
+// The turn counter: a frameless window at the top center of the board screen, between the top players' panels,
+// made the way the board makes its button hints (func_800E1F70). Its text is message MESSAGE (one the board never
+// shows), which changeMessage() replaces while the counter loads it, so the game keeps its own copy.
+//
+// It's shown on the board, except while the pause menu is open, and lowered while the scrolling map is (the game
+// pauses for its other menus too, like the item screen and the full map, so 0x800D6A90 can't tell them apart).
+// Whenever what it should show changes (its text or place, or showing it at all), its window is closed and another
+// made. That's at most a few times a turn, and simpler than changing a window.
+//
+// It's kept up from inside a game process (HuPrcVSleep), one call to the game at a time. Windows go away when the
+// game closes them, or all at once when the board does, and their numbers are reused, so a window only counts as
+// the counter while it still has the sprite group it was made with (window + 108).
+final class TurnCounter : Feature!MarioParty3, MarioParty3.MessageChanger {
+    enum MESSAGE = 0x2A0D;
+    short counter = -1;     // Its window
+    short group;            // Its sprite group
+    string shown;           // Its text
+    int shownX, shownY;     // Where it is
+    string loading;         // Text being loaded (in make()), or null
+    int covered;            // Screens open that it's hidden for
+    int lowered;            // Screens open that it's lowered for
+    bool busy;              // Making it (see make())
+    uint slot;              // The window it takes (see make())
+
+
+    string changeMessage(ushort id, string text) {
+        return id == MESSAGE && loading !is null ? formatText("<CLEAR>" ~ loading ~ "<NUL><NUL>") : text;
+    }
+
+    // The width of the game's screen, in pixels: the widescreen code draws a 424x240 picture instead of 320x240
+    int screenWidth() { return config.widescreen ? SCREEN_WIDTH : OLD_SCREEN_WIDTH; }
+
+    @ExecDone(0x8004F074) void maintain() { // HuPrcVSleep, after "addiu sp, sp, ..."
+        if (busy) return;
+        if ((0x8004F074.val!uint & 0xFFFF0000) != 0x27BD0000) return; // HuPrcVSleep isn't "addiu sp, sp, ..."
+        if (!isBoardScene() || 0x800A2150.val!ubyte == 0) return;      // Not on the board, or no windows set up
+
+        auto exists = counter >= 0 && windowGroup(counter) == group;
+        if (!exists) counter = -1;
+
+        // What it should show. The text is centered on the screen (320 pixels wide, or 424 in widescreen, so the same
+        // way as a 5-pixel "/" on pixels 158-162 or 210-214): func_8005A968 takes the window's left side, and the text
+        // starts 4 pixels right of it. The text is from 4 lines above y to 6 below: level with the top players'
+        // panels, or on the scrolling map, below its up arrow (down to line 31).
+        auto wanted = data.currentTurn >= 1 && covered == 0;
+        auto text = "<YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET>";
+        auto x = (screenWidth + 1 - messageTextWidth(text)) / 2 - 4;
+        auto y = lowered > 0 ? 40 : 15;
+
+        if (exists) {
+            if (wanted && text == shown && x == shownX && y == shownY) return;
+            auto w = counter;
+            counter = -1;
+            callGame(0x8005F364, w); // Closed; made again later if it's wanted
+            return;
+        }
+        if (!wanted) return;
+        busy = true;
+        make(text, x, y);
+    }
+
+    // func_80060394(1, short[2]* size, message) measures the window the text needs (padding included), and
+    // func_8005A968(x, y, w, h, 0, 0) makes it, with (x, y) its top left. Measuring it and setting it load the
+    // message, which the game waits for.
+    void make(string text, int x, int y) {
+        loading = text; // Replaces the message while it's measured and set
+        auto size = mallocTemp(4);
+        startCall(0x80060394, 1, size, MESSAGE).then!measured(text, x, y, size);
+    }
+
+    void measured(string text, int x, int y, Address size) {
+        auto width = size.val!short, height = (size + 2).val!short;
+        freeTemp(size);
+        // func_8005A968 takes the first free window from 2 up (window + 94 is -1 when free). Custom board events
+        // can update a window by its number (like Thwomp Toll's window 2), so the counter takes the last free one
+        // instead, which leaves the game's windows the numbers they'd have without it.
+        slot = 0;
+        foreach_reverse (i; 2..16) if (!slot && (windowAddress(cast(short)i) + 94).val!short == -1) slot = i;
+        if (slot) hookExecOnce!takeSlot(0x8005A9AC); // After the search starts at 2
+        auto w = cast(short)callGame(0x8005A968, x, y, width, height, 0, 0);
+        callGame(0x8005BDFC, w, 0);          // Text appears at once, not letter by letter
+        callGame(0x8005BEE0, w, 0);          // No window frame or background
+        callGame(0x8005B63C, w, 0, 0x20000); // Outlined text
+        startCall(0x8005B43C, w, MESSAGE, -1, -1).then!made(text, x, y, w);
+    }
+
+    void made(string text, int x, int y, short w) {
+        loading = null;
+        counter = w;
+        group = windowGroup(w);
+        shown = text;
+        shownX = x;
+        shownY = y;
+        busy = false;
+    }
+
+    void takeSlot() { gpr.fp = slot; }
+
+    @Exec(0x8005F364) void windowClosed() { // func_8005F364 (close window, a0 = window)
+        if (cast(short)gpr.a0 == counter) counter = -1;
+    }
+
+    @Write("data.currentScene") void sceneChanged(ref Scene scene) { // The board's windows go away with it
+        if (scene == data.currentScene) return;
+        counter = -1;
+        covered = 0;
+        lowered = 0;
+    }
+
+    // Hidden while the pause menu is open (MBPauseCreate), and lowered below the up arrow while the scrolling map is
+    // (MBMapScrollExec): they return once it's closed
+    @Exec(0x800F1EC8) void pauseOpened() {
+        if (!isPartyBoardScene()) return;
+        covered++;
+        hookExecOnce!pauseClosed(gpr.ra);
+    }
+
+    void pauseClosed() { if (covered > 0) covered--; }
+
+    @Exec(0x8010067C) void mapOpened() {
+        if (!isPartyBoardScene()) return;
+        lowered++;
+        hookExecOnce!mapClosed(gpr.ra);
+    }
+
+    void mapClosed() { if (lowered > 0) lowered--; }
+}
+
+// The windows (func_8005A968 makes them): WINDOW_SIZE bytes each, from the address at 0x800CC69C
+enum WINDOW_SIZE = 0x27C;
+Address windowAddress(short w) { return 0x800CC69C.val!uint + w * WINDOW_SIZE; }
+short windowGroup(short w) { return (windowAddress(w) + 108).val!short; }
+
+// Whether game text `shown` is the character name `name`. Some messages have names in capitals (0x1C00-0x1C5F,
+// 0x5200-0x5207), so case is ignored; game text isn't always valid UTF-8, so bytes are compared.
+bool sameName(string shown, string name) {
+    auto upper = (ubyte b) => (b >= 'a' && b <= 'z') ? b - 32 : b;
+    return shown.length == name.length && iota(shown.length).all!(i => upper(shown[i]) == upper(name[i]));
+}
+
+// bingoPlayerNames: players go by their bingo cards' names (see MarioParty.characterToName), in their characters'
+// colors (TEXT_COLORS)
+final class BingoNames : Feature!MarioParty3, MarioParty3.MessageChanger {
+    short messageWindow = -1;    // Window whose message is being set, or -1
+    char nameColor;              // The game's color for a name given as text (see nameMessageId()), or 0
+    WindowColors[short] windowColors;
+    bool[short] paletteChanged;  // (see copyTextPaletteIfChanged())
+
+    override bool enabled() { return config.bingoPlayerNames; }
+
+    // A character's name by itself, possibly in a color, is the player's. The game shows these alone and inserts them
+    // into other messages as <1>-<5>, so this covers player names everywhere without touching any other text. Then
+    // the message's plugin colors become the window's color codes.
+    string changeMessage(ushort id, string text) {
+        text = playerName(text);
+        // Last Five Turns: the standings. The game shows first and last place outlined, in yellow and red; with the
+        // bingo names in their own colors, they're plain like second and third place.
+        if ((id == 0x4301 || id == 0x4304) && characterToName.length) {
+            text = windowText(id == 0x4301 ? "<1> is first!" : "And <1> is in last place.");
+        }
+        return messageWindow >= 0 ? colorize(messageWindow, text) : text;
+    }
+
+    string playerName(string text) {
+        if (text.length < 2 || text[0] != '\x0B') return text;
+        size_t start = 1, end = text.length;
+        while (end > start && text[end - 1] == '\x00') end--;
+        auto nuls = end;
+        if (end > start && text[end - 1] == '\x19') end--;                            // <RESET>
+        if (end > start && text[start] >= '\x01' && text[start] <= '\x08') start++; // Color
+        foreach (c; [EnumMembers!Character]) {
+            if (!sameName(text[start..end], c.fullName)) continue;
+            // In the character's color, instead of the message's own. Without a <RESET>: inserted as an argument,
+            // the window switches back to the color before it (see colorArg()). A name the game showed dark (a
+            // player who can't be chosen) stays dark.
+            if (nameColor) {
+                if (auto plain = bingoPlainName(c)) return "\x0B" ~ nameColor ~ formatText(plain) ~ text[nuls..$];
+            }
+            auto name = bingoName(c, false);
+            if (name) return "\x0B" ~ formatText(name) ~ text[nuls..$];
+        }
+        return text;
+    }
+
+    // Window creation (func_8005AF84 area): the window has just copied the text palette (0x800A2174) to the
+    // start of its struct, so it has none of the plugin's colors
+    @Exec(0x8005AF8C) void windowCreated() {
+        windowColors.remove(cast(short)((gpr.s1 - windowAddress(0)) / WINDOW_SIZE));
+    }
+
+    // func_8005B43C (set window message, a0 = window, a1 = message ID or pointer). The previous message's
+    // colors are undone, then the message's names get colors as it's loaded (colorize()), then its arguments'
+    // (colorArg()). Codes in the arguments are the game's, so they're kept.
+    @Exec(0x8005B43C) void messageSetting() {
+        auto w = cast(short)gpr.a0;
+        resetColors(w);
+        foreach (n; 0..5) markUsed(w, argText(w, n));
+        if (gpr.a1 >= 0x80000000) colorizeInPlace(w, gpr.a1); // Text of the plugin's own (showGlobalMessage)
+        messageWindow = w;
+        waitExec(gpr.ra); // Back in the caller, where the game can be called
+        messageWindow = -1;
+        foreach (n; 0..5) colorArg(w, n);
+        copyTextPaletteIfChanged(w);
+    }
+
+    // func_8006022C (measure a window message argument, a0 = message ID or pointer, a1 = argument), which sizes
+    // the window: a name given as text is measured as the message it's replaced with (see argSetting())
+    @Exec(0x8006022C) void argMeasuring() {
+        if (auto id = nameMessageId(gpr.a0)) gpr.a0 = id;
+        waitExec(gpr.ra);
+        nameColor = 0;
+    }
+
+    // func_8005B6BC (set window message argument, a0 = window, a1 = message ID or pointer, a2 = argument).
+    // Arguments are usually set before the message, which colors them again, but some may come after it.
+    @Exec(0x8005B6BC) void argSetting() {
+        if (auto id = nameMessageId(gpr.a1)) gpr.a1 = id; // A name given as text: load it as a message
+        auto w = cast(short)gpr.a0;
+        auto n = cast(byte)gpr.a2;
+        waitExec(gpr.ra);
+        nameColor = 0;
+        colorArg(w, n);
+        copyTextPaletteIfChanged(w);
+    }
 
     WindowColors* colorsOf(short w) {
         if (auto wc = w in windowColors) return wc;
@@ -1697,19 +1233,16 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         (windowAddress(w) + 178 + n).val!byte = cast(byte)(colorCode(w, TEXT_COLORS[c]) - 1);
     }
 
-    // A window's text sprite draws with a copy of its palette, which may be shared with other windows until the game
-    // gives it one of its own. func_8005C060(window, color - 1, r, g, b) sets a color of the window's palette, then
-    // gives its text sprite a new copy of the whole palette, so calling it with a color the palette already has makes
-    // that copy, with the plugin's colors in it. (Writing to the sprite's palette directly could change shared ones.)
-    bool[short] paletteChanged;
-
+    // A window's text sprite draws with a copy of its palette, which may be shared with other windows
+    // until the game gives it one of its own. func_8005C060(window, color - 1, r, g, b) sets a color of the window's
+    // palette, then gives its text sprite a new copy of the whole palette, so calling it with a color the palette
+    // already has makes that copy, with the plugin's colors in it. (Writing to the sprite's palette directly could
+    // change shared ones.)
     void copyTextPaletteIfChanged(short w) {
         if (w !in paletteChanged) return;
         paletteChanged.remove(w);
         auto color = paletteEntry(w, 2)[0]; // Color 2, as it is
-        gpr.sp -= 24;
-        (gpr.sp + 16).val!uint = ((color >> 1) & 31) << 3; // b, the 5th argument
-        0x8005C060.jal(w, 1, ((color >> 11) & 31) << 3, ((color >> 6) & 31) << 3, { gpr.sp += 24; });
+        callGame(0x8005C060, w, 1, ((color >> 11) & 31) << 3, ((color >> 6) & 31) << 3, ((color >> 1) & 31) << 3);
     }
 
     // The color code (0x02-0x07) showing `color` in window w, recoloring one that isn't in use if none does
@@ -1778,18 +1311,11 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         foreach (i, c; colored) p[i] = c;
     }
 
-    // Whether game text `shown` is the character name `name`. Some messages have names in capitals (0x1C00-0x1C5F,
-    // 0x5200-0x5207), so case is ignored; game text isn't always valid UTF-8, so bytes are compared.
-    static bool sameName(string shown, string name) {
-        auto upper = (ubyte b) => (b >= 'a' && b <= 'z') ? b - 32 : b;
-        return shown.length == name.length && iota(shown.length).all!(i => upper(shown[i]) == upper(name[i]));
-    }
-
     // The game passes some window arguments as pointers to text instead of message IDs (like the names in the duel
     // opponent menu, message 0x5C00). If one is just a character's name (maybe colored), this is the ID of that
-    // character's name message (0x1B10 + character), which goes through replaceMessage(); otherwise 0.
+    // character's name message (0x1B10 + character), which goes through changeMessage(); otherwise 0.
     // Menus show players who can't be chosen (yourself, or someone with nothing to take) in color 1, which is dark
-    // (enabled ones are white, color 8). That color is kept in nameColor for replaceMessage(), until the caller is done.
+    // (enabled ones are white, color 8). That color is kept in nameColor for changeMessage(), until the caller is done.
     uint nameMessageId(Address p) {
         nameColor = 0;
         if (p < 0x80000000 || p >= 0x80800000) return 0;
@@ -1809,615 +1335,325 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         }
         return 0;
     }
+}
 
-    // customCPUJunctionArrowFix: at a junction on a board made with PartyPlanner64, its junction event (a process,
-    // first in the space's events) shows the arrows, has a computer pick one at random (func_800DA190, the board
-    // code's AI decision), moves the cursor to it and sets the next space. Some boards add their own event to the space
-    // that picks the computer's direction smarter (toward the star, and so on) by setting the next space again
-    // (SetNextChainAndSpace, func_800ED998), after the arrows: the computer often walks the other way from its arrow.
-    // Here, on a computer's turn, those events run before the junction event (once: they're skipped when the loop
-    // reaches them), and the AI decision picks the arrow toward the direction they set.
-    void setUpCustomCPUJunctionArrowFix() {
-        // The board code's ExecSpaceEvents(space, activation) loop: s1 = the event list (8-byte entries of
-        // activation, execution type (1: direct, 2: process) and function), s3 = the activation
-        enum Address EXEC_LIST = 0x800EBBA0, EXEC_DIRECT = 0x800EBC10, EXEC_NEXT = 0x800EBC58, EXEC_END = 0x800EBC84;
-        enum Address AI_DECISION = 0x800DA190, SET_NEXT = 0x800ED998;
-        enum uint SET_NEXT_JAL = 0x0C000000 | (SET_NEXT & 0x0FFFFFFF) >> 2;
-        Address[] alreadyRun; // The events run early, skipped when the loop reaches them
-        bool running;         // Running them early
-        bool chosen;          // They chose (choiceChain, choiceIndex)
-        short choiceChain, choiceIndex;
+final class RandomBonus3 : RandomBonus!(MarioParty3, "s2"), MarioParty3.MessageChanger {
+    this(Address[2][3] loads) {
+        super([Scene.FINISH_BOARD: loads], false);
+    }
 
-        bool boardCode() { return isBoardScene() && 0x800E6E58.val!uint == 0x0C01A63A; } // Overlay 128 (see mp3map.d)
-
-        // Whether an event's code calls SetNextChainAndSpace (up to its return, or its helpers' after it)
-        bool setsNextSpace(Address f) {
-            if (f < 0x80000000 || f >= 0x80800000) return false;
-            foreach (i; 0..1024) {
-                auto w = (f + i * 4).val!uint;
-                if (w == SET_NEXT_JAL) return true;
-                if (w == 0x03E00008 && (f + i * 4 + 8).val!uint == 0) return false; // jr ra, then nothing
-            }
-            return false;
+    override uint stat(Player player, BonusType type) {
+        final switch (type) {
+            case BonusType.MINI_GAME: return player.data.miniGameCoins;
+            case BonusType.COIN:      return player.data.maxCoins;
+            case BonusType.HAPPENING: return player.data.happeningSpaces;
+            case BonusType.RED:       return player.data.redSpaces;
+            case BonusType.BLUE:      return player.data.blueSpaces;
+            case BonusType.CHANCE:    return player.data.chanceSpaces;
+            case BonusType.BOWSER:    return player.data.bowserSpaces;
+            case BonusType.BATTLE:    return player.data.battleSpaces;
+            case BonusType.ITEM:      return player.data.itemSpaces;
+            case BonusType.BANK:      return player.data.bankSpaces;
+            case BonusType.GAME_GUY:  return player.data.gameGuySpaces;
+            case BonusType.LUCKY:     return player.state.luckySpaceCount;
         }
+    }
 
-        // The space's events about to run: on a computer's turn, the ones after a process (the junction event) that
-        // set the next space run now (jal() comes back to this instruction: running and alreadyRun say it's that)
-        EXEC_LIST.onExec({
-            auto player = currentPlayer;
-            if (running || alreadyRun.length || !player || !player.isCPU || !boardCode()) return;
-            chosen = false;
-            Address list = gpr.s1;
-            if (list < 0x80000000 || list >= 0x80800000) return;
-            auto activation = cast(short)gpr.s3;
-            Address[] early;
-            bool afterProcess;
-            for (Address e = list; e.val!short != 0 && early.length < 8; e += 8) {
-                if (e.val!short != activation) continue;
-                Address f = (e + 4).val!uint;
-                if ((e + 2).val!short == 2) afterProcess = true;
-                else if ((e + 2).val!short == 1 && afterProcess && setsNextSpace(f)) early ~= f;
-            }
-            if (early.empty) return;
-            alreadyRun = early;
-            running = true;
-            void run(size_t i) {
-                if (i == early.length) { running = false; return; }
-                early[i].jal({ run(i + 1); });
-            }
-            run(0);
-        });
-        SET_NEXT.onExec({ // While they run early: the direction they set
-            if (!running) return;
-            chosen = true;
-            choiceChain = cast(short)gpr.a1;
-            choiceIndex = cast(short)gpr.a2;
-        });
-        EXEC_DIRECT.onExec({ // Skipped when the loop reaches them
-            if (alreadyRun.canFind((cast(Address)gpr.s1 + 4).val!uint)) jump(EXEC_NEXT);
-        });
-        EXEC_END.onExec({ alreadyRun = null; chosen = false; });
+    @Exec(0x800EEA78) void noGameBonusStars() { // GetPlayerPlacementAtEndOfGame: without the game's own bonus stars
+        if (0x800EE9E0.val!uint == 0x0C03BB2C) gpr.v0 = 0;
+    }
 
-        // The junction event's AI decision: the arrow toward their direction (its caller's s3 has the chain and index
-        // of choice 0, then of choice 1 6 bytes later)
-        AI_DECISION.onExec({
-            if (!chosen || !boardCode()) return;
-            Address choices = gpr.s3;
-            if (choices < 0x80000000 || choices >= 0x80800000) return;
-            foreach (uint choice; 0..2) {
-                Address c = choices + choice * 6;
-                if (c.val!short != choiceChain || (c + 2).val!short != choiceIndex) continue;
-                chosen = false;
-                gpr.ra.onExecOnce({ gpr.v0 = choice; });
+    // Bonus stars: 0x1402 introduces them, then each has 5 messages (0x1403, 0x1408, 0x140D): the award, then the
+    // winner, or a 2-, 3- or 4-way tie
+    string changeMessage(ushort id, string text) {
+        if (data.currentScene != Scene.FINISH_BOARD || bonus.length < 3 || id < 0x1402 || id > 0x1411) return text;
+        if (id == 0x1402) return windowText("Now, here are the <YELLOW><OUTLINE>Bonus Star<NO_OUTLINE><RESET> results.\nEach winner will get one star.");
+
+        auto i = (id - 0x1403) / 5;
+        auto b = bonus[i];
+        auto star = "<" ~ getColor(b) ~ "><OUTLINE>" ~ config.bonuses[b] ~ " Star";
+        final switch ((id - 0x1403) % 5) {
+            case 0: return windowText(["Let's begin with the ", "Next, the ", "Finally, the "][i] ~ star ~ "<NO_OUTLINE><RESET>.\n" ~
+                                      wrapMessage("This award goes to the person who " ~ getDescription(b) ~ ".",
+                                                  messageTextWidth("This award goes to the person")));
+            case 1: return windowText("The " ~ star ~ "<NO_OUTLINE><RESET> award\ngoes to...<1>!");
+            case 2: return windowText("It's a tie! " ~ star ~ "<NO_OUTLINE><RESET>\nawards go to both\n<1> and <2>!");
+            case 3: return windowText("It's a three-way tie!\n" ~ star ~ "<NO_OUTLINE><RESET> awards\ngo to <1>,\n<2> and <3>!");
+            case 4: return windowText("It's a four-way tie!!!\nAll four players are\n" ~ star ~ "s<NO_OUTLINE><RESET>,\nso no stars will be awarded.");
+        }
+    }
+}
+
+final class MiniGameRoulette3 : MiniGameRoulette!(MarioParty3, MiniGameType, MiniGame) {
+    @Fixed Superstars superstars; // (which can fill the roulette instead)
+
+    this(Superstars superstars) { this.superstars = superstars; }
+
+    override bool enabled() { return super.enabled() || superstars.enabled(); }
+
+    // Populate mini-game roulette
+    @Exec(0x800DFE90) void populate() {
+        if (!isPartyBoardScene()) return;
+        0x800DFED4.setCode(NOP);
+        0x800DFF40.setCode(NOP);
+        0x800DFF64.setCode(NOP);
+        0x800DFF78.setCode(NOP);
+        if (gpr.s0 == 0) {
+            auto type = (cast(MiniGame)gpr.v0).type;
+            auto count = (0x80100E18 + gpr.s2).val!ubyte;
+            if (!superstars.enabled() || !superstars.populate(type, count)) {
+                fill(type, [EnumMembers!MiniGame].filter!(g => g.type == type).array, count, 0x800DF120);
+            }
+        }
+        gpr.v0 = data.miniGameRoulette[gpr.s0];
+    }
+
+    // The roulette doesn't jump backward
+    @Exec(0x800DF3C0) void forward() {
+        if (isPartyBoardScene()) gpr.v0 = 1;
+    }
+}
+
+// superstarsMiniGames: the roulette shows Mario Party Superstars mini-games, which the players play in Superstars and
+// enter the results of on the Bingo page
+final class Superstars : Feature!MarioParty3 {
+    enum SuperstarsPhase { NONE, SELECTED, WAITING, READY }
+    SuperstarsPhase ssPhase = SuperstarsPhase.NONE;
+    SuperstarsMiniGame[MiniGame] ssRoulette; // Placeholder MP3 mini-game -> Superstars mini-game shown in its roulette slot
+    SuperstarsMiniGame ssGame;               // Selected Superstars mini-game
+    MiniGameType ssType;                     // MP3 roulette category of the selected mini-game
+    uint[] ssDuelists;                       // Player indices taking part in a duel
+    Address ssNameBuffer;                    // Board temp heap buffer holding the roulette names
+    ShuffleStream!SuperstarsMiniGame[MiniGameType] queues;
+    uint landing;                            // The roulette's entry the game lands on next (see populate())
+    // The results entered on the Bingo page, if ssHasResults, for the mini-game they name. They're the live bingo
+    // session's: the site sends them once, so loading a save state keeps them (a save state from before they came
+    // still gets them; they're only used for the mini-game they name).
+    @Session SuperstarsResults ssResults;
+    @Session bool ssHasResults;
+
+    override bool enabled() { return config.superstarsMiniGames && !config.bingoURL.empty; }
+
+    bool haveResults() const {
+        return ssHasResults && ssPhase != SuperstarsPhase.NONE && ssResults.game == ssGame.fullName;
+    }
+
+    @Write("data.currentScene") void newGame(ref Scene scene) {
+        if (scene == Scene.START_BOARD) queues = null;
+    }
+
+    @Write("data.currentScene") void sceneChanged(ref Scene scene) {
+        if (scene == data.currentScene) return;
+        if (scene == Scene.START_BOARD || scene == Scene.CASTLE_GROUNDS || scene == Scene.TITLE_SCREEN) {
+            resetSuperstars();
+        }
+    }
+
+    // MBMgCallListCreate: Allocate a buffer on the board's temp heap for this roulette's names.
+    // Allocating per roulette (instead of when the board loads) also works right after loading a save state.
+    @ExecDone(0x800DFBA8) void rouletteMade() {
+        if (!isPartyBoardScene()) return;
+        ssNameBuffer = mallocTemp(SUPERSTARS_NAME_SLOT_SIZE * data.miniGameRoulette.length);
+
+        // Make the duel roulette (category 5) 3 long, laid out like the other 3-long roulettes (category 1).
+        // These tables are the board overlay's data, which is reloaded with the board.
+        0x80100E1D.val!ubyte = 3;                           // Number of entries
+        0x80100E89.val!ubyte = 0x80100E85.val!ubyte;        // Window Y
+        0x80100E91.val!ubyte = 0x80100E8D.val!ubyte;        // Cursor Y
+        0x801020C4.val!uint  = 0x801020B4.val!uint;         // Entry rectangles
+    }
+
+    // GWMgUnlockCheck: Show every roulette slot, even if the placeholder MP3 mini-game is still locked
+    @Exec(0x80035BD8) void unlockChecking() {
+        if (ssRoulette.empty || !isPartyBoardScene()) return;
+        hookExecOnce!unlocked(gpr.ra);
+    }
+
+    void unlocked() { gpr.v0 = 1; }
+
+    // func_8005B43C (set window message): Swap the MP3 mini-game name for the Superstars name
+    @Exec(0x8005B43C) void nameShown() {
+        if (ssRoulette.empty || !isPartyBoardScene() || !ssNameBuffer) return;
+        if (gpr.a1 < 0x4700 || gpr.a1 >= 0x4748) return; // Mini-game name messages
+        auto game = cast(MiniGame)(gpr.a1 - 0x4700 + 1);
+        if (game !in ssRoulette) return;
+        foreach (i; 0..data.miniGameRoulette.length) {
+            if (data.miniGameRoulette[i] == game) {
+                gpr.a1 = ssNameBuffer + cast(uint)(i * SUPERSTARS_NAME_SLOT_SIZE);
                 return;
             }
-        });
-    }
-
-    // On a board made with PartyPlanner64: the board code (overlay 128) is loaded, and the board's own code and data
-    // (file 19/618) are at 0x807B0000, starting "PP64"
-    bool customBoard() {
-        return isBoardScene() && 0x800E6E58.val!uint == 0x0C01A63A && 0x807B0000.val!uint == 0x50503634;
-    }
-
-    // customExtraItemShopFix: PartyPlanner64 pairs each item shop event's space with the closest item shop space (where
-    // the shop's model stands, made for every one of them when the board is set up). But its shop event, the first
-    // original board's shop code, has room for two pairs: the first two spaces with the event, in the board's order.
-    // It looks the player's space up among those two, and a shop on any other space (a board's third, like one of Kaos
-    // Kore's) gets no shop space. That's the code for the Cellular Shopper, which runs while the board is
-    // paused: the camera doesn't go to the shop and its shopkeeper doesn't come out, a computer buys with whichever
-    // shop's choices were used last, and "View Map" closes the map at once and leaves the board paused
-    // (func_80049FB8) until the turn ends, so the camera stops following the player.
-    // Here, a shop the lookup doesn't know gets its closest item shop space (as PartyPlanner64 pairs them) and goes on
-    // the way the two it knows do. The extra shops alternate between the two shops' choices for computers. The shop
-    // event is in each board's own code, at different addresses, so its code is recognized by its instructions.
-    void setUpCustomExtraItemShopFix() {
-        enum Address GET_SPACE_INDEX = 0x800EB184; // GetAbsSpaceIndexFromChainSpaceIndex(chain, index)
-        enum Address SPACE_COUNT = 0x80105210, SPACES = 0x80105214, BOARD_PAUSED = 0x800D6A90;
-        enum uint SPACE_SIZE = 0x24;
-        static bool valid(Address a) { return a >= 0x80000000 && a < 0x80800000 && a % 4 == 0; }
-        // Whether the code at `a` is `words`, each compared where its mask is set
-        static bool code(Address a, const uint[2][] words) {
-            if (!valid(a) || !valid(a + cast(uint)words.length * 4 - 4)) return false;
-            foreach (i, w; words) if (((a + cast(uint)i * 4).val!uint & w[1]) != w[0]) return false;
-            return true;
         }
-        static short immediate(Address a) { return cast(short)(a.val!uint & 0xFFFF); }
+    }
 
-        // The shop event after the lookup of the player's space (in v0): sll v0, v0, 16; sra v1, v0, 16;
-        // li v0, <shop 1>; beq v1, v0, FIRST; li v0, <shop 2>; beq v1, v0, SECOND; li t5, <its shop space>;
-        // j NONE; li t5, -1; FIRST: li t5, <shop 1's shop space>; sh t5, ...(sp); ...; lui at, ...; sw zero, ...(at)
-        // (the shop's number for computers, at FIRST + 0x1C and 0x20). NONE: sh t5, ...(sp), then on as the two do.
-        static immutable uint[2][] LOOKUP = [
-            [0x00021400, ~0], [0x00021C03, ~0], [0x24020000, 0xFFFF0000], [0x10620000, 0xFFFF0000],
-            [0x24020000, 0xFFFF0000], [0x10620000, 0xFFFF0000], [0x240D0000, 0xFFFF0000], [0x08000000, 0xFC000000],
-            [0x240DFFFF, ~0], [0x240D0000, 0xFFFF0000], [0xA7AD0000, 0xFFFF0000],
-        ];
-        static immutable uint[2][] STORE_T5 = [[0xA7AD0000, 0xFFFF0000]];
-        static immutable uint[2][] SHOP_NUMBER = [[0x3C010000, 0xFFFF0000], [0xAC200000, 0xFFFF0000]];
-        enum uint SHOP_1 = 0x08, SHOP_2 = 0x10, JUMP_NONE = 0x1C, FIRST = 0x24, SHOP_NUMBER_AT = FIRST + 0x1C;
-        // The board setup's loop making each item shop space's model: lui s1, <list>; addiu s1, s1, <list>;
-        // sll v0, s0, 1; addu v0, v0, s1; jal GetSpaceData; lh a0, 0(v0); sll v1, s0, 2; li a0, 9; ...;
-        // slti v0, s0, <count>
-        static immutable uint[2][] MODELS = [
-            [0x3C110000, 0xFFFF0000], [0x26310000, 0xFFFF0000], [0x00101040, ~0], [0x00511021, ~0],
-            [0x0C03AC58, ~0], [0x84440000, ~0], [0x00101880, ~0], [0x24040009, ~0],
-        ];
+    // func_800E11C0 (duel roulette): Remember who is dueling
+    @Exec(0x800E11C0) void duelRoulette() {
+        if (!isPartyBoardScene()) return;
+        ssDuelists = [cast(uint)gpr.a0, cast(uint)gpr.a1];
+    }
 
-        Address spaceData(int space) { return SPACES.val!uint + space * SPACE_SIZE; }
-        // Whether one of a space's events is the shop event (a jump to the function `at` is in)
-        bool shopEventSpace(int space, Address at) {
-            Address list = (spaceData(space) + 0x20).val!uint;
-            for (Address e = list; valid(e) && e.val!short != 0; e += 8) {
-                Address f = (e + 4).val!uint;
-                if (!valid(f) || f.val!uint >> 26 != 2) continue; // j
-                Address target = (f & 0xF0000000) | (f.val!uint & 0x03FFFFFF) << 2;
-                if (target <= at && at < target + 0x400) return true;
+    // GWMgNoSet: The roulette has landed on a mini-game
+    @Exec(0x80035AA8) void landed() {
+        if (ssRoulette.empty || !isPartyBoardScene()) return;
+        auto game = cast(MiniGame)cast(byte)gpr.a0;
+        if (auto selected = game in ssRoulette) {
+            ssGame = *selected;
+            ssHasResults = false;
+            ssPhase = SuperstarsPhase.SELECTED;
+            info("Superstars mini-game: ", ssGame.fullName, " (", ssType, ")");
+            sendSuperstarsInfo();
+        }
+        ssRoulette = null;
+        ssNameBuffer = 0; // Only valid for this roulette
+    }
+
+    // MBVsSprKill: Called by the roulette process (regular, battle and duel) after the roulette closes.
+    // Show the "play on Superstars" message from that process, which keeps the board waiting on it.
+    // (It can't wait for the wipe to Tumble instead: the wipe is drawn over the message.)
+    @ExecDone(0x800F5644) void rouletteClosed() {
+        if (ssPhase != SuperstarsPhase.SELECTED || !isPartyBoardScene()) return;
+        showSuperstarsMessage();
+    }
+
+    // func_800EE2DC (message waits for any player): If every player is a CPU, the message advances itself.
+    // While waiting for results, report the players as human to this function so it waits for A instead.
+    @ReadEach("players", "data.flags") void flagsRead(Player p, ref ubyte flags, Address pc, Address address) {
+        if (ssPhase != SuperstarsPhase.WAITING || !isPartyBoardScene()) return;
+        if (pc < 0x800EE2DC || pc >= 0x800EE614) return;
+        if (!players.all!(o => o.isCPU)) return;
+        flags &= ~0b1;
+    }
+
+    // omOvlCallEx: Skip the rules screen and mini-game, going straight to the results
+    @Exec(0x80048128) void overlayCalled() {
+        if (gpr.a0 != Scene.MINI_GAME_RULES) return;
+        if (ssPhase == SuperstarsPhase.NONE) return;
+
+        if (ssPhase == SuperstarsPhase.READY && haveResults) {
+            auto next = applySuperstarsResults();
+            gpr.a0 = next;
+            if (isBoardScene(cast(Scene)next)) {
+                // Duels have no results screen: the board pays out the winner itself (MBKettouResultExec).
+                // Go straight back to the board, as MBOvlCallExec does once a mini-game returns.
+                gpr.a1 = 2;
+                gpr.a2 = 0x192;
+                0x800D4196.val!short = 0; // D_800D4190_main.stat
             }
-            return false;
+        } else {
+            warning("No Superstars results were entered for ", ssGame.fullName, "; playing the MP3 mini-game instead");
         }
-        // The item shop spaces (PartyPlanner64's list, from the board setup's loop near the shop event)
-        short[] shopSpaces(Address near) {
-            for (Address a = max(near, 0x80020000) - 0x20000; a < min(near + 0x20000, 0x80800000); a += 4) {
-                if (!code(a, MODELS)) continue;
-                Address list = (immediate(a) << 16) + immediate(a + 4);
-                foreach (k; 0..16) {
-                    auto w = (a + cast(uint)(MODELS.length + k) * 4).val!uint;
-                    if (w >> 16 != 0x2A02) continue; // slti v0, s0, <count>
-                    short[] spaces;
-                    foreach (i; 0..min(w & 0xFFFF, 64)) spaces ~= (list + i * 2).val!short;
-                    return spaces;
+
+        resetSuperstars();
+    }
+
+    // Fills the roulette with Superstars mini-games, using MP3 mini-games of the same type as placeholders.
+    // Returns false if the roulette should be populated normally instead.
+    bool populate(MiniGameType type, uint count) {
+        ssRoulette = null;
+        auto all = superstarsMiniGames(type);
+        if (all.empty || count == 0 || count > data.miniGameRoulette.length) return false;
+
+        auto placeholders = [EnumMembers!MiniGame].filter!(g => g.type == type).take(count).array;
+        if (placeholders.length < count) return false;
+
+        auto choices = all.filter!(g => !config.blockedSuperstarsMiniGames.canFind(g)).array;
+        if (choices.empty) choices = all;
+
+        // The queue holds every (unblocked) mini-game of the list. Battles skip its coin mini-games,
+        // which stay in the queue for regular 4-player roulettes.
+        auto key = superstarsQueueKey(type);
+        auto queue = &queues.require(key);
+        if (queue.empty) queue.initialize(choices, random);
+        auto allowed = (SuperstarsMiniGame g) => isAllowedSuperstarsMiniGame(g, type);
+        auto game = queue.next(random, allowed);
+        auto alternatives = choices.filter!(g => g != game && allowed(g)).array.randomShuffle(random)
+                          ~ all.filter!(g => g != game && !choices.canFind(g) && allowed(g)).array.randomShuffle(random);
+        // At most one coin mini-game and one Bowser mini-game per roulette
+        auto fits = (SuperstarsMiniGame g, SuperstarsMiniGame[] list) =>
+            !(g.isCoinMiniGame && list.any!(o => o.isCoinMiniGame)) &&
+            !(g.isBowserMiniGame && list.any!(o => o.isBowserMiniGame));
+        SuperstarsMiniGame[] names = [game];
+        foreach (g; alternatives) {
+            if (names.length == count) break;
+            if (fits(g, names)) names ~= g;
+        }
+        for (size_t i = 0; names.length < count; i++) {
+            names ~= names[i];
+        }
+        names.randomShuffle(random);
+
+        foreach (i, g; names) {
+            data.miniGameRoulette[i] = placeholders[i];
+            ssRoulette[placeholders[i]] = g;
+        }
+
+        if (ssNameBuffer) {
+            foreach (i, g; names) {
+                // Plain label: no <END>, which would make the window show a "press A" arrow.
+                // Coin mini-games are yellow, Bowser mini-games red.
+                auto name = g.isCoinMiniGame   ? "<YELLOW>" ~ g.fullName ~ "<RESET>"
+                          : g.isBowserMiniGame ? "<RED>"    ~ g.fullName ~ "<RESET>"
+                          : g.fullName;
+                auto text = formatText(name ~ "<NUL><NUL>");
+                if (text.length > SUPERSTARS_NAME_SLOT_SIZE) {
+                    text = text[0..SUPERSTARS_NAME_SLOT_SIZE - 2] ~ formatText("<NUL><NUL>");
                 }
+                auto slot = Ptr!char(ssNameBuffer + cast(uint)(i * SUPERSTARS_NAME_SLOT_SIZE));
+                foreach (j, char c; text) slot[j] = c;
             }
-            return null;
+        } else {
+            warning("No buffer for Superstars mini-game names; the roulette will show MP3 mini-game names");
         }
 
-        GET_SPACE_INDEX.onExec({
-            Address ret = gpr.ra;
-            if (!valid(ret) || ret.val!uint != LOOKUP[0][0] || !customBoard() || BOARD_PAUSED.val!ubyte) return;
-            if (!code(ret, LOOKUP)) return;
-            ret.onExecOnce({
-                auto space = cast(short)gpr.v0;
-                auto shop1 = immediate(ret + SHOP_1), shop2 = immediate(ret + SHOP_2);
-                if (space == shop1 || space == shop2) return; // One of the two it knows
-                auto count = SPACE_COUNT.val!ushort;
-                if (space < 0 || space >= count || !shopEventSpace(space, ret)) return;
-                Address none = (ret & 0xF0000000) | ((ret + JUMP_NONE).val!uint & 0x03FFFFFF) << 2;
-                if (!code(none, STORE_T5) || !code(ret + SHOP_NUMBER_AT, SHOP_NUMBER)) return;
+        landing = cast(uint)names.countUntil(game);
+        hookExecOnce!land(0x800DF120);
 
-                // The closest item shop space (PartyPlanner64 measures the board's x and y: the game's x and z)
-                Address at = spaceData(space);
-                short closest = -1;
-                float best = float.max;
-                foreach (s; shopSpaces(ret)) {
-                    if (s < 0 || s >= count) continue;
-                    Address p = spaceData(s);
-                    auto dx = (p + 8).val!float - (at + 8).val!float, dz = (p + 16).val!float - (at + 16).val!float;
-                    if (dx * dx + dz * dz < best) { best = dx * dx + dz * dz; closest = s; }
-                }
-                if (closest < 0) return;
-                // Which extra shop it is (the shop event's other spaces, in order)
-                int extra;
-                foreach (s; 0..space) if (s != shop1 && s != shop2 && shopEventSpace(s, ret)) extra++;
-                Address shopNumber = (immediate(ret + SHOP_NUMBER_AT) << 16) + immediate(ret + SHOP_NUMBER_AT + 4);
-                shopNumber.val!uint = extra % 2;
-                gpr.t5 = closest;
-                gpr.s5 = spaceData(closest);
-                gpr.s3 = at;
-                info("Item shop on space ", space, ": its shop is on space ", closest);
-                jump(none);
-            });
-        });
+        ssType = type;
+        if (type != MiniGameType.DUEL) ssDuelists = null;
+
+        return true;
     }
 
-    // customReverseMovementFix: on boards made with PartyPlanner64, a player walking backward (with a Reverse
-    // Mushroom) can be sent to a chain position that doesn't exist. The game doesn't check: it reads a space from
-    // whatever follows the chain's list of spaces, and can crash.
-    // The board code's walk (func_800FCA7C) steps from the player's current space (+0x0F, +0x10: chain and index) to
-    // the next one (+0x11, +0x12), keeps the one they came from (+0x15, +0x16), and sets the next one to the index + 1
-    // (- 1 walking backward: +0x17 & 0x01). The space's events change the next space where chains meet. On a Reverse
-    // Mushroom (+0x17 & 0x80), the walk starts by turning around: the next space is the previous one. When it ends,
-    // the two are swapped back. PartyPlanner64 boards break this in two ways:
-    // - The start is a dead end, and its event sends a player who walks into it back out without turning them
-    //   around. They walk on still marked as walking backward. If they land right after the start, the next space
-    //   they're left with points back toward it, and their next move walks off the end of the start's chain.
-    //   Here, a player whose space's event sends them back the way they came on a reverse move is turned around.
-    // - PartyPlanner64 starts a chain where paths join. The event there that asks which way to go back runs only
-    //   while steps are left, so a reverse move that ends there leaves no previous space, and the next Reverse
-    //   Mushroom steps to it. Here, a reverse move from there runs that event first.
-    // Any other step to a chain position that doesn't exist turns the player around instead.
-    void setUpCustomReverseMovementFix() {
-        enum Address EXEC_EVENTS = 0x800EBAC8;     // ExecSpaceEvents(space, activation)
-        enum Address REVERSE_START = 0x800FD1A0;   // The walk on a Reverse Mushroom: next = previous (s2 = the player)
-        enum Address REVERSE_TURNED = 0x800FD1BC;  // ... and turned around
-        enum Address STEP = 0x800FD20C;            // The walk, about to step to the next space (s2 = the player)
-        enum Address PLAYERS = 0x800D1108, CHAIN_COUNT = 0x80105212, SPACES = 0x80105214, CHAINS = 0x80105218;
-        bool resolving; // Running the junction's event at the start of a reverse move
+    void land() { gpr.v0 = landing; }
 
-        static bool valid(Address a) { return a >= 0x80000000 && a < 0x80800000; }
-
-        // The space at a chain position, or -1 if there's no such position
-        short spaceAt(int chain, int index) {
-            if (chain < 0 || chain >= CHAIN_COUNT.val!ushort || index < 0 || !valid(CHAINS.val!uint)) return -1;
-            Address c = CHAINS.val!uint + chain * 8;
-            if (index >= c.val!short || !valid((c + 4).val!uint)) return -1;
-            return (cast(Address)((c + 4).val!uint + index * 2)).val!short;
+    // Fades out the music the same way the board does before a mini-game (func_800F93A4), so it
+    // doesn't play during the Superstars mini-game. Battles and duels play their music on a second track (D_800C9930).
+    void fadeOutBoardMusic() {
+        enum FRAMES = 60;
+        callGame(0x8004A994, FRAMES);                         // HuAudSeqFadeOut: fade the main track
+        auto track = 0x800C9930.val!short;
+        if (track != -1) {
+            0x800C9930.val!short = -1;
+            callGame(0x800039A4, cast(uint)cast(int)track, FRAMES); // Fade the battle/duel track
+            callGame(0x8004A950);                             // Stop the main track
         }
-        short positionSpace(Address player, uint offset) {
-            return spaceAt((player + offset).val!byte, (player + offset + 1).val!byte);
+        if (0x800CE206.val!short != 0) {
+            0x800CE206.val!short = 0;
+            callGame(0x8004A950);
         }
-
-        // Whether an event's code checks for a Reverse Mushroom (lbu from +0x17, andi 0x80) before its return
-        bool checksReverseMushroom(Address f) {
-            if (!valid(f)) return false;
-            bool flags;
-            foreach (i; 0..48) {
-                auto w = (f + i * 4).val!uint;
-                if (w >> 26 == 0x24 && (w & 0xFFFF) == 0x17) flags = true;
-                if (flags && w >> 26 == 0x0C && (w & 0xFFFF) == 0x80) return true;
-                if (w == 0x03E00008) return false; // jr ra
-            }
-            return false;
-        }
-
-        // A space's events that send the player back the way they came on a reverse move (like the start's) turn
-        // them around, unless they turned them around themselves (like Seasonal Woodland's at the foot of its left
-        // path: they set +0x17 & 0x01 too)
-        EXEC_EVENTS.onExec({
-            auto activation = cast(short)gpr.a1;
-            if ((activation != 1 && activation != 8) || !customBoard()) return;
-            Address p = PLAYERS + data.currentPlayerIndex * 0x38;
-            auto flags = (p + 0x17).val!ubyte;
-            if (!(flags & 0x80)) return;
-            auto chain = (p + 0x11).val!ubyte, index = (p + 0x12).val!ubyte;
-            gpr.ra.onExecOnce({
-                if ((p + 0x11).val!ubyte == chain && (p + 0x12).val!ubyte == index) return; // Not changed
-                if (((p + 0x17).val!ubyte ^ flags) & 1) return; // They turned them around
-                auto next = positionSpace(p, 0x11);
-                if (next >= 0 && next == positionSpace(p, 0x15)) (p + 0x17).val!ubyte = (p + 0x17).val!ubyte ^ 1;
-            });
-        });
-
-        // A reverse move from a space with no previous one (where it ended a reverse move): its junction event, if
-        // it has one, picks the way back as if they'd just come to it from the space after it
-        REVERSE_START.onExec({
-            if (resolving || !customBoard()) return;
-            Address p = gpr.s2;
-            if (positionSpace(p, 0x15) >= 0) return;
-            auto chain = (p + 0x0F).val!byte, index = (p + 0x10).val!byte;
-            auto space = spaceAt(chain, index);
-            if (space < 0 || spaceAt(chain, index + 1) < 0 || !valid(SPACES.val!uint)) return;
-            Address[] junction;
-            Address list = (SPACES.val!uint + space * 0x24 + 0x20).val!uint;
-            for (Address e = list; valid(e) && e.val!short != 0 && junction.length < 4; e += 8) {
-                Address f = (e + 4).val!uint;
-                if (e.val!short == 1 && (e + 2).val!short == 1 && checksReverseMushroom(f)) junction ~= f;
-            }
-            if (junction.empty) return;
-            (p + 0x15).val!byte = chain;
-            (p + 0x16).val!byte = cast(byte)(index + 1);
-            (p + 0x12).val!byte = -1; // Until the event picks
-            resolving = true;
-            void run(size_t i) {
-                if (i < junction.length) {
-                    junction[i].jal({ run(i + 1); });
-                    return;
-                }
-                resolving = false;
-                if (positionSpace(p, 0x11) >= 0) jump(REVERSE_TURNED); // It picked, and set +0x17 & 0x01
-            }
-            run(0);
-        });
-
-        // A step to a chain position that doesn't exist: back where they came from, or the other way along the chain
-        STEP.onExec({
-            if (!customBoard()) return;
-            Address p = gpr.s2;
-            if (positionSpace(p, 0x11) >= 0) return;
-            auto flags = (p + 0x17).val!ubyte;
-            if (positionSpace(p, 0x15) >= 0) {
-                (p + 0x11).val!ubyte = (p + 0x15).val!ubyte;
-                (p + 0x12).val!ubyte = (p + 0x16).val!ubyte;
-            } else {
-                auto chain = (p + 0x0F).val!byte, index = (p + 0x10).val!byte + (flags & 1 ? 1 : -1);
-                if (spaceAt(chain, index) < 0) return;
-                (p + 0x11).val!byte = chain;
-                (p + 0x12).val!byte = cast(byte)index;
-            }
-            if (flags & 0x80) (p + 0x17).val!ubyte = flags ^ 1;
-        });
-    }
-
-    // Text (game bytes) to load instead of message `id`, whose own text is `text`, or null to keep it
-    // The detailed results (the final results' Start screen) get a Lucky Spaces column after Blue Spaces. The screen
-    // shows 4 of its 13 columns at a time (6 in widescreen; 0x801097B0 = the first one shown, 0x801097B4 = the cursor in them), each
-    // with a header icon, each player's number (the top one in blue) and Toad's description of the cursor's column.
-    // With the Lucky Spaces column there are 14: from Red Spaces on, column c is the game's column c - 1. The Lucky
-    // Spaces column's icon is a 14th sprite, made from the Blue Spaces icon.
-    bool luckyDescription; // The description being loaded is the Lucky Spaces column's (Blue's message, changed)
-
-    void setUpLuckyResultsColumn() {
-        enum LUCKY = 5, COLUMNS = 14;
-        enum Address FIRST = 0x801097B0, CURSOR = 0x801097B4, ICONS = 0x801099EC; // ICONS: the icons' sprite group
-        bool resultsScreen() { return data.currentScene == Scene.FINAL_RESULTS; }
-        static int column(int c) { return c < LUCKY ? c : c - 1; } // The game's column for column c (not LUCKY)
-        short luckyIcon = -1;                                         // The Lucky Spaces icon's sprite animation
-        bool makingIcon;
-
-        // A player's number in column c >= LUCKY (the game's own columns from Red Spaces on are space counts)
-        int value(int player, int c) {
-            if (c == LUCKY) return players[player].state.luckySpaceCount;
-            immutable ubyte[] offsets = [0x2D, 0x2C, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34]; // Red, ?, !, ... Game Guy
-            return cast(byte)(0x800D1108 + player * 0x38 + offsets[column(c) - LUCKY]).val!ubyte;
-        }
-
-        // The icons: a sprite group of 14 instead of 13 (func_800F4528(count, ...))
-        0x80108148.onExec({ if (resultsScreen() && gpr.a0 == 13) gpr.a0 = COLUMNS; });
-        // Each icon's file is loaded, made a sprite animation (HuSprAnimRead), then freed (DataClose, a0 = s2). Before
-        // the Blue Spaces icon's (s3 = 4) is freed, its pixels and palette become the Lucky Spaces icon's, and it's
-        // made an animation again.
-        0x80108194.onExec({
-            if (!resultsScreen() || gpr.s3 != 4 || makingIcon) return;
-            makingIcon = true;
-            foreach (i, b; LUCKY_RESULTS_ICON[0..128]) (gpr.s2 + 0x2C + cast(uint)i).val!ubyte = b; // Pixels
-            foreach (i, b; LUCKY_RESULTS_ICON[128..$]) (gpr.s2 + 0xAC + cast(uint)i).val!ubyte = b; // Palette
-            0x80055810.jal(gpr.s2, (uint anim) { luckyIcon = cast(short)anim; makingIcon = false; });
-        });
-        // After the 13 icons, the 14th sprite gets the Lucky Spaces icon, set up like the others (func_80055024 sets a
-        // sprite's animation, func_80055294 its priority, func_800553A8 its attributes). Its animation goes in the
-        // group's list, which frees it with the group.
-        0x80108208.onExec({
-            if (!resultsScreen() || luckyIcon < 0) return;
-            auto group = ICONS.val!uint;
-            auto id = (group + 10).val!short;
-            ((group + 12).val!uint + (COLUMNS - 1) * 2).val!short = luckyIcon;
-            0x80055024.jal(id, COLUMNS - 1, luckyIcon, 0, {
-                0x80055294.jal(id, COLUMNS - 1, 80, {
-                    0x800553A8.jal(id, COLUMNS - 1, 0xC000);
-                });
-            });
-            luckyIcon = -1;
-        });
-        // Showing the icons: all 14 are hidden, then the 4 shown are shown and positioned (a1 = the column's sprite)
-        0x80107534.onExecDone({ if (resultsScreen()) gpr.v0 = gpr.s3 < COLUMNS; });
-        auto iconSprite = (int c) => c == LUCKY ? COLUMNS - 1 : column(c);
-        0x80107568.onExec({ if (resultsScreen()) gpr.a1 = iconSprite(cast(short)gpr.s0); });
-        0x801075A0.onExec({ if (resultsScreen()) gpr.a1 = iconSprite(cast(short)gpr.s0); });
-
-        // The numbers: for column s3 and the player whose data is s0, the game picks the number (a2) and its digits
-        // (s1), then continues at 0x8010772C. Before that, it gets which players have the column's top number, shown in
-        // blue, from func_80106B94 (a bit for each place, from 1st; none if everyone has it).
-        0x8010766C.onExec({
-            if (!resultsScreen() || cast(int)gpr.s3 < LUCKY) return;
-            gpr.a2 = value((gpr.s0 - 0x800D1108) / 0x38, cast(int)gpr.s3);
-            gpr.s1 = 2;
-            jump(0x8010772C);
-        });
-        0x80107668.onExec({ // Back from func_80106B94, with v0 = the bits
-            if (!resultsScreen() || cast(int)gpr.s3 < LUCKY) return;
-            auto c = cast(int)gpr.s3;
-            auto values = iota(4).map!(place => value(data.finalPlayerRankOrder[place], c)).array;
-            auto top = values.maxElement;
-            auto bits = iota(4).filter!(place => values[place] == top).map!(place => 1 << place).fold!"a | b"(0);
-            gpr.v0 = bits == 0b1111 ? 0 : bits;
-        });
-
-        // Scrolling: the first column shown goes up to 10 instead of 9 (moving right, 0x8010941C checks it's below 10,
-        // and 0x80109428 makes it 9 if not), and the right arrow hides at 10 (0x80108910 and 0x80109554 compare it
-        // with 9). In widescreen, 6 columns are shown: up to 8 instead of 7.
-        auto last = () => COLUMNS - (changed(Scene.FINAL_RESULTS) ? 6 : 4); // The first column shown at the end
-        0x8010941C.onExecDone({ if (resultsScreen()) gpr.v0 = FIRST.val!int < last() + 1; });
-        0x80109428.onExec({ if (resultsScreen()) gpr.v0 = last(); });
-        0x80108910.onExec({ if (resultsScreen()) gpr.v0 = last(); });
-        0x80109554.onExec({ if (resultsScreen()) gpr.v0 = last(); });
-
-        // Toad's description of the cursor's column (func_8005B43C, a1 = message 0x1900 + the game's column): the
-        // Lucky Spaces column shows the Blue Spaces message, changed as it's loaded (see replaceMessage())
-        0x801089E4.onExec({
-            if (!resultsScreen()) return;
-            auto c = FIRST.val!int + CURSOR.val!int;
-            luckyDescription = c == LUCKY;
-            if (c >= LUCKY) gpr.a1 = 0x1900 + (c == LUCKY ? 4 : column(c));
-        });
-    }
-
-    string replaceMessage(ushort id, string text) {
-        auto message = (string s) => formatText("<CLEAR>" ~ s ~ "<RESET><END><NUL>");
-
-        // A character's name by itself, possibly in a color. The game shows these alone and inserts them into other
-        // messages as <1>-<5>, so this covers player names everywhere without touching any other text.
-        if (config.bingoPlayerNames && text.length >= 2 && text[0] == '\x0B') {
-            size_t start = 1, end = text.length;
-            while (end > start && text[end - 1] == '\x00') end--;
-            auto nuls = end;
-            if (end > start && text[end - 1] == '\x19') end--;                            // <RESET>
-            if (end > start && text[start] >= '\x01' && text[start] <= '\x08') start++; // Color
-            foreach (c; [EnumMembers!Character]) {
-                if (!sameName(text[start..end], c.fullName)) continue;
-                // In the character's color, instead of the message's own. Without a <RESET>: inserted as an argument,
-                // the window switches back to the color before it (see colorArg()). A name the game showed dark (a
-                // player who can't be chosen) stays dark.
-                if (nameColor) {
-                    if (auto plain = bingoPlainName(c)) return "\x0B" ~ nameColor ~ formatText(plain) ~ text[nuls..$];
-                }
-                auto name = bingoName(c, false);
-                if (name) return "\x0B" ~ formatText(name) ~ text[nuls..$];
-            }
-        }
-
-        // The detailed results' Lucky Spaces column: the Blue Spaces description, for Lucky Spaces
-        if (id == 0x1904 && luckyDescription) {
-            luckyDescription = false;
-            return text.replace("Blue Spaces", "Lucky Spaces");
-        }
-
-        // The turn counter's text, while it's being loaded (see maintainTurnCounter())
-        if (id == TURN_COUNTER_MESSAGE && turnCounterText !is null) {
-            return formatText("<CLEAR>" ~ turnCounterText ~ "<NUL><NUL>");
-        }
-
-        // Bonus stars: 0x1402 introduces them, then each has 5 messages (0x1403, 0x1408, 0x140D): the award, then the
-        // winner, or a 2-, 3- or 4-way tie
-        if (config.randomBonus && data.currentScene == Scene.FINISH_BOARD && bonus.length >= 3 && id >= 0x1402 && id <= 0x1411) {
-            if (id == 0x1402) return message("Now, here are the <YELLOW><OUTLINE>Bonus Star<NO_OUTLINE><RESET> results.\nEach winner will get one star.");
-
-            auto i = (id - 0x1403) / 5;
-            auto b = bonus[i];
-            auto star = "<" ~ getColor(b) ~ "><OUTLINE>" ~ config.bonuses[b] ~ " Star";
-            final switch ((id - 0x1403) % 5) {
-                case 0: return message(["Let's begin with the ", "Next, the ", "Finally, the "][i] ~ star ~ "<NO_OUTLINE><RESET>.\n" ~
-                                       wrapMessage("This award goes to the person who " ~ getDescription(b) ~ ".",
-                                                   messageTextWidth("This award goes to the person")));
-                case 1: return message("The " ~ star ~ "<NO_OUTLINE><RESET> award\ngoes to...<1>!");
-                case 2: return message("It's a tie! " ~ star ~ "<NO_OUTLINE><RESET>\nawards go to both\n<1> and <2>!");
-                case 3: return message("It's a three-way tie!\n" ~ star ~ "<NO_OUTLINE><RESET> awards\ngo to <1>,\n<2> and <3>!");
-                case 4: return message("It's a four-way tie!!!\nAll four players are\n" ~ star ~ "s<NO_OUTLINE><RESET>,\nso no stars will be awarded.");
-            }
-        }
-
-        // Last Five Turns: the standings. The game shows first and last place outlined, in yellow and red; with the
-        // bingo names in their own colors, they're plain like second and third place.
-        if ((id == 0x4301 || id == 0x4304) && config.bingoPlayerNames && characterToName.length) {
-            return message(id == 0x4301 ? "<1> is first!" : "And <1> is in last place.");
-        }
-
-        // Last Five Turns: the present for the predicted winner
-        if (id == 0x4308 && config.improveLastFiveTurnsBonus && data.currentScene == Scene.LAST_FIVE_TURNS) {
-            return message("And to <1>, our predicted\nwinner, we award a\npresent of <YELLOW><OUTLINE>" ~ lastFiveTurnsBonus.to!string ~ " coins<NO_OUTLINE><RESET><YELLOW>!");
-        }
-
-        // Chance Time: swaps instead of "all coins/stars" transfers
-        if (config.chanceSwapInsteadOfTransfer && data.currentScene == Scene.CHANCE_TIME &&
-            (data.chancePrize == ChancePrize.COINS_ALL || data.chancePrize == ChancePrize.STARS_ALL)) {
-            enum SAME = "Both players have the\n<YELLOW><OUTLINE>same number<NO_OUTLINE><RESET> of ";
-            switch (id) {
-                case 0x1B0C: return message("The results are in!<RESET><END><CLEAR>Wow! <GREEN><1><RESET> swaps\n<YELLOW><OUTLINE>coins<NO_OUTLINE><RESET> with <GREEN><2><RESET>!");
-                case 0x1B0E: return message("The results are in!<RESET><END><CLEAR>Wow! <GREEN><1><RESET> swaps\n<YELLOW><OUTLINE>stars<NO_OUTLINE><RESET> with <GREEN><2><RESET>!" ~
-                                            "<RESET><END><CLEAR>This is amazing!\nA complete turnaround!\n");
-                case 0x1B0B: return message("...Whoa! Bad news!<RESET><END><CLEAR>" ~ SAME ~ "stars.\nWhat a pity.");
-                case 0x1B0D: return message("...Oh my goodness!<RESET><END><CLEAR>" ~ SAME ~ "coins.\nUnbelievable!");
-                case 0x1B0F: return message("...Whoa! Bad news!<RESET><END><CLEAR>" ~ SAME ~ "stars.\nHow disappointing.");
-                default:
-            }
-        }
-
-        return null;
-    }
-
-    // The turn counter: a frameless window at the top center of the board screen, between the top players' panels,
-    // made the way the board makes its button hints (func_800E1F70). Its text is message TURN_COUNTER_MESSAGE (one the
-    // board never shows), which replaceMessage() replaces while the counter loads it, so the game keeps its own copy.
-    //
-    // It's shown on the board, except while the pause menu is open, and lowered while the scrolling map is (see
-    // onStart(); the game pauses for its other menus too, like the item screen and the full map, so 0x800D6A90 can't
-    // tell them apart). Whenever what it should show changes (its text or place, or showing it at all), its window is
-    // closed and another made. That's at most a few times a turn, and simpler than changing a window.
-    //
-    // It's kept up from inside a game process (HuPrcVSleep), one call to the game at a time. Windows go away when the
-    // game closes them, or all at once when the board does, and their numbers are reused, so a window only counts as
-    // the counter while it still has the sprite group it was made with (window + 108).
-    enum TURN_COUNTER_MESSAGE = 0x2A0D;
-    short turnCounterWindow = -1;
-    short turnCounterGroup;         // Its sprite group
-    string turnCounterShown;        // Its text
-    int turnCounterX, turnCounterY; // Where it is
-    string turnCounterText;         // Text being loaded, or null
-    int turnCounterCovered;         // Screens open that it's hidden for
-    int turnCounterLowered;         // Screens open that it's lowered for
-    bool turnCounterBusy;           // Calls to the game are in progress
-
-    short windowGroup(short w) { return (windowAddress(w) + 108).val!short; }
-
-    // The width of the game's screen, in pixels: the widescreen code draws a 424x240 picture instead of 320x240
-    int screenWidth() { return config.widescreen ? SCREEN_WIDTH : OLD_SCREEN_WIDTH; }
-
-
-    void maintainTurnCounter() {
-        if (turnCounterBusy || stateAllocating) return;
-        if ((0x8004F074.val!uint & 0xFFFF0000) != 0x27BD0000) return; // HuPrcVSleep isn't "addiu sp, sp, ..."
-        if (!isBoardScene() || 0x800A2150.val!ubyte == 0) return;      // Not on the board, or no windows set up
-
-        auto exists = turnCounterWindow >= 0 && windowGroup(turnCounterWindow) == turnCounterGroup;
-        if (!exists) turnCounterWindow = -1;
-
-        // What it should show. The text is centered on the screen (320 pixels wide, or 424 in widescreen, so the same way
-        // as a 5-pixel "/" on pixels 158-162 or 210-214): func_8005A968 takes the window's left side, and the text starts
-        // 4 pixels right of it. The text is from 4 lines above y to 6 below: level with the top players' panels, or on
-        // the scrolling map, below its up arrow (down to line 31).
-        auto wanted = data.currentTurn >= 1 && turnCounterCovered == 0;
-        auto text = "<YELLOW>" ~ data.currentTurn.to!string ~ " / " ~ data.totalTurns.to!string ~ "<RESET>";
-        auto x = (screenWidth + 1 - messageTextWidth(text)) / 2 - 4;
-        auto y = turnCounterLowered > 0 ? 40 : 15;
-
-        if (exists) {
-            if (wanted && text == turnCounterShown && x == turnCounterX && y == turnCounterY) return;
-            turnCounterBusy = true;
-            auto w = turnCounterWindow;
-            turnCounterWindow = -1;
-            0x8005F364.jal(w, { turnCounterBusy = false; }); // Closed; made again later if it's wanted
-            return;
-        }
-        if (!wanted) return;
-
-        // func_80060394(1, short[2]* size, message) measures the window the text needs (padding included), and
-        // func_8005A968(x, y, w, h, 0, 0) makes it, with (x, y) its top left
-        turnCounterBusy = true;
-        turnCounterText = text; // Replaces the message while it's measured and set
-        gpr.sp -= 32;
-        0x80060394.jal(1, gpr.sp + 24, TURN_COUNTER_MESSAGE, {
-            auto width = (gpr.sp + 24).val!short, height = (gpr.sp + 26).val!short;
-            (gpr.sp + 16).val!uint = 0; // The 5th and 6th arguments
-            (gpr.sp + 20).val!uint = 0;
-            // func_8005A968 takes the first free window from 2 up (window + 94 is -1 when free). Custom board events
-            // can update a window by its number (like Thwomp Toll's window 2), so the counter takes the last free one
-            // instead, which leaves the game's windows the numbers they'd have without it.
-            uint slot = 0;
-            foreach_reverse (i; 2..16) if (!slot && (windowAddress(cast(short)i) + 94).val!short == -1) slot = i;
-            if (slot) 0x8005A9AC.onExecOnce({ gpr.fp = slot; }); // After the search starts at 2
-            0x8005A968.jal(x, y, width, height, (uint result) {
-                gpr.sp += 32;
-                auto w = cast(short)result;
-                0x8005BDFC.jal(w, 0, {                     // Text appears at once, not letter by letter
-                    0x8005BEE0.jal(w, 0, {                 // No window frame or background
-                        0x8005B63C.jal(w, 0, 0x20000, {    // Outlined text
-                            0x8005B43C.jal(w, TURN_COUNTER_MESSAGE, -1, -1, {
-                                turnCounterText = null;
-                                turnCounterWindow = w;
-                                turnCounterGroup = windowGroup(w);
-                                turnCounterShown = text;
-                                turnCounterX = x;
-                                turnCounterY = y;
-                                turnCounterBusy = false;
-                            });
-                        });
-                    });
-                });
-            });
-        });
     }
 
     void showSuperstarsMessage() {
         ssPhase = SuperstarsPhase.WAITING;
+        fadeOutBoardMusic();
+        // Coin mini-games are yellow and Bowser mini-games red, as on the roulette
+        auto color = ssGame.isCoinMiniGame ? "<YELLOW>" : ssGame.isBowserMiniGame ? "<RED>" : "<CYAN>";
+        auto intro  = ["Let's play <OUTLINE>" ~ color ~ ssGame.fullName ~ "<NO_OUTLINE><RESET>",
+                       "in <OUTLINE><YELLOW>Mario Party Superstars<NO_OUTLINE><RESET>!"];
+        auto outro  = ["When you're done, enter the", "results on the Bingo page."];
+        auto teams  = superstarsTeamLines((intro ~ outro).map!messageTextWidth.maxElement);
+        auto message = intro.join("\n") ~ "\n\n" ~ (teams.empty ? "" : teams.join("\n") ~ "\n\n") ~ outro.join("\n");
+        showGlobalMessage(message, -1, true, then!superstarsMessageClosed());
+    }
 
-        fadeOutBoardMusic({
-            // Coin mini-games are yellow and Bowser mini-games red, as on the roulette
-            auto color = ssGame.isCoinMiniGame ? "<YELLOW>" : ssGame.isBowserMiniGame ? "<RED>" : "<CYAN>";
-            auto intro  = ["Let's play <OUTLINE>" ~ color ~ ssGame.fullName ~ "<NO_OUTLINE><RESET>",
-                           "in <OUTLINE><YELLOW>Mario Party Superstars<NO_OUTLINE><RESET>!"];
-            auto outro  = ["When you're done, enter the", "results on the Bingo page."];
-            auto teams  = superstarsTeamLines((intro ~ outro).map!messageTextWidth.maxElement);
-            showGlobalMessage((intro.join("\n") ~ "\n\n" ~ (teams.empty ? "" : teams.join("\n") ~ "\n\n") ~ outro.join("\n")),
-                              -1, true, {
-                if (ssPhase != SuperstarsPhase.WAITING) return;
-                if (ssResults) {
-                    ssPhase = SuperstarsPhase.READY;
-                } else {
-                    // Input is blocked until results arrive, so this should not happen
-                    warning("The Superstars message closed without results; playing the MP3 mini-game instead");
-                    resetSuperstars();
-                }
-            });
-        });
+    void superstarsMessageClosed() {
+        if (ssPhase != SuperstarsPhase.WAITING) return;
+        if (haveResults) {
+            ssPhase = SuperstarsPhase.READY;
+        } else {
+            // Input is blocked until results arrive, so this should not happen
+            warning("The Superstars message closed without results; playing the MP3 mini-game instead");
+            resetSuperstars();
+        }
     }
 
     // The players of the Superstars mini-game, laid out by team for the message window, each line centered:
@@ -2495,9 +1731,9 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
     void resetSuperstars() {
         bool wasActive = (ssPhase != SuperstarsPhase.NONE);
         ssPhase = SuperstarsPhase.NONE;
-        ssRoulette.clear();
+        ssRoulette = null;
         ssGame = SuperstarsMiniGame.init;
-        ssResults = null;
+        ssHasResults = false;
         ssDuelists = null;
         if (wasActive) sendSuperstarsInfo();
     }
@@ -2527,7 +1763,7 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
             msg.category = ssType;
             msg.coin = ssGame.isCoinMiniGame;
             msg.bowser = ssGame.isBowserMiniGame;
-            msg.submitted = (ssResults !is null);
+            msg.submitted = haveResults;
             players.each!((p) {
                 SuperstarsPlayer sp;
                 sp.player = p.index + 1;
@@ -2542,30 +1778,24 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
         sendMessage(msg.toJSON());
     }
 
-    override void onMessage(string msg) {
-        super.onMessage(msg);
-
-        if (ssPhase == SuperstarsPhase.NONE && !config.superstarsMiniGames) return;
-
-        auto json = parseJSON(msg);
-
-        switch (json.object["type"].str) {
+    override void receive(const JSONValue message) {
+        switch (message["type"].str) {
             case "cards": // Sent when (re)connecting, so make sure the Bingo page knows about the current mini-game
                 if (ssPhase != SuperstarsPhase.NONE) sendSuperstarsInfo();
                 break;
 
             case "superstars-results":
-                auto results = json.fromJSON!SuperstarsResults();
+                auto results = message.fromJSON!SuperstarsResults;
                 if (ssPhase == SuperstarsPhase.NONE || results.game != ssGame.fullName) {
                     warning("Ignoring Superstars results for ", results.game, " (current mini-game: ", ssGame.fullName, ")");
                     return;
                 }
                 if (!results.isValid(ssType, ssDuelists)) {
-                    warning("Ignoring invalid Superstars results: ", msg);
+                    warning("Ignoring invalid Superstars results: ", message.toString);
                     return;
                 }
-                ssResults = new SuperstarsResults;
-                *ssResults = results;
+                ssResults = results;
+                ssHasResults = true;
                 info("Received Superstars results for ", ssGame.fullName);
                 sendSuperstarsInfo();
                 break;
@@ -2576,52 +1806,817 @@ class MarioParty3 : MarioParty!(Config, State, Memory) {
     }
 
     override void onInput(int port, InputData* input) {
-        super.onInput(port, input);
-
         if (ssPhase != SuperstarsPhase.WAITING) return;
 
         // Nobody can close the message until results are entered, then press A to close it
         input.value = 0;
-        if (ssResults && (frame / 4) % 2 == 0) {
+        if (haveResults && (frame / 4) % 2 == 0) {
             input.buttons = 0x0080; // A
         }
     }
+}
 
-    override bool isPlayable(Character c) const {
-        return c >= Character.MARIO && c <= Character.DAISY;
+// enhancedTaunts: more taunts, on the D-pad and C buttons (and L)
+final class EnhancedTaunts : Feature!MarioParty3 {
+    override bool enabled() { return config.enhancedTaunts; }
+
+    @ExecDone("data.storeButtonPress.addr") void buttonPressed() {
+        if (gpr.v0 == 0 || data.totalTurns == 0) return;
+
+        SFX sfx;
+        switch (data.buttons[gpr.t0]) {
+            case Button.L:   sfx = SFX.TAUNT;               break;
+            case Button.D_R: sfx = SFX.BEING_CHOSEN;        break;
+            case Button.D_L: sfx = SFX.GETTING_AN_ITEM;     break;
+            case Button.D_D: sfx = SFX.WINNING_A_STAR;      break;
+            case Button.D_U: sfx = SFX.WINNING_A_MINI_GAME; break;
+            case Button.C_R: sfx = SFX.DESPAIR_1;           break;
+            case Button.C_L: sfx = SFX.DESPAIR_2;           break;
+            case Button.C_D: sfx = SFX.LOSING_A_MINI_GAME;  break;
+            case Button.C_U: sfx = SFX.LOSING_A_MINI_GAME;  break;
+            default:                                        return;
+        }
+
+        auto p = players.find!(p => p.data.controller == gpr.t0);
+        if (p.empty || p.front.isCPU) return;
+
+        callGame(data.playSFX.addr, sfx, p.front.index);
+    }
+}
+
+// randomChanceOrder: Chance Time's three blocks stop in a random order
+final class RandomChanceOrder : Feature!MarioParty3 {
+    override bool enabled() { return config.randomChanceOrder; }
+
+    @Exec(0x80105B58) void order() {
+        if (data.currentScene != Scene.CHANCE_TIME) return;
+        [0, 1, 2].randomShuffle(random).each!((i, j) => data.chanceOrder[i] = cast(ubyte)j);
+    }
+}
+
+// itemsOnFinalTurn: Item Spaces and shops still give items on the last turn
+final class ItemsOnFinalTurn : Feature!MarioParty3 {
+    override bool enabled() { return config.itemsOnFinalTurn; }
+
+    @Read("data.currentTurn") void finalTurn(ref ubyte turn, Address pc) {
+        if (!isBoardScene()) return;
+        if (turn != data.totalTurns) return;
+        if (pc == 0x800FE420                       || // Item Space
+           (pc + 32).val!Instruction == 0x0C036783 || // Toad Shop
+           (pc + 32).val!Instruction == 0x0C03B164) { // Item Shop
+            turn--;
+        }
+    }
+}
+
+// The spaces the plugin changes (see CustomSpaces): standardSpaceRatio, luckySpaceRatio,
+// revealHiddenBlocksOnRemainingTurns (see LuckySpaces) and singleUseBattleSpaces (used Battle Spaces become Blue
+// Spaces)
+final class CustomSpaces3 : Feature!MarioParty3 {
+    ubyte[][CustomSpace.max + 1] spaceLists; // Each type's spaces, as drawn (see drawSpaces())
+
+    override bool enabled() { return hasCustomSpaces() || config.singleUseBattleSpaces; }
+
+    // The game draws the spaces from lists of each type's spaces, made when the board loads, so a space the plugin
+    // changes would still be drawn as it was: this draws them by their types as they are now instead (with Lucky
+    // Spaces and revealed hidden blocks as types of their own)
+    @ExecDone(0x800EAC70) void drawSpaces() {
+        if (!isBoardScene()) return;
+
+        if (gpr.s3 == Space.Type.BLUE && gpr.s2 == 0) {
+            foreach (ref list; spaceLists) list = null;
+            foreach (i; iota(data.spaceCount)) {
+                if (data.spaces[i].type == Space.Type.BLUE) {
+                    if (remainingTurns() <= config.revealHiddenBlocksOnRemainingTurns &&
+                       (i == data.itemHiddenBlock || i == data.coinHiddenBlock || i == data.starHiddenBlock)) {
+                        spaceLists[CustomSpace.HIDDEN] ~= cast(ubyte)i;
+                        continue;
+                    } else if (i < spaces.length && spaces[i] == CustomSpace.LUCKY) {
+                        spaceLists[CustomSpace.LUCKY] ~= cast(ubyte)i;
+                        continue;
+                    }
+                }
+
+                spaceLists[data.spaces[i].type] ~= cast(ubyte)i;
+            }
+        }
+
+        gpr.a0 = (gpr.s2 >= spaceLists[gpr.s3].length ? 0xFF : spaceLists[gpr.s3][gpr.s2]);
     }
 
-    override bool overrideItems(Player p, string[] names) {
-        Item[] items;
-        try {
-            items = names.map!(n => n.to!Item).array;
-        } catch (ConvException) {
-            return false;
-        }
-        if (items.canFind(Item.NONE)) return false;
+    @Exec(0x800EA6F4) void renderSpaces() { // Space render function
+        if (isBoardScene()) assignCustomSpaces();
+    }
+}
 
-        iota(3).each!(i => p.data.items[i] = (i < items.length ? items[i] : Item.NONE)); // The game keeps them packed
+// luckySpaceRatio: Lucky Spaces (blue spaces with more coins, an item, or Toad or Baby Bowser),
+// revealHiddenBlocksOnRemainingTurns: hidden blocks shown as gold spaces near the end; and standardSpaceRatio (see
+// CustomSpaces). The hidden blocks are never on Lucky Spaces.
+final class LuckySpaces : Feature!MarioParty3 {
+    Address luckySpaceTexture, goldSpaceTexture; // On the board's temp heap
+    string[] boardNames; // The boards' names, as the castle grounds show them (see currentBoardName())
+
+    override bool enabled() { return hasCustomSpaces(); }
+
+    @Write("data.currentScene") void boardNamesCleared(ref Scene scene) {
+        if (scene == Scene.CASTLE_GROUNDS) boardNames = null;
+    }
+
+    @Exec(0x800364A0) void readBoardNames() {
+        if (data.currentScene != Scene.CASTLE_GROUNDS) return;
+        if (!boardNames.empty) return;
+        auto result = searchMemory([0x0A4E6F74, 0x20626164, 0x20617420, 0x616C6C85, 0x19FF0000]); // "Not bad at all";
+        if (result.empty) return;
+        auto c = Ptr!char(result.front + 20);
+        for (auto i = 0; i < 12; i++) {
+            string boardName;
+            while (*c <= 0x1F) c++;
+            while (*c >= 0x20) boardName ~= *(c++);
+            boardNames ~= unformatText(boardName);
+        }
+    }
+
+    string currentBoardName() {
+        if (!isBoardScene()) return null;
+        int index;
+        if (data.currentScene <= Scene.WALUIGIS_ISLAND_BOARD) {
+            index = data.currentScene - Scene.CHILLY_WATERS_BOARD;
+        } else {
+            index = data.currentScene - Scene.GATE_GUY_BOARD + 6;
+        }
+        return index < boardNames.length ? boardNames[index] : "N/A";
+    }
+
+    bool lumasPlaygroundHiddenIndex(ushort index) {
+        if (currentBoardName() != "Luma's Playground") return false;
+        return index == 0xFFFF || index == 98 || index == 103 || index == 107;
+    }
+
+    bool validHiddenIndex(string exclude = null)(ushort index) {
+        if (lumasPlaygroundHiddenIndex(index)) return true;
+        if (index >= data.spaceCount) return false;
+        if (data.spaces[index].type != Space.Type.BLUE) return false;
+        if (index < spaces.length && spaces[index] == CustomSpace.LUCKY) return false;
+        static if (exclude != "item") {
+            if (index == data.itemHiddenBlock) return false;
+        }
+        static if (exclude != "coin") {
+            if (index == data.coinHiddenBlock) return false;
+        }
+        static if (exclude != "star") {
+            if (index == data.starHiddenBlock) return false;
+        }
         return true;
     }
 
-    override void addPlayerItems(Player player, ref JSONValue msg) {
-        Item[] items;
-        iota(3).filter!(i => player.data.items[i] != Item.NONE).each!(i => items ~= player.data.items[i]);
-        msg["items"] = items.toJSON();
-        msg["itemSlots"] = JSONValue(3);
+    ushort randomHiddenIndex() {
+        auto selection = iota(data.spaceCount).filter!(i => validHiddenIndex(i))
+                                              .filter!(i => !lumasPlaygroundHiddenIndex(i))
+                                              .array;
+        return selection.empty ? cast(ushort)0xFFFF : selection.choice(random);
     }
 
-    override void watchPlayerItems(Player p) {
-        iota(3).each!((j) {
-            p.data.items[j].onWrite((ref Item item) {
-                if (!isScoreScene(data.currentScene)) return;
-                if (item == p.data.items[j]) return;
+    @ExecDone(0x8003592C) void tempHeapMade() { // Finish making temp heap
+        if (!isBoardScene()) return;
+        auto ptr = mallocTemp(LUCKY_SPACE_TEXTURE.length + 0x10);
+        foreach (i, b; LUCKY_SPACE_TEXTURE) Ptr!ubyte(ptr + 0x10)[i] = b;
+        luckySpaceTexture = ptr;
+        if (config.revealHiddenBlocksOnRemainingTurns <= 0) return;
+        ptr = mallocTemp(GOLD_SPACE_TEXTURE.length + 0x10);
+        foreach (i, b; GOLD_SPACE_TEXTURE) Ptr!ubyte(ptr + 0x10)[i] = b;
+        goldSpaceTexture = ptr;
+    }
 
-                p.data.items[j] = item;
+    @Exec(0x800EA4F0) void highResMap() { // Force high res space textures on full map view
+        if (isBoardScene()) gpr.a0 = false;
+    }
 
-                sendPlayerInfo(p);
-            });
+    @ExecDone(0x800EA838, 0x800EA8AC, 0x800EA970, 0x800EAA3C) void selectSpaceTexture() {
+        if (!isBoardScene()) return;
+        switch (gpr.s3) {
+            case CustomSpace.LUCKY:  gpr.v0 = luckySpaceTexture; break;
+            case CustomSpace.HIDDEN: gpr.v0 = goldSpaceTexture;  break;
+            default:                                             break;
+        }
+    }
+
+    @Exec(0x800EADB8) void drawnTypes() {
+        if (isBoardScene()) gpr.v0 = (gpr.s3 <= CustomSpace.max);
+    }
+
+    @Exec(0x800EA6F4) void renderSpaces() { // Space render function (after CustomSpaces3's)
+        if (!isBoardScene()) return;
+        if (!validHiddenIndex!"item"(data.itemHiddenBlock)) data.itemHiddenBlock = randomHiddenIndex();
+        if (!validHiddenIndex!"coin"(data.coinHiddenBlock)) data.coinHiddenBlock = randomHiddenIndex();
+        if (!validHiddenIndex!"star"(data.starHiddenBlock)) data.starHiddenBlock = randomHiddenIndex();
+    }
+
+    bool onLuckySpace() {
+        return isBoardScene() && spaces[data.currentSpaceIndex] == CustomSpace.LUCKY &&
+               data.spaces[data.currentSpaceIndex].type == Space.Type.BLUE;
+    }
+
+    @Exec(0x800FD774) void countLuckySpace() { // Increment lucky space count
+        if (!onLuckySpace()) return;
+        gpr.v0--;
+        currentPlayer.state.luckySpaceCount++;
+    }
+
+    @Exec(0x800FE258) void luckySpaceItem() { // Trigger lucky space
+        if (onLuckySpace() && random.uniform01() < config.luckySpaceItemChance) gpr.v0 = Space.Type.ITEM;
+    }
+
+    @Exec("data.blueOrRedSpaceCoins.addr") void luckySpaceCoins() { // Give extra coins on lucky space
+        if (!onLuckySpace()) return;
+        switch (gpr.s0) {
+            case 3: gpr.s0 = [7, 10, 12, 15, 20].choice(random); break;
+            case 6: gpr.s0 =        [12, 15, 20].choice(random); break;
+            default: break;
+        }
+    }
+
+    @Exec(0x800FE478) void luckySpaceVisitor() { // Force Toad or Baby Bowser on lucky space
+        if (onLuckySpace()) gpr.v0 = uniform!"[]"(0, 1, random);
+    }
+
+    @Write("data.itemHiddenBlock") @Write("data.coinHiddenBlock") @Write("data.starHiddenBlock")
+    void hiddenBlockPlaced(ref ushort index) {
+        if (!isBoardScene()) return;
+        if (lumasPlaygroundHiddenIndex(index)) return;
+        index = randomHiddenIndex();
+    }
+}
+
+// luckySpaceRatio: the detailed results (the final results' Start screen) get a Lucky Spaces column after Blue Spaces.
+// The screen shows 4 of its 13 columns at a time (6 in widescreen; 0x801097B0 = the first one shown, 0x801097B4 = the
+// cursor in them), each with a header icon, each player's number (the top one in blue) and Toad's description of the
+// cursor's column. With the Lucky Spaces column there are 14: from Red Spaces on, column c is the game's column c - 1.
+// The Lucky Spaces column's icon is a 14th sprite, made from the Blue Spaces icon.
+final class LuckyResultsColumn : Feature!MarioParty3, MarioParty3.MessageChanger {
+    enum LUCKY = 5, COLUMNS = 14;
+    enum Address FIRST = 0x801097B0, CURSOR = 0x801097B4, ICONS = 0x801099EC; // ICONS: the icons' sprite group
+    short luckyIcon = -1;    // The Lucky Spaces icon's sprite animation
+    bool luckyDescription;   // The description being loaded is the Lucky Spaces column's (Blue's message, changed)
+
+    override bool enabled() { return config.luckySpaceRatio > 0; }
+
+    bool resultsScreen() { return data.currentScene == Scene.FINAL_RESULTS; }
+    static int column(int c) { return c < LUCKY ? c : c - 1; } // The game's column for column c (not LUCKY)
+    static int iconSprite(int c) { return c == LUCKY ? COLUMNS - 1 : column(c); }
+    int last() { return COLUMNS - (widescreen.changed(Scene.FINAL_RESULTS) ? 6 : 4); } // The first column shown at the end
+
+    // A player's number in column c >= LUCKY (the game's own columns from Red Spaces on are space counts)
+    int value(int player, int c) {
+        if (c == LUCKY) return players[player].state.luckySpaceCount;
+        immutable ubyte[] offsets = [0x2D, 0x2C, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34]; // Red, ?, !, ... Game Guy
+        return cast(byte)(0x800D1108 + player * 0x38 + offsets[column(c) - LUCKY]).val!ubyte;
+    }
+
+    // The icons: a sprite group of 14 instead of 13 (func_800F4528(count, ...))
+    @Exec(0x80108148) void iconGroup() {
+        if (resultsScreen() && gpr.a0 == 13) gpr.a0 = COLUMNS;
+    }
+
+    // Each icon's file is loaded, made a sprite animation (HuSprAnimRead), then freed (DataClose, a0 = s2). Before
+    // the Blue Spaces icon's (s3 = 4) is freed, its pixels and palette become the Lucky Spaces icon's, and it's
+    // made an animation again.
+    @Exec(0x80108194) void iconLoaded() {
+        if (!resultsScreen() || gpr.s3 != 4) return;
+        foreach (i, b; LUCKY_RESULTS_ICON[0..128]) (gpr.s2 + 0x2C + cast(uint)i).val!ubyte = b; // Pixels
+        foreach (i, b; LUCKY_RESULTS_ICON[128..$]) (gpr.s2 + 0xAC + cast(uint)i).val!ubyte = b; // Palette
+        luckyIcon = cast(short)callGame(0x80055810, gpr.s2);
+    }
+
+    // After the 13 icons, the 14th sprite gets the Lucky Spaces icon, set up like the others (func_80055024 sets a
+    // sprite's animation, func_80055294 its priority, func_800553A8 its attributes). Its animation goes in the
+    // group's list, which frees it with the group.
+    @Exec(0x80108208) void iconsMade() {
+        if (!resultsScreen() || luckyIcon < 0) return;
+        auto group = ICONS.val!uint;
+        auto id = (group + 10).val!short;
+        ((group + 12).val!uint + (COLUMNS - 1) * 2).val!short = luckyIcon;
+        callGame(0x80055024, id, COLUMNS - 1, luckyIcon, 0);
+        callGame(0x80055294, id, COLUMNS - 1, 80);
+        callGame(0x800553A8, id, COLUMNS - 1, 0xC000);
+        luckyIcon = -1;
+    }
+
+    // Showing the icons: all 14 are hidden, then the 4 shown are shown and positioned (a1 = the column's sprite)
+    @ExecDone(0x80107534) void iconsHidden() {
+        if (resultsScreen()) gpr.v0 = gpr.s3 < COLUMNS;
+    }
+
+    @Exec(0x80107568, 0x801075A0) void iconShown() {
+        if (resultsScreen()) gpr.a1 = iconSprite(cast(short)gpr.s0);
+    }
+
+    // The numbers: for column s3 and the player whose data is s0, the game picks the number (a2) and its digits
+    // (s1), then continues at 0x8010772C. Before that, it gets which players have the column's top number, shown in
+    // blue, from func_80106B94 (a bit for each place, from 1st; none if everyone has it).
+    @Exec(0x8010766C) void number() {
+        if (!resultsScreen() || cast(int)gpr.s3 < LUCKY) return;
+        gpr.a2 = value((gpr.s0 - 0x800D1108) / 0x38, cast(int)gpr.s3);
+        gpr.s1 = 2;
+        jump(0x8010772C);
+    }
+
+    @Exec(0x80107668) void topNumbers() { // Back from func_80106B94, with v0 = the bits
+        if (!resultsScreen() || cast(int)gpr.s3 < LUCKY) return;
+        auto c = cast(int)gpr.s3;
+        auto values = iota(4).map!(place => value(data.finalPlayerRankOrder[place], c)).array;
+        auto top = values.maxElement;
+        auto bits = iota(4).filter!(place => values[place] == top).map!(place => 1 << place).fold!"a | b"(0);
+        gpr.v0 = bits == 0b1111 ? 0 : bits;
+    }
+
+    // Scrolling: the first column shown goes up to 10 instead of 9 (moving right, 0x8010941C checks it's below 10,
+    // and 0x80109428 makes it 9 if not), and the right arrow hides at 10 (0x80108910 and 0x80109554 compare it
+    // with 9). In widescreen, 6 columns are shown: up to 8 instead of 7.
+    @ExecDone(0x8010941C) void scrollRight() {
+        if (resultsScreen()) gpr.v0 = FIRST.val!int < last() + 1;
+    }
+
+    @Exec(0x80109428, 0x80108910, 0x80109554) void lastColumn() {
+        if (resultsScreen()) gpr.v0 = last();
+    }
+
+    // Toad's description of the cursor's column (func_8005B43C, a1 = message 0x1900 + the game's column): the
+    // Lucky Spaces column shows the Blue Spaces message, changed as it's loaded
+    @Exec(0x801089E4) void description() {
+        if (!resultsScreen()) return;
+        auto c = FIRST.val!int + CURSOR.val!int;
+        luckyDescription = c == LUCKY;
+        if (c >= LUCKY) gpr.a1 = 0x1900 + (c == LUCKY ? 4 : column(c));
+    }
+
+    string changeMessage(ushort id, string text) {
+        if (id != 0x1904 || !luckyDescription) return text;
+        luckyDescription = false;
+        return text.replace("Blue Spaces", "Lucky Spaces");
+    }
+}
+
+// doubleCoinMiniGames: every 5th turn's mini-game gives twice the coins
+final class DoubleCoinMiniGames : Feature!MarioParty3 {
+    enum INTERVAL = 5;
+
+    override bool enabled() { return config.doubleCoinMiniGames; }
+
+    @ReadEach("players", "data.gameCoinsMain") @ReadEach("players", "data.gameCoinsExtra")
+    void doubleCoins(Player p, ref ushort amount) {
+        if (data.currentScene != Scene.MINI_GAME_RESULTS) return;
+        if ((data.currentTurn - 1) % INTERVAL == 0) amount *= 2;
+    }
+
+    @ExecDone(0x800FEF1C) void turnStarted() {
+        if (!isBoardScene()) return;
+        if (data.currentTurn % INTERVAL != 0) return;
+        showGlobalMessage("          Bonus Mini-Game!\n\n" ~
+                          "                 <YELLOW><COIN_OUTLINE> × 2<RESET>", 0x15);
+    }
+}
+
+// mpiqPermadeath: in MPIQ, a player who answers wrong can't answer again
+final class MpiqPermadeath : Feature!MarioParty3 {
+    override bool enabled() { return config.mpiqPermadeath; }
+
+    @Exec(0x8010B5B4) void jump() {
+        if (data.currentScene != Scene.MPIQ) return;
+
+        bool allNoJump = data.mpiqNoJump[0] && data.mpiqNoJump[1] &&
+                         data.mpiqNoJump[2] && data.mpiqNoJump[3];
+
+        if (gpr.v0 == 0 && !allNoJump) {
+            gpr.v0 = 1; // Prevent jumping
+        } else if (gpr.v0 == 1 && allNoJump) {
+            gpr.v0 = 0; // Allow jumping
+        }
+    }
+}
+
+// finalResultsDoNotProceed: the final results stay until someone presses A and Z together
+final class FinalResultsDoNotProceed : Feature!MarioParty3 {
+    override bool enabled() { return config.finalResultsDoNotProceed; }
+
+    @Exec(0x80109348) void proceed() {
+        if (data.currentScene != Scene.FINAL_RESULTS) return;
+        gpr.v0 = input[0..$].map!(i => i.buttons << 8)
+                            .canFind!(b => (b & Button.A) && (b & Button.Z));
+    }
+}
+
+// improveLastFiveTurnsBonus: the Last Five Turns event's bonus is never Baby Bowser or Whomp, and its present is 10 to
+// 30 coins
+final class LastFiveTurnsBonus : Feature!MarioParty3, MarioParty3.MessageChanger {
+    int bonus = 20; // The present's coins
+
+    override bool enabled() { return config.improveLastFiveTurnsBonus; }
+
+    @Exec(0x80107260, 0x80106A80) void noBabyBowserOrWhomp() { // Prevent Baby Bowser, Prevent Whomp
+        if (data.currentScene == Scene.LAST_FIVE_TURNS) gpr.v0 = 1;
+    }
+
+    @Exec(0x80106ED4) void choosePrize() { // Choose prize amount
+        if (data.currentScene == Scene.LAST_FIVE_TURNS) bonus = [10, 20, 20, 20, 30, 30].choice(random);
+    }
+
+    @ExecDone(0x80106EF4) void applyPrize() { // Apply prize amount
+        if (data.currentScene == Scene.LAST_FIVE_TURNS) gpr.a1 = bonus;
+    }
+
+    // Last Five Turns: the present for the predicted winner
+    string changeMessage(ushort id, string text) {
+        if (id != 0x4308 || data.currentScene != Scene.LAST_FIVE_TURNS) return text;
+        return windowText("And to <1>, our predicted\nwinner, we award a\npresent of <YELLOW><OUTLINE>" ~ bonus.to!string ~ " coins<NO_OUTLINE><RESET><YELLOW>!");
+    }
+}
+
+// singleUseBattleSpaces: a Battle Space becomes a Blue Space once its battle is played (a custom space: see
+// CustomSpaces3)
+final class SingleUseBattleSpaces : Feature!MarioParty3 {
+    override bool enabled() { return config.singleUseBattleSpaces; }
+
+    @Exec("data.battleRoutineComplete.addr") void battleDone() {
+        if (!isBoardScene()) return;
+        if (!gpr.v0) return; // Battle cancelled
+        auto index = data.currentSpaceIndex;
+        if (index >= spaces.length || index >= data.spaceCount) return;
+        spaces[index] = CustomSpace.BLUE;
+        data.spaces[index].type = Space.Type.BLUE;
+    }
+}
+
+// unlockEverything: every mini-game, Super Hard and Waluigi's Island (not actually everything yet)
+final class UnlockEverything : Feature!MarioParty3 {
+    override bool enabled() { return config.unlockEverything; }
+
+    @ExecDone(0x80035C00) void miniGames() { // Mini-Games (800CC0DE - 800CC0E5)
+        gpr.a0 |= 0xFF;
+    }
+
+    // Super Hard and Waluigi's Island are bits in the save's flags (GwCommon.flag[5] and [6]), which are made
+    // to read as set. Not for the code that changes other flags in those bytes (_SetFlag and _ClearFlag read,
+    // change and write back the whole byte) or that writes the save (the saveEncode and saveload code), so the
+    // unlocks never become part of the save.
+    override void setUp() {
+        hookRead!superHard(0x800CC158.val!ubyte);
+        hookRead!waluigisIsland(0x800CC159.val!ubyte);
+    }
+
+    static bool keepsSave(Address pc) {
+        return (pc >= 0x80035EF4 && pc < 0x80035F98)  // _SetFlag, _ClearFlag
+            || (pc >= 0x8004F290 && pc < 0x80050F50); // saveEncode, saveload
+    }
+
+    void superHard(ref ubyte flags, Address pc) { if (!keepsSave(pc)) flags |= 0x20; }
+    void waluigisIsland(ref ubyte flags, Address pc) { if (!keepsSave(pc)) flags |= 0x02; }
+}
+
+// increaseItemGameVariety: the item mini-games have 5 random common items
+final class ItemGameVariety : Feature!MarioParty3 {
+    override bool enabled() { return config.increaseItemGameVariety; }
+
+    void populateHelpScreen() {
+        iota(5).map!(i => cast(Item)data.itemMiniGameItems[i])
+               .array.sort!((a, b) => a.to!string < b.to!string)
+               .each!((i, item) => data.itemMiniGameHelpScreenItems[3*i%5] = item);
+    }
+
+    @Exec(0x80106CE8) void chooseItems() {
+        if (data.currentScene != Scene.MINI_GAME_RULES) return;
+
+        [EnumMembers!Item].filter!(item => item.isCommon)
+                          .array.randomShuffle(random).take(5)
+                          .each!((i, item) => data.itemMiniGameItems[i] = item);
+
+        populateHelpScreen();
+    }
+
+    @Exec(0x80106E90) void helpScreen() {
+        if (data.currentScene == Scene.MINI_GAME_RULES) populateHelpScreen();
+    }
+}
+
+// increaseItemShopVariety: an item shop sometimes sells another game phase's or rank's items
+final class ItemShopVariety : Feature!MarioParty3 {
+    int phase = -1; // The game phase and the player's rank the shop's items are for (picked once per visit)
+    int rank  = -1;
+
+    override bool enabled() { return config.increaseItemShopVariety; }
+
+    @Read("data.currentTurn") void shopOpening(ref ubyte turn, Address pc) {
+        if (!isBoardScene()) return;
+        if ((pc + 32).val!Instruction != 0x0C03B164) return; // Not item shop
+
+        phase = -1;
+        rank  = -1;
+    }
+
+    @Exec(0x800EEA50) void shopItems() { // Return player rank
+        if (!isBoardScene()) return;
+
+        if ((gpr.ra + 12).val!Instruction != 0x00041840) return; // Not item shop
+        if ((gpr.ra + 16).val!Instruction != 0x00641821) return; // Not item shop
+        if ((gpr.ra + 20).val!Instruction != 0x00031880) return; // Not item shop
+        if ((gpr.ra + 24).val!Instruction != 0x00651821) return; // Not item shop
+
+        if (phase == -1 && rank == -1) {
+            phase = gpr.s1;
+            rank  = gpr.v0;
+
+            if (uniform!"[]"(1, 3, random) == 1) {
+                switch (phase) {
+                    case GamePhase.EARLY: phase = GamePhase.MID;                                   break;
+                    case GamePhase.MID:   phase = [GamePhase.EARLY, GamePhase.END].choice(random); break;
+                    case GamePhase.END:   phase = GamePhase.MID;                                   break;
+                    default:                                                                       break;
+                }
+            }
+
+            if (uniform!"[]"(1, 3, random) == 1) {
+                switch (phase) {
+                    case GamePhase.MID: rank = [0, 1]   .remove(min(rank, 1)).choice(random); break;
+                    case GamePhase.END: rank = [0, 1, 2].remove(min(rank, 2)).choice(random); break;
+                    default:                                                                  break;
+                }
+            }
+        }
+
+        gpr.s1 = phase;
+        gpr.v0 = rank;
+    }
+}
+
+// toadShopChance: how often a shop is Toad's (rather than Baby Bowser's)
+final class ToadShopChance : Feature!MarioParty3 {
+    Address[][Scene] shopTypeAddress; // Where each board's code decides (by its code)
+
+    override bool enabled() { return config.toadShopChance >= 0; }
+
+    @Exec(0x800ECEDC) void shopChance() { // return RNGPercentChance
+        if (!isBoardScene()) return;
+        if (data.currentScene !in shopTypeAddress) {
+            shopTypeAddress[data.currentScene] = searchMemory([0x0C03B3A7, 0x24040042, 0x00021400, 0x2C420001]);
+        }
+        if (shopTypeAddress[data.currentScene].canFind(gpr.ra - 8)) {
+            gpr.v0 = random.uniform01() < config.toadShopChance;
+        }
+    }
+}
+
+// replaceWackyWatchBeforeRemainingTurns: a Wacky Watch before then is another rare item
+final class NoEarlyWackyWatch : Feature!MarioParty3 {
+    @WriteEach("players", "data.items[0]") @WriteEach("players", "data.items[1]") @WriteEach("players", "data.items[2]")
+    void itemWritten(Player p, ref Item item) {
+        if (remainingTurns() <= config.replaceWackyWatchBeforeRemainingTurns) return;
+        if (item == Item.WACKY_WATCH) item = [Item.KOOPA_KARD, Item.BARTER_BOX, Item.LUCKY_CHARM].choice(random);
+    }
+}
+
+// autoStartNextBoard: after the final results, the next board starts (with the same players and settings)
+final class AutoStartNextBoard : Feature!MarioParty3 {
+    override bool enabled() { return config.autoStartNextBoard; }
+
+    @Exec(0x80048228) void nextScene() {
+        if (gpr.a0 != Scene.TRANSITION || data.currentScene != Scene.FINAL_RESULTS) return;
+        gpr.a0 = Scene.CHILLY_WATERS_BOARD + (data.currentBoard + 1) % 6;
+        gpr.a1 = 0;
+
+        iota(4).each!((i) {
+            data.players[i].coins = 0;
+            data.players[i].stars = 0;
+            iota(3).each!(j => data.players[i].items[j] = Item.NONE);
+            data.players[i].miniGameCoins = 0;
+            data.players[i].maxCoins = 0;
+            data.players[i].happeningSpaces = 0;
+            data.players[i].redSpaces = 0;
+            data.players[i].blueSpaces = 0;
+            data.players[i].chanceSpaces = 0;
+            data.players[i].bowserSpaces = 0;
+            data.players[i].battleSpaces = 0;
+            data.players[i].itemSpaces = 0;
+            data.players[i].bankSpaces = 0;
+            data.players[i].gameGuySpaces = 0;
         });
+    }
+}
+
+// balanceSuperHardCPU: Super Hard computers play some mini-games at a lower level, and computers teamed with a human
+// play like a computer's partner
+final class BalanceSuperHardCPU : Feature!MarioParty3 {
+    override bool enabled() { return config.balanceSuperHardCPU; }
+
+    @ReadEach("players", "data.cpuDifficulty") void difficultyRead(Player p, ref ubyte difficulty) {
+        if (difficulty != CPUDifficulty.SUPER_HARD) return;
+
+        switch (data.currentScene) {
+            case Scene.TOADSTOOL_TITAN:
+                difficulty = CPUDifficulty.NORMAL;
+                break;
+
+            case Scene.BABY_BOWSER_BROADSIDE:
+            case Scene.HYPER_HYDRANTS:
+            case Scene.THE_BEAT_GOES_ON:
+            case Scene.CHEEP_CHEEP_CHASE:
+            case Scene.POPGUN_PICK_OFF:
+            case Scene.BOWSER_TOSS:
+            case Scene.SILLY_SCREWS:
+                difficulty = CPUDifficulty.HARD;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    // In Log Jam, a computer only presses a wrong button if its teammate is a computer too: its two press
+    // decisions check the teammate's computer flag (0x1E in the teammate's Log Jam data), so a human's
+    // partner never makes a mistake. Make the check read as a computer, so it plays like a computer's partner.
+    @ExecDone(0x8010896C, 0x80108BCC) void logJamPartner() {
+        if (data.currentScene == Scene.LOG_JAM) gpr.v0 = 1;
+    }
+
+    // In Slot Synch, a computer teamed with a human ignores its level: it never misses, and stops on whatever
+    // symbol the human stopped on, even -1. Make it play like a computer's partner (its level sets how long it
+    // waits and its chance to miss), aiming for +3, or for the human's symbol once the human has stopped,
+    // unless that's -1 (then it stays off -1, so the round scores nothing instead of -1).
+    // Each player's Slot Synch data (s1, and the teammate's in s2): 0x00 reel, 0x22 computer flag, 0x2C the
+    // symbol it aims for (0: +3, 1: +1, 2: +2, 3: -1).
+    bool humanPartner() { return data.currentScene == Scene.SLOT_SYNCH && (gpr.s2 + 0x22).val!short == 0; }
+
+    int partnerSymbol() { // The symbol the teammate's reel stopped on, or -1 while it's spinning
+        Address reel = 0x8010DF7C.val!uint + (gpr.s2 + 0x00).val!short * 0x3C;
+        if ((reel + 0x0C).val!short != 0) return -1;
+        auto angle = (reel + 0x30).val!float + 45;
+        if (angle > 360) angle -= 360; else if (angle < 0) angle += 360;
+        return cast(int)(0x8010D854 + (reel + 0x03).val!ubyte * 4 + cast(int)(angle / 90)).val!ubyte;
+    }
+
+    @ExecDone(0x801071DC) void slotSynchRound() { if (humanPartner()) gpr.v0 = 1; } // Round setup: take the computer-partner path
+    @ExecDone(0x801073AC) void slotSynchTeamSymbol() { if (humanPartner()) gpr.v0 = 0; } // The symbol it picks for the team: +3
+    @ExecDone(0x80107500) void slotSynchNoCopy() { if (humanPartner()) gpr.v0 = 1; } // Don't wait to copy the human
+
+    @Exec(0x8010746C) void slotSynchAim() { // Before deciding whether to stop: aim for the human's symbol, unless it's -1
+        if (!humanPartner()) return;
+        auto symbol = partnerSymbol();
+        if (symbol >= 0) (gpr.s1 + 0x2C).val!short = cast(short)(symbol == 3 ? 0 : symbol);
+    }
+
+    @Exec(0x801074D4) void slotSynchMiss() { // A miss stops on a symbol other than the one it aims for: not on the human's -1 either
+        if (humanPartner() && gpr.v0 == 3 && partnerSymbol() == 3) gpr.v1 = 3;
+    }
+}
+
+// chanceSwapInsteadOfTransfer: Chance Time's "all coins" and "all stars" swap the two players' coins or stars
+final class ChanceSwap : Feature!MarioParty3, MarioParty3.MessageChanger {
+    override bool enabled() { return config.chanceSwapInsteadOfTransfer; }
+
+    Player chancePlayer(Character c) { return players.find!(p => p.data.character == c).front; }
+
+    @ExecDone(0x8010D5FC) void outcome() { // Write chance outcome
+        if (data.currentScene != Scene.CHANCE_TIME) return;
+        if (data.chanceCharacter1 == -1) return;
+        if (data.chanceCharacter2 == -1) return;
+        if (data.chancePrize      == -1) return;
+
+        auto p1 = chancePlayer(data.chanceCharacter1);
+        auto p2 = chancePlayer(data.chanceCharacter2);
+
+        switch (data.chancePrize) {
+            case ChancePrize.COINS_ALL:
+                if (p1.data.coins < p2.data.coins) {
+                    data.chanceCharacter1 = p2.data.character;
+                    data.chanceCharacter2 = p1.data.character;
+                }
+                break;
+
+            case ChancePrize.STARS_ALL:
+                if (p1.data.stars < p2.data.stars) {
+                    data.chanceCharacter1 = p2.data.character;
+                    data.chanceCharacter2 = p1.data.character;
+                }
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    @ExecDone(0x8010FA4C) void coinsTransfer() { // Check if coins will transfer
+        if (data.currentScene != Scene.CHANCE_TIME) return;
+        if (data.chancePrize != ChancePrize.COINS_ALL) return;
+        gpr.v0 = chancePlayer(data.chanceCharacter1).data.coins - chancePlayer(data.chanceCharacter2).data.coins;
+    }
+
+    @ExecDone(0x8010FA80) void starsTransfer() { // Check if stars will transfer
+        if (data.currentScene != Scene.CHANCE_TIME) return;
+        if (data.chancePrize != ChancePrize.STARS_ALL) return;
+        gpr.v0 = chancePlayer(data.chanceCharacter1).data.stars - chancePlayer(data.chanceCharacter2).data.stars;
+    }
+
+    @ExecDone(0x8010E650) void coinsAmount() { // Determine coin transfer amount
+        if (data.currentScene != Scene.CHANCE_TIME) return;
+        if (data.chancePrize != ChancePrize.COINS_ALL) return;
+        gpr.v0 = data.players[data.chancePlayer1].coins - data.players[data.chancePlayer2].coins;
+    }
+
+    @ExecDone(0x8010E684) void starsAmount() { // Determine star transfer amount
+        if (data.currentScene != Scene.CHANCE_TIME) return;
+        if (data.chancePrize != ChancePrize.STARS_ALL) return;
+        gpr.v0 = data.players[data.chancePlayer1].stars - data.players[data.chancePlayer2].stars;
+    }
+
+    // Chance Time: swaps instead of "all coins/stars" transfers
+    string changeMessage(ushort id, string text) {
+        if (data.currentScene != Scene.CHANCE_TIME ||
+            (data.chancePrize != ChancePrize.COINS_ALL && data.chancePrize != ChancePrize.STARS_ALL)) return text;
+        enum SAME = "Both players have the\n<YELLOW><OUTLINE>same number<NO_OUTLINE><RESET> of ";
+        switch (id) {
+            case 0x1B0C: return windowText("The results are in!<RESET><END><CLEAR>Wow! <GREEN><1><RESET> swaps\n<YELLOW><OUTLINE>coins<NO_OUTLINE><RESET> with <GREEN><2><RESET>!");
+            case 0x1B0E: return windowText("The results are in!<RESET><END><CLEAR>Wow! <GREEN><1><RESET> swaps\n<YELLOW><OUTLINE>stars<NO_OUTLINE><RESET> with <GREEN><2><RESET>!" ~
+                                           "<RESET><END><CLEAR>This is amazing!\nA complete turnaround!\n");
+            case 0x1B0B: return windowText("...Whoa! Bad news!<RESET><END><CLEAR>" ~ SAME ~ "stars.\nWhat a pity.");
+            case 0x1B0D: return windowText("...Oh my goodness!<RESET><END><CLEAR>" ~ SAME ~ "coins.\nUnbelievable!");
+            case 0x1B0F: return windowText("...Whoa! Bad news!<RESET><END><CLEAR>" ~ SAME ~ "stars.\nHow disappointing.");
+            default:     return text;
+        }
+    }
+}
+
+// chancePrizeReplace: Chance Time's prizes replaced by others
+final class ChancePrizeReplace : Feature!MarioParty3 {
+    override bool enabled() { return !config.chancePrizeReplace.empty; }
+
+    @ExecDone(0x8010D190) void prize() {
+        if (data.currentScene != Scene.CHANCE_TIME) return;
+        auto replacement = cast(ChancePrize)gpr.v0 in config.chancePrizeReplace;
+        if (replacement) gpr.v0 = *replacement;
+    }
+}
+
+// battleCoinDistribution: how a battle's pot is shared by rank
+final class BattleCoinDistribution : Feature!MarioParty3 {
+    override bool enabled() { return config.battleCoinDistribution != DEFAULT_BATTLE_DIST; }
+
+    @Exec(0x80105BCC) void distribute() {
+        if (data.currentScene != Scene.BATTLE_GAME_RESULTS) return;
+
+        auto rankCounts = [0, 0, 0, 0];
+        players.each!(p => rankCounts[p.data.battleRank]++);
+
+        auto rankDist = [0.0, 0.0, 0.0, 0.0];
+        size_t r = 0;
+        config.battleCoinDistribution.each!((i, e) {
+            if (rankCounts[i]) r = i;
+            rankDist[r] += e;
+        });
+
+        rankDist.each!((i, ref e) {
+            if (rankCounts[i]) e /= rankCounts[i];
+        });
+
+        auto dist = players.map!(p => rankDist[p.data.battleRank]).array;
+        auto coins = apportion(data.battleCoinTotal, dist);
+        coins.each!((i, c) => players[i].data.battleCoins = cast(ushort)c);
+        data.battlePityCoins = data.battleCoinTotal - cast(ushort)coins.sum;
+    }
+}
+
+// Chance Time picks its two players by character, so with two players of the same character it could pick the wrong
+// one, or the same player twice. It finds each player by the character (v0) at 0x8010E308 (a1: which one): this
+// picks a player with that character who isn't the other one instead, and the game uses those players after it.
+final class ChanceTimeFix3 : Feature!MarioParty3 {
+    @Exec(0x8010E308) void pick() {
+        if (data.currentScene != Scene.CHANCE_TIME) return;
+
+        if (gpr.a1 == 0) {
+            data.chancePlayer1 = players.filter!(p => p.data.character == gpr.v0)
+                                        .filter!(p => p.index != data.chancePlayer2)
+                                        .array.choice(random).index;
+        } else {
+            data.chancePlayer2 = players.filter!(p => p.data.character == gpr.v0)
+                                        .filter!(p => p.index != data.chancePlayer1)
+                                        .array.choice(random).index;
+        }
+
+        gpr.a0 = (gpr.a1 == 0 ? data.chancePlayer1 : data.chancePlayer2);
+    }
+
+    @Exec(0x8010F9DC) void player() {
+        if (data.currentScene == Scene.CHANCE_TIME) gpr.a0 = (gpr.a2 == 0 ? data.chancePlayer1 : data.chancePlayer2);
+    }
+
+    @Exec(0x8010E568) void playerToo() {
+        if (data.currentScene == Scene.CHANCE_TIME) gpr.a0 = (gpr.s2 == 0 ? data.chancePlayer1 : data.chancePlayer2);
+    }
+}
+
+final class PlayerInfo3 : PlayerInfo!MarioParty3 {
+    @WriteEach("players", "data.items[0]") @WriteEach("players", "data.items[1]") @WriteEach("players", "data.items[2]")
+    void itemChanged(Player p, ref Item item, Address pc, Address address) {
+        if (!isScoreScene() || item == address.val!Item) return;
+        address.val!Item = item;
+        sendPlayerInfo(p);
     }
 }
 
@@ -2633,11 +2628,10 @@ extern (C) {
     int startup() {
         version (TestDriver) {
             import me.timz.n64.mp3test : TestMarioParty3;
-            pluginFactory = (name, hash) => new TestMarioParty3(name, hash); // The test build (test/mp3test.d)
+            usePlugin!(TestMarioParty3, MarioParty3); // The test build (test/mp3test.d)
         } else {
-            pluginFactory = (name, hash) => new MarioParty3(name, hash);
+            usePlugin!MarioParty3();
         }
-
         return 0;
     }
 }
@@ -3314,7 +3308,10 @@ static assert(LUCKY_SPACE_TEXTURE.length == 32 * 32 * 4);
 immutable ubyte[] LUCKY_RESULTS_ICON = cast(immutable(ubyte)[])import("mp3-lucky-results-icon.ci4");
 static assert(LUCKY_RESULTS_ICON.length == 128 + 32);
 
-// The gold space (a revealed Hidden Block) texture: 32x32 pixels, 4 bytes each (red, green, blue, alpha), from textures/mp3-gold-space.rgba
+// The gold space (a revealed Hidden Block) texture: 32x32 pixels, 4 bytes each (red, green, blue, alpha), from
+// textures/mp3-gold-space.rgba
 immutable ubyte[] GOLD_SPACE_TEXTURE = cast(immutable(ubyte)[])import("mp3-gold-space.rgba");
 static assert(GOLD_SPACE_TEXTURE.length == 32 * 32 * 4);
 
+
+mixin NoMutableGlobals;

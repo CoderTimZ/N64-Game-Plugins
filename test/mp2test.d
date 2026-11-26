@@ -39,9 +39,10 @@ class TestMarioParty2 : MarioParty2 {
     }
 
     // Tests never connect to a Bingo page, whatever the config says
-    override void loadConfig() {
-        super.loadConfig();
-        config.bingoURL = "";
+    override Config readConfig() {
+        auto c = super.readConfig();
+        c.bingoURL = "";
+        return c;
     }
 
     override void onStart() {
@@ -50,8 +51,8 @@ class TestMarioParty2 : MarioParty2 {
         clampForcedRolls();
     }
 
-    override void onFrame(ulong frame) {
-        super.onFrame(frame);
+    override void onFrame() {
+        super.onFrame();
         checkTeams();
         driver.onFrame();
     }
@@ -66,7 +67,7 @@ class TestMarioParty2 : MarioParty2 {
 
     // Loads a state and sets the players up for the tests: computers (unless allCPU is false), the same coins and stars
     // within each team, and the turns
-    void setUp(string stateFile, ushort currentTurn = 0, ushort totalTurns = 0, bool allCPU = true) {
+    void setUpTest(string stateFile, ushort currentTurn = 0, ushort totalTurns = 0, bool allCPU = true) {
         watchTeams = false;
         d.loadEmulatorState(stateFile);
         if (allCPU) players.each!(p => p.data.flags = p.data.flags | 1);
@@ -318,7 +319,7 @@ class TestMarioParty2 : MarioParty2 {
                     int[2][] at;
                     foreach (c; 0..chainCount) foreach (k; 0..chainLength(c)) if (chainSpace(c, k) == sp) at ~= [c, k];
                     d.note("Space ", sp, ": ", data.spaces[sp].type,
-                           i < state.spaces.length ? ", custom " ~ state.spaces[i].to!string : "", ", at ", at);
+                           i < spaces.length ? ", custom " ~ spaces[i].to!string : "", ", at ", at);
                 }
             } else if (step.startsWith("coins:") || step.startsWith("stars:")) {
                 auto values = step[6..$].split(",").map!(v => v.to!ushort).array;
@@ -358,7 +359,6 @@ class TestMarioParty2 : MarioParty2 {
                 d.note("Human: ", describe());
             } else if (step.startsWith("lucky:")) { // lucky:<P1>,<P2>,<P3>,<P4>: each player's Lucky Space count
                 foreach (i, v; step[6..$].split(",").map!(v => v.to!int).array) players[i].state.luckySpaceCount = v;
-                saveState();
                 d.note("Lucky Space counts: ", players.map!(p => p.state.luckySpaceCount));
             } else if (step == "dumpresults") { // Dumps the detailed results' icon files and logs their messages
                 0x80103F5C.onExec({ // DataClose(a0 = s3): the icon file s4 was just made a sprite animation
@@ -414,7 +414,7 @@ class TestMarioParty2 : MarioParty2 {
 
     // The test setup works: a state loads, the game runs, memory reads make sense, and screenshots are taken
     void smoke() {
-        setUp(STATE_WESTERN_TURN_1);
+        setUpTest(STATE_WESTERN_TURN_1);
         d.check(isBoardScene(), "Not on a board after loading the state");
         d.check(chainCount > 0 && data.spaceCount > 0, "No board spaces");
         d.note(data.spaceCount, " spaces in ", chainCount, " chains; P1 on space ", spaceOf(players[0]));
@@ -429,8 +429,8 @@ class TestMarioParty2 : MarioParty2 {
     void revealHiddenBlocks() {
         d.check(config.revealHiddenBlocksOnRemainingTurns == 1 && config.luckySpaceRatio > 0,
                 "Needs test/mp2-config-reveal.json");
-        setUp(STATE_WESTERN_TURN_1, 1, 20);
-        d.waitUntil(() => isBoardScene() && chainCount > 0 && state.spaces.length == data.spaceCount, "the board's spaces",
+        setUpTest(STATE_WESTERN_TURN_1, 1, 20);
+        d.waitUntil(() => isBoardScene() && chainCount > 0 && spaces.length == data.spaceCount, "the board's spaces",
                     60 * 60);
         d.wait(30);
         d.note("Hidden Blocks ", hiddenBlocksSetting() ? "on" : "off", " in the state; Coin block on space ",
@@ -456,7 +456,7 @@ class TestMarioParty2 : MarioParty2 {
             return gold;
         }
 
-        bool lucky(short i) { return i >= 0 && i < state.spaces.length && state.spaces[i] == CustomSpace.LUCKY; }
+        bool lucky(short i) { return i >= 0 && isLucky(i); }
         bool blue(short i) { return i >= 0 && i < data.spaceCount && data.spaces[i].type == Space.Type.BLUE; }
         auto luckySpaces = iota(data.spaceCount).map!(i => cast(short)i).filter!(i => lucky(i)).array;
         d.check(luckySpaces.length >= 2, "Fewer than 2 Lucky Spaces");
@@ -525,7 +525,7 @@ class TestMarioParty2 : MarioParty2 {
         d.note("P1's teammate is P", teammate.index + 1, ", and P", opponent.index + 1, " is an opponent");
 
         foreach (withOpponent; [true, false]) {
-            setUp(STATE_WESTERN_TURN_1);
+            setUpTest(STATE_WESTERN_TURN_1);
             d.waitUntil(() => isBoardScene() && chainCount > 0, "the board", 60 * 60);
             d.wait(30); // The board's chains are filled in just after they're allocated
             auto target = reachableSpaces(Space.Type.BLUE).front;
@@ -630,7 +630,7 @@ class TestMarioParty2 : MarioParty2 {
         string[] problems;
         MiniGame[] items, duels;
 
-        setUp(STATE_WESTERN_TURN_1);
+        setUpTest(STATE_WESTERN_TURN_1);
         waitForTurnPressing(0);
         foreach (g; DUEL_MINI_GAMES ~ ITEM_MINI_GAMES) lock(g);
         auto itemSpaces = reachableSpaces(Space.Type.ITEM);
@@ -648,6 +648,9 @@ class TestMarioParty2 : MarioParty2 {
                 moveOnto(players[(player + 1) % 4], blueSpaces[0]);
                 forceLanding(p, blueSpaces[0]);
             } else {
+                // (nobody else on the Item Space: with alwaysDuel, landing with another player there is a duel too,
+                // which would take a board from the duels' queue)
+                foreach (q; players) if (q !is p && spaceOf(q) == itemSpaces[0]) moveOnto(q, blueSpaces[$ - 1]);
                 forceLanding(p, itemSpaces[0]);
             }
             auto scenes = playTurn(player);
