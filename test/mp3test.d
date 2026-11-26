@@ -354,11 +354,19 @@ class TestMarioParty3 : MarioParty3 {
                                   "LEFT": Pad.LEFT, "RIGHT": Pad.RIGHT, "L": Pad.L, "R": Pad.R, "CUP": Pad.C_UP,
                                   "CDOWN": Pad.C_DOWN, "CLEFT": Pad.C_LEFT, "CRIGHT": Pad.C_RIGHT];
         auto scene = data.currentScene;
+        int[] bluePlayers; // pairs:<player>,<player>: on the board, these players' spaces are held blue, the others' red
         void watch(ulong frames) {
             foreach (i; 0..frames) {
                 if (data.currentScene != scene) {
                     d.note("Scene ", scene, " -> ", data.currentScene);
                     scene = data.currentScene;
+                }
+                if (!bluePlayers.empty && isBoardScene()) {
+                    foreach (p; players) {
+                        auto color = bluePlayers.canFind(p.index + 1) ? PanelColor.BLUE : PanelColor.RED;
+                        p.data.color = color;
+                        p.panel.color = color;
+                    }
                 }
                 d.wait();
             }
@@ -414,6 +422,18 @@ class TestMarioParty3 : MarioParty3 {
                 }
                 d.release(0);
                 d.note("Reached ", target, ": ", describe());
+            } else if (step == "allocs") { // Logs each HuMemMemoryAlloc(heap, size) off the board: caller and result
+                0x800360F0.onExec({
+                    if (isBoardScene()) return;
+                    auto heap = cast(uint)gpr.a0, size = cast(uint)gpr.a1, caller = cast(uint)gpr.ra;
+                    Address ret = gpr.ra;
+                    ret.onExecOnce({
+                        d.note(format("Alloc in %s: heap %08X size %X from %08X -> %08X", data.currentScene, heap,
+                                      size, caller, cast(uint)gpr.v0));
+                    });
+                });
+            } else if (step.startsWith("pairs:")) { // pairs:<player>,<player>: holds 2 vs 2 colors (see watch())
+                bluePlayers = step[6..$].split(",").map!(v => v.to!int).array;
             } else if (step.startsWith("human:")) { // human:<player>: makes a player (1-4) human
                 auto p = players[step[6..$].to!int - 1];
                 p.data.flags = p.data.flags & ~1;

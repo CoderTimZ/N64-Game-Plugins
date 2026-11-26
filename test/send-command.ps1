@@ -15,11 +15,19 @@ param(
 $ErrorActionPreference = "Stop"
 $log = Join-Path $Rmg (Get-Content "$Rmg\TestCommands\$Game-log.txt" -Raw).Trim()
 $id = [guid]::NewGuid().ToString("N").Substring(0, 8)
+function Test-RmgRunning { [bool](Get-Process | Where-Object { $_.Path -like "$Rmg\*" }) }
+
+# Nothing to send to. A quit is already done; don't leave it behind for the next RMG to read.
+if (-not (Test-RmgRunning)) {
+    if ($Steps.Trim() -eq "quit") { exit 0 }
+    Write-Host "STALLED: RMG isn't running"
+    exit 1
+}
 
 # RMG may still be starting: wait for the serve test to say it's ready
 $deadline = (Get-Date).AddSeconds(60)
 while (-not ((Test-Path $log) -and (Select-String -Path $log -Pattern "READY" -Quiet))) {
-    if ((Get-Date) -gt $deadline) { throw "RMG isn't serving (no READY in $log)" }
+    if ((Get-Date) -gt $deadline -or -not (Test-RmgRunning)) { throw "RMG isn't serving (no READY in $log)" }
     Start-Sleep -Milliseconds 250
 }
 $before = @(Get-Content $log).Count
@@ -37,7 +45,8 @@ while ((Get-Date) -lt $deadline) {
     # The emulator stalled or crashed: no frames for 15 seconds, or RMG isn't running
     $beat = if (Test-Path $heartbeat) { (Get-Item $heartbeat).LastWriteTime } else { $sent }
     if ($beat -lt $sent) { $beat = $sent } # A heartbeat from before this command (RMG may still be starting)
-    $running = Get-Process | Where-Object { $_.Path -like "$Rmg\*" }
+    $running = Test-RmgRunning
+    if ($Steps.Trim() -eq "quit" -and -not $running) { break }
     if ($Steps.Trim() -ne "quit" -and (((Get-Date) - $beat).TotalSeconds -gt 15 -or -not $running)) { $stalled = $true; break }
     Start-Sleep -Milliseconds 250
 }
