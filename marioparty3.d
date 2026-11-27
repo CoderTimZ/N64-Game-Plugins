@@ -1320,9 +1320,11 @@ final class BingoNames : Feature!MarioParty3, MarioParty3.MessageChanger {
         return text;
     }
 
-    // Whether a message inserts arguments (<1>-<5>: codes 0x11-0x15)
+    // Whether a message inserts arguments (<1>-<5>: codes 0x11-0x15). Byte by byte: game text isn't UTF-8, so
+    // anything that decodes it (like std.algorithm on a string) throws.
     static bool hasArgs(string text) {
-        return text.any!(c => c >= '\x11' && c <= '\x15');
+        foreach (char c; text) if (c >= '\x11' && c <= '\x15') return true;
+        return false;
     }
 
     // The arguments a message shows dark (bit n: <n + 1>): ones it puts right after color 1, as menus do for players

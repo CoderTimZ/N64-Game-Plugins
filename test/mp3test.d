@@ -223,6 +223,7 @@ class TestMarioParty3 : MarioParty3 {
             Test("slotSynchHumanPartner", &slotSynchHumanPartner, 60 * 60 * 40),
             Test("frigidBridgesFps", &frigidBridgesFps, 60 * 60 * 20),
             Test("saveStateInCall", &saveStateInCall, 60 * 60 * 20),
+            Test("gameTextNotUtf8", &gameTextNotUtf8, 60 * 60),
             Test("explore", &explore, 60 * 60 * 30),
             Test("serve", &serve, ulong.max),
         ];
@@ -695,6 +696,27 @@ class TestMarioParty3 : MarioParty3 {
         d.note(data.spaceCount, " spaces in ", chainCount, " chains; P1 on space ", spaceOf(players[0]));
         d.wait(60);
         d.screenshot("smoke");
+    }
+
+    // Game text isn't UTF-8 (0xC3 is the game's apostrophe, for one), so the message code reads it byte by byte:
+    // anything that decodes it throws, which stops every later MessageChanger for that message. (BingoNames.hasArgs()
+    // once did, and the bonus stars showed the game's own text.)
+    void gameTextNotUtf8() {
+        // (the 0xC3 before the arguments: a search that decodes stops at the first argument otherwise)
+        enum text = "ItÃs a test:  and ", plain = "ItÃs plain.";
+        try {
+            d.check(BingoNames.hasArgs(text), "hasArgs() missed the arguments");
+            d.check(!BingoNames.hasArgs(plain), "hasArgs() found arguments in text without any");
+            d.check(BingoNames.darkArgsIn(text) == 1, "darkArgsIn() should find <1> dark and <2> not");
+        } catch (Exception e) {
+            d.check(false, "BingoNames threw on game text: " ~ e.msg);
+        }
+        foreach (f; stateParts.map!(p => p.obj)) {
+            auto m = cast(MessageChanger)f;
+            if (!m) continue;
+            try m.changeMessage(0x1402, text);
+            catch (Exception e) d.check(false, typeid(f).name ~ ".changeMessage() threw on game text: " ~ e.msg);
+        }
     }
 
     // Makes every slot of the battle roulette this many coins (0 cancels the battle), until the returned delegate is
