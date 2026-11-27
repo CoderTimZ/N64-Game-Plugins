@@ -90,6 +90,9 @@ player's latest turn. They're overwritten every round, so don't keep your own sa
 emulator's selected slot changes with each turn too, so a save state you make yourself goes in the current player's
 slot unless you choose another.
 
+The option does nothing during netplay: the emulator doesn't make save states then, so the plugin neither saves nor
+changes the selected slot.
+
 ### `bingoURL`
 
 The address of a game on [Mario Party Bingo](https://mp.bingo/) to connect to.

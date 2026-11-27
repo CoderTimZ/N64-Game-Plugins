@@ -234,9 +234,14 @@ double normal(Random)(ref Random r) @safe {
     return sqrt(-2 * log(u)) * cos(2 * PI * v);
 }
 
+// One of the options, picked with the odds of its weight. The options are taken in their sorted order (and their
+// weights added up in it), not the associative array's, which can differ between machines with the same options (it
+// depends on the order they were added in): a netplay game picks the same on every machine.
 T weighted(T, W, Random)(ref const W[T] options, ref Random r) {
-    auto keys = options.keys;
-    double random = r.uniform01() * options.values.sum();
+    auto keys = options.keys.sort.release;
+    double total = 0;
+    foreach (e; keys) total += options[e];
+    double random = r.uniform01() * total;
     double weight = 0;
     foreach (ref const T e; keys) {
         if ((weight += options[e]) > random) {

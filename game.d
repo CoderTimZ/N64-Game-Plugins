@@ -42,10 +42,10 @@ import vibe.vibe : URL, connectWebSocket, runTask, runApplication, exitEventLoop
 
 // --- Continuations ---
 
-// What runs after a game call that waits for the game (startCall() in plugin.d), or after a function the game called
-// returns (afterReturn!m): a method and its arguments, kept as data, so a save state made in the middle carries on
-// with it when it's loaded, even in a later run of the emulator. A continuation's parameters are values (numbers,
-// structs of them, strings, Then); one named `result` gets the call's result (v0).
+// What runs after a game call that waits for the game (startCall() in plugin.d): a method and its arguments, kept as
+// data, so a save state made in the middle carries on with it when it's loaded, even in a later run of the emulator. A
+// continuation's parameters are values (numbers, structs of them, strings, Then); one named `result` gets the call's
+// result (v0).
 Then then(alias m, A...)(A args) if (!A.length || !is(A[0] == GameCall)) {
     alias C = Continuation!m;
     static assert(A.length == C.Args.length, "then!" ~ C.name ~ " takes " ~ C.Args.stringof ~ (C.takesResult ?
@@ -62,11 +62,6 @@ Then then(alias m, A...)(A args) if (!A.length || !is(A[0] == GameCall)) {
 void then(alias m, A...)(ref GameCall call, A args) {
     call.next = .then!m(args);
     if (plugin) plugin.onCallsChanged();
-}
-
-// Runs a method (with its arguments) when the function the game is in returns, from a hook at its first instruction
-void afterReturn(alias m, A...)(A args) {
-    waitForReturn(then!m(args));
 }
 
 // The methods continuations can name, by "Class.method", with the object each runs on (the game's or a feature's).
@@ -185,10 +180,7 @@ abstract class Hooked {
 
     final void hookExec(alias fn)(Address address)         { addHandler(hooks.exec, HookKind.EXECUTE, address, execHandler(method!fn(this))); }
     final void hookExecOnce(alias fn)(Address address)     { addHandler(hooks.execOnce, HookKind.EXECUTE, address, execHandler(method!fn(this))); }
-    final void hookExecDone(alias fn)(Address address)     { addHandler(hooks.execDone, HookKind.EXECUTE, address, execHandler(method!fn(this))); }
-    final void hookExecDoneOnce(alias fn)(Address address) { addHandler(hooks.execDoneOnce, HookKind.EXECUTE, address, execHandler(method!fn(this))); }
-    final void hookRead(alias fn, F)(ref F field)  { hookMemory!(false, F)(field.addr, memHandler!F(method!fn(this))); }
-    final void hookWrite(alias fn, F)(ref F field) { hookMemory!(true, F)(field.addr, memHandler!F(method!fn(this))); }
+    final void hookRead(alias fn, F)(ref F field)          { hookMemory!(false, F)(field.addr, memHandler!F(method!fn(this))); }
     final void unhookExec(alias fn)(Address address) {
         auto m = method!fn(this);
         removeHandlers(hooks.exec, HookKind.EXECUTE, address, [m.ptr, m.funcptr]);
@@ -205,8 +197,9 @@ abstract class FeatureBase : Hooked {
     void onFrame() { }
     void onInput(int port, InputData* data) { }
     void receive(const JSONValue message) { } // A message from the server
-    void onReset(bool hard) { }
-    void onStateLoaded() { } // A save state was loaded, which ends the waiting hooks (flags saying one waits are reset)
+    // A save state was loaded, which ends the hooks waiting on their fibers (flags saying one waits are reset). The
+    // game calls in the save state's plugin state go on (see startCall()).
+    void onStateLoaded() { }
 }
 
 abstract class Feature(G) : FeatureBase {
@@ -300,13 +293,21 @@ abstract class Game(Config) : Hooked, Plugin {
         return obj;
     }
 
-    // The settings: the game's file (named after the ROM), or the host's during netplay
+    // The settings: the game's file (named after the ROM), or the host's during netplay. A guest never reads its own
+    // file (its settings, like its bingoURL, aren't the session's): without the host's it uses the defaults.
     Config readConfig() {
-        if (netplayRole == NetplayRole.guest && netplayImport.type == JSONType.object) {
-            if (auto imported = "config" in netplayImport) {
-                auto config = (*imported).fromJSON!Config;
-                return config ? config : new Config;
+        if (netplayRole == NetplayRole.guest) {
+            try {
+                if (netplayImport.type == JSONType.object) {
+                    if (auto imported = "config" in netplayImport) {
+                        if (auto config = (*imported).fromJSON!Config) return config;
+                    }
+                }
+                error("Netplay: the host's settings didn't come: playing with the default settings");
+            } catch (Exception e) {
+                error("Netplay: can't read the host's settings (", e.message, "): playing with the default settings");
             }
+            return new Config;
         }
         auto file = romName ~ ".json";
         try {
@@ -367,19 +368,18 @@ abstract class Game(Config) : Hooked, Plugin {
 
     void receive(const JSONValue message) { }
 
-    void onReset(bool hard) {
-        foreach (f; activeFeatures) f.onReset(hard);
-    }
-
     void onFinish() {
         disconnect();
     }
 
     // --- The state ---
 
-    // The state's bytes: a field for each part, and the framework's
+    // The state's bytes: a field for each part, and the framework's. They're written over the last call's (see
+    // stateBuffer), so they're valid until the next call: a caller that keeps them keeps a copy.
     const(ubyte)[] saveState() {
-        auto w = StateWriter(stateBuffer[0 .. 0]);
+        stateBuffer.length = 0;
+        stateBuffer.assumeSafeAppend();
+        auto w = StateWriter(stateBuffer);
         w.num(cast(ushort)(stateParts.length + 1));
         void part(string name, void delegate() save) {
             w.num(cast(ubyte)name.length);
@@ -603,7 +603,7 @@ struct StateBlock {
 
 __gshared {
     StateBlock stateBlock; // (rollback saves it with the state: see Game.saveRollback)
-    ubyte[] stateBuffer;   // (used again for each frame's bytes: see Game.saveState)
+    ubyte[] stateBuffer;   // (used again for each call's bytes, which nothing else keeps: see Game.saveState)
     Object[] stateObjects; // The game's state parts' objects (see Continuation)
 }
 

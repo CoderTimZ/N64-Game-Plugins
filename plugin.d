@@ -209,14 +209,14 @@ void msg(T...)(MsgLevel level, T args) {
     string message;
     foreach (arg; args) message ~= arg.to!string;
 
-    version (Windows) { } else {
-        (level <= MsgLevel.WARNING ? stderr : stdout).writeln(message);
-    }
-    if (!debugCallback) return;
-    // (during netplay once the frame is final: a rollback mustn't log the same thing twice)
     auto callback = debugCallback;
+    version (Windows) if (!callback) return;
     auto context = debugContext.toStringz;
-    afterFinal({ callback(context, level, message.toStringz); });
+    // (during netplay once the frame is final: a rollback mustn't log the same thing twice)
+    afterFinal({
+        version (Windows) { } else (level <= MsgLevel.WARNING ? stderr : stdout).writeln(message);
+        if (callback) callback(context, level, message.toStringz);
+    });
 }
 
 // Shows an error to the player: a message box on Windows. (It's in the emulator's log everywhere.)
@@ -242,7 +242,7 @@ alias MemHandler  = Handler!(void delegate(void* value, Address pc, Address addr
 // Every hook, and where the waiting hooks and game calls wait. Rollback keeps a copy of it with each frame it saves
 // (the same copy for frames that didn't change it: see hooksVersion).
 struct Hooks {
-    ExecHandler[][Address] exec, execOnce, execDone, execDoneOnce;
+    ExecHandler[][Address] exec, execOnce, execDone, execDoneOnce; // (execDoneOnce: for tests)
     MemHandler[][Address][4] read, write; // By size: 1, 2, 4 and 8 bytes
     // The emulator has a bit per word of RDRAM for each kind of hook, which addresses that agree in bits 2..22 share (a
     // KSEG0 address and its KSEG1 mirror, or the bytes of a word). These count the hooked addresses on each, so the bit
@@ -398,8 +398,8 @@ HookFiber currentFiber(string what) {
 // microseconds, and a save state waits until no hook waits (see StateSaving). A call that waits for the game itself
 // (for frames, input, a message to load) is started with startCall() instead, and what comes after it is a method
 // that runs when it returns (then!m in game.d), kept as data: a save state made in the middle has it, and loading it
-// carries on from there. afterReturn!m does the same for a function the game called (a hook at its start).
-// A hook that waits for longer than a frame is logged (see warnLongWaits()): it puts save states off.
+// carries on from there. A hook that waits for longer than a frame is logged (see warnLongWaits()): it puts save
+// states off.
 
 // Calls a game function from a hook and returns its result (v0), with the registers put back as they were. For
 // functions that return at once; one that waits for the game needs startCall(). The game can run one call at a time
@@ -424,12 +424,6 @@ ref GameCall startCall(Args...)(Address function_, Args args) {
     addCall(setUpCall(function_, args));
     jump(function_);
     return hooks.calls[$ - 1];
-}
-
-// Runs `next` when the function the game is in returns (from a hook at its first instruction: to gpr.ra, with the
-// stack pointer and the registers a function keeps as they are now). See afterReturn!m in game.d.
-void waitForReturn(Then next) {
-    addCall(GameCall(gpr.ra, gpr.sp, *gpr, *fpr, 0, false, next));
 }
 
 // (one call at a time from a run of the hooks: see callGame())
@@ -485,11 +479,11 @@ struct Resume {
     uint result;
 }
 
-// A call in progress: one the plugin made (function_), or a function the game called that a hook waits for (0). When
-// it returns to `at` (the stack pointer back at `sp`, and the registers a function keeps as they were), the plugin's
-// call gets its registers put back, and what waits for it goes on: its hook (fiber, see callGame()) or its Then, then
-// the ones queued behind it. The state block keeps these (see FrameworkState in game.d), and a save state waits while a
-// hook waits on its fiber, so loading one carries on from where it was.
+// A call of a game function the plugin made (function_) in progress. When it returns to `at` (the stack pointer back
+// at `sp`, and the registers a function keeps as they were), its registers are put back, and what waits for it goes
+// on: its hook (fiber, see callGame()) or its Then, then the ones queued behind it. The state block keeps these (see
+// FrameworkState in game.d), and a save state waits while a hook waits on its fiber, so loading one carries on from
+// where it was.
 struct GameCall {
     Address at;
     uint sp;
@@ -497,7 +491,7 @@ struct GameCall {
     FPR fpr;
     Address function_;
     bool revisit;     // It started in at's Execute hooks: the game was at `at` already, so they don't run again
-    Then next;        // What runs when it returns (see startCall() and afterReturn!m)
+    Then next;        // What runs when it returns (see startCall())
     int fiber = -1;
     // The run of the hooks it started in (see hookRun). Not state: hookRun only counts up (rollback doesn't bring it
     // back, and it differs between machines), so the state would differ when a frame is run again with a call in progress
@@ -574,7 +568,8 @@ struct HookReturn {
 }
 
 // Waits in a hook until the game runs the instruction at an address (like a function returning to gpr.ra). For a
-// wait that's over at once; one that lasts frames needs afterReturn (a save state waits while a hook waits).
+// wait that's over at once; one that lasts frames needs a hook at that address instead, or startCall() for a game
+// function (a save state waits while a hook waits).
 void waitExec(Address address) {
     auto fiber = currentFiber("waitExec()");
     hooks.returns ~= HookReturn(address, fiber.index, hooks.serial++);
@@ -601,14 +596,14 @@ bool hookWaiting() {
     return hookFibers.any!(f => f.state == Fiber.State.HOLD);
 }
 
-// A hook that has waited for more than a frame puts save states off: what it waits for needs startCall() or
-// afterReturn!m. Logged once for each function or address it waits for.
+// A hook that has waited for more than a frame puts save states off: what it waits for needs startCall() (or a hook
+// of its own). Logged once for each function or address it waits for.
 void warnLongWaits() {
     foreach (f; hookFibers) {
         if (f.state != Fiber.State.HOLD || f.since + 2 > frame || f.waitingFor in warnedWaits) continue;
         warnedWaits[f.waitingFor] = true;
-        warning(format!"A hook has waited %d frames for %08X, which puts save states off: it needs startCall() or %s"(
-            frame - f.since, f.waitingFor, "afterReturn!m"));
+        warning(format!"A hook has waited %d frames for %08X, which puts save states off: it needs startCall()"(
+            frame - f.since, f.waitingFor));
     }
 }
 
@@ -699,27 +694,32 @@ enum NetplayRole { none, host, guest }
 
 // Something that reaches outside the game (sending to a server, saving a state, logging). Outside netplay it's done
 // now. During netplay it waits until the frame it comes from is final: a frame that isn't can be run again with
-// different input after a rollback, which would do something else (the plugin forgets what the frames it goes back
-// from planned, see NetplayLoadState). A final frame can be run again too, when a rollback goes back to a frame saved
-// before it, but with the same input it does the same: what it planned was done the first time, so it's skipped.
+// different input after a rollback, which would do something else (the plugin forgets what was planned after the
+// frame it goes back to was saved, see NetplayLoadState). A final frame can be run again too, when a rollback goes
+// back to a frame saved before it, but with the same input it does the same: what it planned was done the first time,
+// so it's skipped (see effectsDoneBefore).
 void afterFinal(void delegate() effect) {
     if (netplayRole == NetplayRole.none) return effect();
     if (netplayFrame < effectsDoneBefore) return;
-    synchronized (effectsLock) pendingEffects ~= PendingEffect(netplayFrame, effect);
+    synchronized (effectsLock) pendingEffects ~= PendingEffect(netplayFrame, ++effectsPlanned, effect);
 }
 
 struct PendingEffect {
     ulong frame;
+    ulong sequence; // (see effectsPlanned)
     void delegate() effect;
 }
 
-// Does what the frames that are final now planned to do
+// Does what the frames that are final now planned to do. Frames before the one starting now are over (their effects
+// are planned), so those that are final are done: a rollback that runs them again skips what they plan. Not the frame
+// starting now, even when it's final already: after a rollback it's run again from where it was saved, partway
+// through, and what it plans from there was forgotten (see NetplayLoadState), so it's planned again.
 void runFinalEffects() {
     PendingEffect[] ready;
     synchronized (effectsLock) {
         auto n = pendingEffects.countUntil!(e => e.frame >= netplayFinal);
         if (n < 0) n = pendingEffects.length;
-        effectsDoneBefore = max(effectsDoneBefore, netplayFinal);
+        effectsDoneBefore = max(effectsDoneBefore, min(netplayFinal, netplayFrame));
         ready = pendingEffects[0 .. n].dup;
         pendingEffects = pendingEffects[n .. $].dup;
     }
@@ -728,9 +728,10 @@ void runFinalEffects() {
     }
 }
 
-// Forgets what the frame and the ones after it planned to do (they're run again)
-void dropEffectsFrom(ulong frame) {
-    synchronized (effectsLock) pendingEffects = pendingEffects.filter!(e => e.frame < frame).array;
+// Forgets what was planned after a rollback save (by its effectsPlanned): the game is back where it was then, and plans
+// it again as it runs on
+void dropEffectsAfter(ulong sequence) {
+    synchronized (effectsLock) pendingEffects = pendingEffects.filter!(e => e.sequence <= sequence).array;
 }
 
 // What the server sends reaches the game in one place, Plugin.onMessage(). Outside netplay that's at the frame it
@@ -756,6 +757,7 @@ final class RollbackSave {
     Hooks* hooks;              // (the same copy for saves that didn't change them)
     FiberState[] fibers;       // The waiting hooks
     Object game;               // The game's state (see Plugin.saveRollback)
+    ulong effectsPlanned;      // What was planned outside the game by then (see afterFinal())
 }
 
 // --- The game ---
@@ -769,7 +771,6 @@ interface Plugin {
     void onStateLoaded();            // A save state was loaded
     void onStateSaving();            // A save state is about to be made
     void onCallsChanged();           // A game call started or returned (see callGame())
-    void onReset(bool hard);
     void onSpeakerChanged(bool speaker);
     void onFinish();
     string netplayExport();          // The settings, for the other players in a netplay session (see NetplayStart)
@@ -778,33 +779,44 @@ interface Plugin {
     ulong stateHash();               // For the emulator's rollback self-test
 }
 
+// The emulator's functions (C functions, see EXECUTION_INFO and the core's exports in its m64p_plugin.h)
+extern (C) {
+    alias SetHookFunction          = void function(uint addr, int kind, int on);
+    alias PcFunction               = uint function();
+    alias JumpFunction             = void function(uint addr);
+    alias SaveGameStateFunction    = void function();
+    alias SetSaveStateSlotFunction = void function(int slot);
+    alias InvalidateCodeFunction   = void function(uint addr, uint size);
+    alias NetplaySendFunction      = int function(const(void)* data, uint size);
+}
+
 struct ExecutionInfo {
     void* window;
     const char* romName;
     const char* romHash;
-    extern (C) void function(uint, int, int) setHook;
-    uint function() pc;
-    void function(uint) jump;
+    SetHookFunction setHook;
+    PcFunction pc;
+    JumpFunction jump;
     GPR* gpr;
     FPR* fpr;
     ubyte* memory;
     uint memorySize;
-    void function() saveGameState;
-    void function(int) setSaveStateSlot;
+    SaveGameStateFunction saveGameState;
+    SetSaveStateSlotFunction setSaveStateSlot;
 }
 
 __gshared {
     // The emulator
     void* window;
-    extern (C) void function(uint, int, int) setHook;           // Turns a hook on or off (see Hooks.hooked)
-    extern (C) void function(uint, uint) invalidateCodeFunction; // The core's ExecutionInvalidateCode, if it has one
-    uint function() pc;
-    void function(uint) jump;
+    SetHookFunction setHook;                       // Turns a hook on or off (see Hooks.hooked)
+    InvalidateCodeFunction invalidateCodeFunction; // The core's ExecutionInvalidateCode, if it has one
+    PcFunction pc;
+    JumpFunction jump;
     GPR* gpr;
     FPR* fpr;
     ubyte[] memory;
-    void function() saveGameState;
-    void function(int) setSaveStateSlot;
+    SaveGameStateFunction saveGameState;
+    SetSaveStateSlotFunction setSaveStateSlot;
 
     // The game
     Plugin plugin;
@@ -822,18 +834,19 @@ __gshared {
     InputData[4] input;
 
     // Netplay (see NetplayStart and NetplayFrame): the role, the frame being emulated, the first one that isn't final,
-    // whether this machine talks to the server for everyone, and who plays on each port
+    // and whether this machine talks to the server for everyone
     NetplayRole netplayRole;
     ulong netplayFrame;
     ulong netplayFinal;
     bool netplaySpeaker;
-    string[4] netplayNames;
     JSONValue netplayImport;   // The host's settings, on a guest
     string netplayExported;    // What NetplayExport handed out last (it has to stay valid)
-    extern (C) int function(const(void)*, uint) netplaySendFunction; // The core's ExecutionNetplaySendMessage
-    // what frames that aren't final yet will do outside the game (see afterFinal()), oldest first, and the frames
-    // whose effects were done (they're final)
+    NetplaySendFunction netplaySendFunction; // The core's ExecutionNetplaySendMessage
+    // What frames that aren't final yet will do outside the game (see afterFinal()), oldest first; how many effects
+    // were planned so far (numbering them, so a rollback forgets those planned after the frame it goes back to was
+    // saved); and the frames whose effects were done (they're final, and over)
     PendingEffect[] pendingEffects;
+    ulong effectsPlanned;
     ulong effectsDoneBefore;
     Mutex effectsLock;
     // Rollback: the saved frames, and the last copy of the hooks (and their version then)
@@ -876,8 +889,8 @@ extern (C) {
                 return cast(T)dlsym(handle, name.toStringz);
             }
         }
-        invalidateCodeFunction = core!(typeof(invalidateCodeFunction))("ExecutionInvalidateCode");
-        netplaySendFunction = core!(typeof(netplaySendFunction))("ExecutionNetplaySendMessage");
+        invalidateCodeFunction = core!InvalidateCodeFunction("ExecutionInvalidateCode");
+        netplaySendFunction = core!NetplaySendFunction("ExecutionNetplaySendMessage");
 
         return startup();
     }
@@ -896,22 +909,23 @@ extern (C) {
         return 0;
     }
 
-    export void RomOpen() { }
+    export int RomOpen() { return 1; }
 
     export void RomClosed() {
-        if (plugin) {
-            try { plugin.onFinish(); }
-            catch (Exception e) { error(e); }
-            plugin = null;
-        }
-
-        // what final frames planned is done; the rest never happened
+        // what final frames planned is done (before the plugin finishes: it disconnects from the server, which the
+        // last frames may still send to); the rest never happened. The netplay is over then, so what the plugin does
+        // as it finishes (like logging) is done at once.
         runFinalEffects();
         synchronized (effectsLock) pendingEffects = null;
         rollbackSaves = null;
         savedHooks = null;
         resetNetplay(NetplayRole.none);
-        netplayNames = netplayNames.init;
+
+        if (plugin) {
+            try { plugin.onFinish(); }
+            catch (Exception e) { error(e); }
+            plugin = null;
+        }
     }
 
     // Peer-to-peer netplay: every player needs the same settings, or their games drift apart. The emulator calls
@@ -948,13 +962,10 @@ extern (C) {
         }
     }
 
-    // Who plays on each port (the same on every machine), right after NetplayStart
-    export void NetplayPlayers(const(char*)* names) {
-        foreach (i; 0..4) netplayNames[i] = names && names[i] ? names[i].fromStringz.idup : "";
-    }
-
     // The start of a frame during netplay: frames before `final_` are final, so what they planned to do outside the
-    // game is done now (see afterFinal()). Whether this machine is the speaker can change.
+    // game is done now (see afterFinal()). Whether this machine is the speaker can change. Also right after
+    // NetplayLoadState, for the frame it went back to (flags has NETPLAY_FRAME_RERUN): that frame runs on from where it
+    // was saved, and what it planned before that is kept (see runFinalEffects()).
     export void NetplayFrame(uint f, uint final_, int flags) {
         enum SPEAKER = 2;
         netplayFrame = f;
@@ -992,6 +1003,7 @@ extern (C) {
             save.hooks = savedHooks;
             save.fibers = saveFibers();
             if (plugin) save.game = plugin.saveRollback();
+            synchronized (effectsLock) save.effectsPlanned = effectsPlanned;
             rollbackSaves[f] = save;
         } catch (Exception e) {
             error(e);
@@ -1019,9 +1031,14 @@ extern (C) {
             catch (Exception e) { error(e); }
         }
 
-        // the frames after it are gone, with what they planned to do outside the game
+        // The frames after it are gone, with what was planned outside the game since it was saved. The save was made
+        // partway through frame f (the core saves at the first point it safely can after the frame starts), so what
+        // frame f planned before then stays: running on from the save doesn't plan it again. (The core drops the
+        // saves after it with NetplayDropState too; dropping them here as well does no harm, since dropping a save
+        // that's gone does nothing.) The core then calls NetplayFrame for frame f (with NETPLAY_FRAME_RERUN), which
+        // does what final frames planned (see runFinalEffects()).
         foreach (k; rollbackSaves.keys) if (k > f) rollbackSaves.remove(k);
-        dropEffectsFrom(f);
+        dropEffectsAfter(save.effectsPlanned);
         netplayFrame = f;
     }
 
@@ -1169,10 +1186,6 @@ extern (C) {
 
     export void Reset(int hard) {
         info(hard ? "Hard reset" : "Soft reset");
-        if (plugin) {
-            try { plugin.onReset(hard != 0); }
-            catch (Exception e) { error(e); }
-        }
     }
 
     void memoryHook(bool write, T)(T* value, Address pc, Address addr) {

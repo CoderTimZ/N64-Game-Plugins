@@ -62,9 +62,12 @@ private struct Map {
 
 // The shrunk backgrounds' tiles, by background directory: what the ROM's background makes, the same every time (on
 // every netplay machine too), so they aren't state, which only says which backgrounds were made (see
-// CustomBoardMaps.maps)
+// CustomBoardMaps.maps). While a background's tiles are read, its pixels are here too, with how many of its tiles they
+// have (from the first): they're the ROM's, so a rollback that reads them again writes them the same way again.
 final class MapCache {
     immutable(ubyte)[][uint] tiles;
+    ushort[][uint] pixels;
+    uint[uint] pixelTiles;
 }
 
 // sharperCustomBoardMaps (see the module's description)
@@ -79,7 +82,13 @@ final class CustomBoardMaps(G) : Feature!G {
     // the session's: loading a save state keeps them.
     @Session Map[uint] maps;
     @Fixed MapCache cache;
+    // While the directories and tiles are read (see prepare()): the buffer the ROM is copied to, the file system's ROM
+    // offset, the directory being read, and the next of its tiles
     bool preparing;
+    Address romBuffer;
+    uint fs;
+    Directory reading;
+    uint nextTile;
 
     Address buffer;        // The map's tiles and display list in the N64's memory, while the map is shown (after a
                            // marker: a save state loaded since may not have it)
@@ -92,7 +101,15 @@ final class CustomBoardMaps(G) : Feature!G {
 
     override bool enabled() { return config.sharperCustomBoardMaps; }
 
-    override void onStateLoaded() { preparing = false; }
+    // A save state with the plugin's state goes on reading where it was (its game call is in it); without it, what was
+    // being read is dropped (the next map opened reads it again)
+    override void onStateLoaded() {
+        if (preparing && !hooks.calls.any!(c => c.function_ == DMA && c.next)) {
+            preparing = false;
+            romBuffer = 0;
+            reading = Directory.init;
+        }
+    }
 
     // The board's setup (overlay 128): note the background and map, and make the map if it's a custom board's
     @Exec(SETUP) void boardSetUp() {
@@ -156,88 +173,146 @@ final class CustomBoardMaps(G) : Feature!G {
         prepare();
     }
 
-    // Reads the file system's table, the directories, and (for a custom board, the first time) the background's tiles,
-    // through a buffer the ROM is copied to. Started at the setup's start: the calls run before it continues.
+    // Reads the file system's table, the map's directory, then (for a background not made yet) the background's
+    // directory and, for a custom board, its tiles, through a buffer the ROM is copied to. Started from a hook at the
+    // start of a function (the board's setup, the map's), which goes on once they're read. Each copy waits for the game
+    // (about 15 frames in all), so each step is a continuation of the copy before it (see startCall()).
     void prepare() {
         preparing = true;
-        auto fs = cast(uint)(HVQ_FS_HI.val!ushort << 16) + cast(short)HVQ_FS_LO.val!ushort;
-        Address buf = callGame(MALLOC, BUFFER);
-        if (buf) {
-            readMaps(buf, fs);
-            callGame(FREE, buf);
-        }
-        preparing = false;
-    }
-
-    // In prepare(): copies `size` bytes of the ROM from `rom` (rounded down to 2) to the buffer, and returns where they
-    // are
-    Address readRom(Address buf, uint rom, uint size) {
-        auto aligned = rom & ~1u;
-        callGame(DMA, aligned, buf, min(size + (rom - aligned), BUFFER));
-        return buf + (rom - aligned);
-    }
-
-    // In prepare(): a directory of the file system (at `fs` in the ROM)
-    Directory directory(Address buf, uint fs, uint index) {
-        Address t = readRom(buf, fs, 4 + 4 * (index + 2));
-        Directory dir;
-        dir.rom = fs + (t + 4 + 4 * index).val!uint;
-        Address d = readRom(buf, dir.rom, 0x800);
-        auto count = min(d.val!uint, 0x1F0);
-        foreach (i; 0..count) dir.files ~= dir.rom + (d + 4 + 4 * i).val!uint;
-        Address info = readRom(buf, dir.files[0], 16);
-        dir.columns = (info + 8).val!uint;
-        dir.rows = (info + 12).val!uint;
-        return dir;
-    }
-
-    // In prepare(): the map's directory, then the background's map if it isn't made yet. The pixels are kept until all
-    // the tiles are read: they're the ROM's, so if a rollback runs this again, it writes them the same way again.
-    void readMaps(Address buf, uint fs) {
-        auto map = directory(buf, fs, mapDir);
-        mapColumns = map.columns;
-        mapRows = map.rows;
-        mapTileIndices = null;
-        foreach (i; 0..map.columns * map.rows) mapTileIndices[map.tile(i)] = i;
-        mapTiles = [map.tile(0), map.tileEnd(map.columns * map.rows - 1)];
-        preparedMapDir = mapDir;
-        ready = true;
-        if (backgroundDir in maps) return;
-
-        auto background = directory(buf, fs, backgroundDir);
-        if (readRom(buf, background.tile(0), 4).val!uint != 3) { // HVQ: an original board
-            maps[backgroundDir] = Map.init;
+        fs = cast(uint)(HVQ_FS_HI.val!ushort << 16) + cast(short)HVQ_FS_LO.val!ushort;
+        romBuffer = callGame(MALLOC, BUFFER);
+        if (!romBuffer) {
+            preparing = false;
             return;
         }
-        auto count = background.columns * background.rows;
-        auto pixels = new ushort[count * TILE_W * TILE_H];
-        // The tiles, read a chunk (as many as fit in the buffer) at a time
-        for (uint i = 0; i < count; ) {
-            auto start = background.tile(i) & ~1u;
-            auto last = i;
-            while (last + 1 < count && background.tileEnd(last + 1) - start <= BUFFER) last++;
-            auto end = min(background.tileEnd(last), start + BUFFER);
-            Address data = readRom(buf, start, end - start);
-            auto chunk = new ubyte[end - start];
-            foreach (j, ref v; chunk) v = (data + cast(uint)j).val!ubyte;
-            foreach (t; i..last + 1) {
-                auto decoded = decompress(chunk[background.tile(t) - start..min(background.tileEnd(t), end) - start]);
-                // Tile t: column t % columns, row (from the top) rows - 1 - t / columns
-                auto column = t % background.columns, row = background.rows - 1 - t / background.columns;
-                auto width = background.columns * TILE_W;
-                foreach (y; 0..TILE_H) foreach (x; 0..TILE_W) {
-                    auto o = (y * TILE_W + x) * 2;
-                    pixels[(row * TILE_H + y) * width + column * TILE_W + x] =
-                        o + 1 < decoded.length ? cast(ushort)(decoded[o] << 8 | decoded[o + 1]) : 1;
-                }
-            }
-            i = last + 1;
+        readDirectory(mapDir, false);
+    }
+
+    // Copies `size` bytes of the ROM from `rom` (rounded down to 2) to the buffer (see romAt())
+    ref GameCall copyRom(uint rom, uint size) {
+        auto aligned = rom & ~1u;
+        return startCall(DMA, aligned, romBuffer, min(size + (rom - aligned), BUFFER));
+    }
+
+    // Where copyRom() put the ROM's bytes from `rom`
+    Address romAt(uint rom) { return romBuffer + (rom & 1); }
+
+    // A directory of the file system (at `fs` in the ROM): where the file system's table says it is, its own table of
+    // files, then its first file (the info: its columns and rows of tiles)
+    void readDirectory(uint index, bool background) {
+        copyRom(fs, 4 + 4 * (index + 2)).then!tableCopied(index, background);
+    }
+
+    void tableCopied(uint index, bool background) {
+        reading = Directory.init;
+        reading.rom = fs + (romAt(fs) + 4 + 4 * index).val!uint;
+        copyRom(reading.rom, 0x800).then!directoryCopied(background);
+    }
+
+    void directoryCopied(bool background) {
+        Address d = romAt(reading.rom);
+        auto count = min(d.val!uint, 0x1F0);
+        foreach (i; 0..count) reading.files ~= reading.rom + (d + 4 + 4 * i).val!uint;
+        if (reading.files.length < 3) return finish(); // (not a background's)
+        copyRom(reading.files[0], 16).then!infoCopied(background);
+    }
+
+    // The map's directory, then the background's if it isn't made yet
+    void infoCopied(bool background) {
+        Address info = romAt(reading.files[0]);
+        reading.columns = (info + 8).val!uint;
+        reading.rows = (info + 12).val!uint;
+        if (reading.files.length < 3 + reading.columns * reading.rows) return finish(); // (not a background's)
+        if (background) return copyRom(reading.tile(0), 4).then!firstTileCopied();
+
+        mapColumns = reading.columns;
+        mapRows = reading.rows;
+        mapTileIndices = null;
+        foreach (i; 0..mapColumns * mapRows) mapTileIndices[reading.tile(i)] = i;
+        mapTiles = [reading.tile(0), reading.tileEnd(mapColumns * mapRows - 1)];
+        preparedMapDir = mapDir;
+        ready = true;
+        if (backgroundDir in maps) return finish();
+        readDirectory(backgroundDir, true);
+    }
+
+    void firstTileCopied() {
+        if (romAt(reading.tile(0)).val!uint != 3) { // HVQ: an original board
+            maps[backgroundDir] = Map.init;
+            return finish();
         }
-        ubyte[] tiles;
-        auto shrunk = shrink(pixels, background.columns, background.rows, tiles);
-        cache.tiles[backgroundDir] = assumeUnique(tiles);
-        maps[backgroundDir] = shrunk;
-        info("Made the zoomed-out map of background ", backgroundDir, " (", shrunk.width, "x", shrunk.height, ")");
+        nextTile = 0;
+        copyTiles();
+    }
+
+    // The background's tiles from nextTile, a chunk (as many as fit in the buffer) at a time
+    void copyTiles() {
+        auto count = reading.columns * reading.rows;
+        auto start = reading.tile(nextTile) & ~1u;
+        auto last = nextTile;
+        while (last + 1 < count && reading.tileEnd(last + 1) - start <= BUFFER) last++;
+        auto end = min(reading.tileEnd(last), start + BUFFER);
+        copyRom(start, end - start).then!tilesCopied(start, last, end);
+    }
+
+    // Tiles nextTile to last are in the buffer (the ROM's bytes from start to end): their pixels, then the next chunk,
+    // or once they're all read, the shrunk background. One made before (a rollback reads it again) is in the cache
+    // already. If the pixels before these aren't there (a save state from another run of the emulator was loaded
+    // partway through), the background isn't made: the next map opened reads it again.
+    void tilesCopied(uint start, uint last, uint end) {
+        auto count = reading.columns * reading.rows;
+        bool made = (backgroundDir in cache.tiles) !is null;
+        if (!made) readPixels(start, last, end);
+        nextTile = last + 1;
+        if (nextTile < count) return copyTiles();
+
+        if (!made && cache.pixelTiles.get(backgroundDir, 0) >= count) {
+            ubyte[] tiles;
+            auto shrunk = shrink(cache.pixels[backgroundDir], reading.columns, reading.rows, tiles);
+            cache.tiles[backgroundDir] = assumeUnique(tiles);
+            info("Made the zoomed-out map of background ", backgroundDir, " (", shrunk.width, "x", shrunk.height, ")");
+            made = true;
+        }
+        cache.pixels.remove(backgroundDir);
+        cache.pixelTiles.remove(backgroundDir);
+        if (made) maps[backgroundDir] = mapSize(reading.columns, reading.rows);
+        finish();
+    }
+
+    // The pixels of tiles nextTile to last, if the cache has the ones before them
+    void readPixels(uint start, uint last, uint end) {
+        auto count = reading.columns * reading.rows;
+        if (nextTile == 0 && backgroundDir !in cache.pixels) {
+            cache.pixels[backgroundDir] = new ushort[count * TILE_W * TILE_H];
+            cache.pixelTiles[backgroundDir] = 0;
+        }
+        auto pixels = cache.pixels.get(backgroundDir, null);
+        if (!pixels || cache.pixelTiles[backgroundDir] < nextTile) return;
+
+        Address data = romAt(start);
+        auto chunk = new ubyte[end - start];
+        foreach (j, ref v; chunk) v = (data + cast(uint)j).val!ubyte;
+        auto width = reading.columns * TILE_W;
+        foreach (t; nextTile..last + 1) {
+            auto decoded = decompress(chunk[reading.tile(t) - start..min(reading.tileEnd(t), end) - start]);
+            // Tile t: column t % columns, row (from the top) rows - 1 - t / columns
+            auto column = t % reading.columns, row = reading.rows - 1 - t / reading.columns;
+            foreach (y; 0..TILE_H) foreach (x; 0..TILE_W) {
+                auto o = (y * TILE_W + x) * 2;
+                pixels[(row * TILE_H + y) * width + column * TILE_W + x] =
+                    o + 1 < decoded.length ? cast(ushort)(decoded[o] << 8 | decoded[o + 1]) : 1;
+            }
+        }
+        cache.pixelTiles[backgroundDir] = max(cache.pixelTiles[backgroundDir], last + 1);
+    }
+
+    // Done reading: the buffer is freed, and the game goes on
+    void finish() {
+        reading = Directory.init;
+        nextTile = 0;
+        callGame(FREE, romBuffer);
+        romBuffer = 0;
+        preparing = false;
     }
 
     // Puts the map's tiles in the N64's memory (and room for the display list after them)
@@ -408,16 +483,22 @@ private ubyte[] decompress(const ubyte[] file) {
     return output;
 }
 
+// The size shrink() makes a background of columns x rows tiles
+private Map mapSize(uint columns, uint rows) {
+    Map map;
+    map.width = min(columns * TILE_W, MAP_W * MAP_SCALE);
+    map.height = min(rows * TILE_H, MAP_H * MAP_SCALE);
+    map.columns = (map.width + TILE_W - 1) / TILE_W;
+    map.rows = (map.height + TILE_H - 1) / TILE_H;
+    return map;
+}
+
 // The background (columns x rows tiles of RGBA5551 pixels, row by row) resized to MAP_SCALE times the map's size
 // (smaller only: one that's already smaller keeps its size), as 64x48 tiles. Each new pixel is the average of the
 // background's area it covers, with the pixels at its edges weighted by how much of them it covers.
 private Map shrink(const ushort[] pixels, uint columns, uint rows, out ubyte[] tiles) {
     auto width = columns * TILE_W, height = rows * TILE_H;
-    Map map;
-    map.width = min(width, MAP_W * MAP_SCALE);
-    map.height = min(height, MAP_H * MAP_SCALE);
-    map.columns = (map.width + TILE_W - 1) / TILE_W;
-    map.rows = (map.height + TILE_H - 1) / TILE_H;
+    auto map = mapSize(columns, rows);
     tiles = new ubyte[map.columns * map.rows * TILE_BYTES];
 
     // For each new column (or row): the source pixels it covers and how much of each (in 1/newSize of a pixel)

@@ -77,20 +77,6 @@ string fullName(Character character) pure {
     }
 }
 
-string shortName(Character character) pure {
-    final switch (character) {
-        case Character.UNDEFINED: return "<WHITE>(?)<RESET>";
-        case Character.MARIO:     return "<RED>(M)<RESET>";
-        case Character.LUIGI:     return "<GREEN>(L)<RESET>";
-        case Character.PEACH:     return "<MAGENTA>(P)<RESET>";
-        case Character.YOSHI:     return "<GREEN>(Y)<RESET>";
-        case Character.WARIO:     return "<YELLOW>(W)<RESET>";
-        case Character.DK:        return "<RED>(D)<RESET>";
-        case Character.WALUIGI:   return "<BLUE>(W)<RESET>";
-        case Character.DAISY:     return "<YELLOW>(D)<RESET>";
-    }
-}
-
 bool isCPU(ubyte flags) pure {
     return flags & 0b00000001;
 }
@@ -313,6 +299,8 @@ struct PlayerOverride {
 // Settings every game has. Each game's Config adds its own.
 class MarioPartyConfig {
     Character[] characters = [Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED, Character.UNDEFINED];
+    // A save state at the start of each player's turn, in slots 1 to 4. Not during netplay: the emulator doesn't make
+    // save states then, and the slot shouldn't change either.
     bool saveStateBeforeEachPlayerTurn = false;
     string bingoURL = "";
     bool rankPlayersByBingoScore = false;
@@ -433,15 +421,16 @@ abstract class MarioParty(Config : MarioPartyConfig, Memory, PlayerState = NoPla
         callGame(tempHeap.free, ptr);
     }
 
-    // Each player's turn: saves a state first if the settings say so, and tells the Bingo page
+    // Each player's turn: saves a state first if the settings say so (not during netplay, see
+    // saveStateBeforeEachPlayerTurn), and tells the Bingo page
     override void onFrame() {
         if (isBoardScene()) {
             float turn = data.currentTurn + data.currentPlayerIndex / 4.0f;
             if (turn != currentPlayerTurn) {
                 currentPlayerTurn = turn;
-                if (config.saveStateBeforeEachPlayerTurn) {
-                    int slot = data.currentPlayerIndex + 1;
-                    afterFinal({ setSaveStateSlot(slot); saveGameState(); });
+                if (config.saveStateBeforeEachPlayerTurn && netplayRole == NetplayRole.none) {
+                    setSaveStateSlot(data.currentPlayerIndex + 1);
+                    saveGameState();
                 }
                 struct TurnMessage {
                     immutable type = "turn";
@@ -482,17 +471,6 @@ abstract class MarioParty(Config : MarioPartyConfig, Memory, PlayerState = NoPla
         } else if (type == "player-override") {
             overridePlayer(message.fromJSON!PlayerOverride);
         }
-    }
-
-    // During netplay, the name of the player playing a character, from the netplay session (the same on every
-    // machine), or null if no human plays it (a CPU) or it isn't netplay
-    string netplayName(Character c) {
-        if (netplayRole == NetplayRole.none) return null;
-        auto p = players.find!(p => p.data.character == c);
-        if (p.empty || p.front.isCPU) return null;
-        auto port = p.front.data.controller;
-        if (port >= netplayNames.length || netplayNames[port].empty) return null;
-        return gameName(netplayNames[port]);
     }
 
     // Sets a player's items from a PlayerOverride, or returns false (changing nothing) if they aren't valid for this game
