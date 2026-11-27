@@ -1100,6 +1100,7 @@ final class BingoNames : Feature!MarioParty3, MarioParty3.MessageChanger {
     char nameColor;              // The game's color for a name given as text (see nameMessageId()), or 0
     WindowColors[short] windowColors;
     bool[short] paletteChanged;  // (see copyTextPaletteIfChanged())
+    ubyte[short] darkArgs;       // By window: the arguments its message shows dark (bit n: <n + 1>, see darkArgsIn())
 
     override bool enabled() { return config.bingoPlayerNames; }
 
@@ -1107,6 +1108,7 @@ final class BingoNames : Feature!MarioParty3, MarioParty3.MessageChanger {
     // into other messages as <1>-<5>, so this covers player names everywhere without touching any other text. Then
     // the message's plugin colors become the window's color codes.
     string changeMessage(ushort id, string text) {
+        if (messageWindow >= 0 && hasArgs(text)) darkArgs[messageWindow] = darkArgsIn(text);
         text = playerName(text);
         // Last Five Turns: the standings. The game shows first and last place outlined, in yellow and red; with the
         // bingo names in their own colors, they're plain like second and third place.
@@ -1149,8 +1151,12 @@ final class BingoNames : Feature!MarioParty3, MarioParty3.MessageChanger {
     @Exec(0x8005B43C) void messageSetting() {
         auto w = cast(short)gpr.a0;
         resetColors(w);
+        darkArgs.remove(w);
         foreach (n; 0..5) markUsed(w, argText(w, n));
-        if (gpr.a1 >= 0x80000000) colorizeInPlace(w, gpr.a1); // Text of the plugin's own (showGlobalMessage)
+        if (gpr.a1 >= 0x80000000) { // Text instead of a message ID (the plugin's own, or a custom board's menu)
+            darkArgs[w] = darkArgsIn(textAt(gpr.a1));
+            colorizeInPlace(w, gpr.a1);
+        }
         messageWindow = w;
         waitExec(gpr.ra); // Back in the caller, where the game can be called
         messageWindow = -1;
@@ -1225,6 +1231,12 @@ final class BingoNames : Feature!MarioParty3, MarioParty3.MessageChanger {
     // goes back to the color before it. func_8005B6BC resets it.
     void colorArg(short w, int n) {
         if (n < 0 || n >= 5) return;
+        if (darkArgs.get(w, 0) & (1 << n)) {
+            // Dark in its message: in the message's color, with no color of its own (0xFF, as the game leaves it). It
+            // may have had one from the window's message before, when the game set the arguments.
+            (windowAddress(w) + 178 + n).val!ubyte = 0xFF;
+            return;
+        }
         auto text = argText(w, n);
         auto i = text.indexOf('\x18');
         if (i < 0 || i + 1 >= text.length) return;
@@ -1300,11 +1312,37 @@ final class BingoNames : Feature!MarioParty3, MarioParty3.MessageChanger {
         return t is null ? text : t.idup;
     }
 
-    // colorize() for text in memory that has character colors (the plugin's own messages)
-    void colorizeInPlace(short w, Address address) {
+    // Game text at an address, up to its end
+    static string textAt(Address address) {
         auto p = Ptr!char(address);
         string text;
         for (size_t i = 0; p[i] != '\0' && i < 4096; i++) text ~= p[i];
+        return text;
+    }
+
+    // Whether a message inserts arguments (<1>-<5>: codes 0x11-0x15)
+    static bool hasArgs(string text) {
+        return text.any!(c => c >= '\x11' && c <= '\x15');
+    }
+
+    // The arguments a message shows dark (bit n: <n + 1>): ones it puts right after color 1, as menus do for players
+    // who can't be chosen. A custom board's menu can gray its names that way rather than in the names themselves
+    // (Shiver Blossom Shore's Bowser's Curse House, for players who already have the curse).
+    static ubyte darkArgsIn(string text) {
+        ubyte dark;
+        char color = 0;
+        foreach (c; text) {
+            if (c >= '\x01' && c <= '\x08') color = c;
+            else if (c == '\x19') color = 0; // <RESET>
+            else if (c >= '\x11' && c <= '\x15' && color == '\x01') dark |= 1 << (c - '\x11');
+        }
+        return dark;
+    }
+
+    // colorize() for text in memory that has character colors (the plugin's own messages)
+    void colorizeInPlace(short w, Address address) {
+        auto p = Ptr!char(address);
+        auto text = textAt(address);
         markUsed(w, text); // Its own colors, even with no plugin colors in it (like a custom board's star shop price)
         if (!text.canFind('\x18')) return;
         auto colored = colorize(w, text);
