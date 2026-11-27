@@ -490,7 +490,8 @@ Shows each player's bingo card name in the game instead of their character's nam
 - Needs: `bingoURL`
 
 Wherever the game names a character (in messages, menus, the duel opponent list and the mini-game help), it shows the
-name of that character's bingo card, in the character's color. A card named "CPU" shows the character's name.
+name of that character's bingo card, in the character's color. A card named "CPU" shows the character's name. A name
+the game grays out (like a player who can't be chosen in a menu) stays gray.
 
 ## Other
 

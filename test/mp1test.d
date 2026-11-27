@@ -17,7 +17,7 @@ import std.string;
 import std.traits;
 
 // States the tests start from, in the test emulator's folder (TestStates/)
-// DK's Jungle Adventure, a new game (made from boot with the plugin's options off and an empty State): turn 1 of 20,
+// DK's Jungle Adventure, a new game (made from boot with the plugin's options off and none of its state): turn 1 of 20,
 // P1's turn, at the dice block (A Block, B Map, R Overview). P1 Yoshi, P2 Mario (human), P3 Luigi, P4 Peach
 // (computers), 10 coins each. The default teams make Yoshi and Peach (P1, P4) one team and Mario and Luigi (P2, P3) the
 // other.
@@ -649,9 +649,9 @@ class TestMarioParty1 : MarioParty1 {
                ", ", chanceBefore, " ! Spaces");
         d.check(spacesBoard == board, "The state's spaces aren't this board's");
         d.check(spaces[14] == CustomSpace.CHANCE, "Space 14 isn't a converted ! Space any more");
-        // DK has no ! Spaces of its own, so they're all the State's (and none from the State before the load)
+        // DK has no ! Spaces of its own, so they're all the plugin state's (and none from its state before the load)
         auto marked = spaces.count!(c => c == CustomSpace.CHANCE);
-        d.check(chanceBefore == marked, format("The board has %d ! Spaces, but the State marks %d", chanceBefore, marked));
+        d.check(chanceBefore == marked, format("The board has %d ! Spaces, but the plugin's state marks %d", chanceBefore, marked));
 
         spaces[] = CustomSpace.CHANCE;
         spacesBoard = board == 0 ? 1 : 0;
@@ -911,9 +911,9 @@ class TestMarioParty1 : MarioParty1 {
         d.check(problems.empty, problems.join("; "));
     }
 
-    // Code changed with setCode() runs at once, even in the cached interpreter (which keeps code it has decoded): here
-    // GetPlayerStruct, which has run every frame, is changed as its first instruction is about to run to return 7, then
-    // changed back, and the original runs again
+    // Code changed with setCode() runs at once, even in the cached interpreter and the dynamic recompiler (which keep
+    // code they've decoded): here GetPlayerStruct, which has run every frame, is changed as its first instruction is
+    // about to run to return 7, then changed back, and the original runs again
     void patchedCode() {
         setUp(STATE_DK_TURN_1);
         enum Address F = 0x80052A8C; // GetPlayerStruct(index)
@@ -1168,7 +1168,7 @@ class TestMarioParty1 : MarioParty1 {
             auto custom = spaces[i];
             if (custom >= Space.Type.min && custom <= Space.Type.max && data.spaces[i].type != Space.Type.STAR) {
                 d.check(data.spaces[i].type == cast(Space.Type)custom,
-                        format("Space %d is %s on the board but %s in the State", i, data.spaces[i].type, custom));
+                        format("Space %d is %s on the board but %s in the plugin's state", i, data.spaces[i].type, custom));
             }
         }
         auto before = iota(data.spaceCount).map!(i => data.spaces[i].type).array;

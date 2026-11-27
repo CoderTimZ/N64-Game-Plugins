@@ -40,10 +40,13 @@ The [configuration documentation](docs/configuration.md) describes every option.
 4. Run the game once: the plugin writes its config file (see the table above) with every option at its default, in
    the folder RMG runs in (normally RMG's own folder). Edit it, then restart the game for the changes to take effect.
 
-The plugins follow the game's code as it runs, which only RMG's interpreters allow: when a game has an execution
-plugin, RMG uses the cached interpreter for it even if the CPU emulator is set to the dynamic recompiler (the pure
-interpreter also works). This needs an RMG from November 2026 or later; with an older one, set the CPU emulator to the
-cached interpreter or the pure interpreter yourself.
+The plugins follow the game's code as it runs, and work with any of RMG's CPU emulators: the dynamic recompiler, the
+cached interpreter and the pure interpreter. In a build of RMG whose dynamic recompiler can't call the plugin (one for
+a CPU other than x86-64), RMG uses the cached interpreter for a game with an execution plugin instead. This needs an RMG
+from November 2026 or later: older ones can't run these plugins.
+
+The plugins also work in RMG's netplay, including its Rollback mode. Every player plays with the host's settings (a
+guest's own config file isn't read), and only one player's plugin talks to the bingo site, for everyone.
 
 ## Configuring
 

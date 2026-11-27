@@ -16,7 +16,7 @@ import std.range;
 import std.string;
 
 // States the tests start from, in the test emulator's folder (TestStates/), made from boot with the plugin's options
-// off (test/mp2-config-plain.json) and an empty State
+// off (test/mp2-config-plain.json) and none of the plugin's state
 // Western Land, a new game of 20 turns (with bonus stars): turn 1, P1's turn, at the dice block. P1 Mario (human), P2
 // Luigi, P3 Yoshi, P4 Peach (computers, normal), 10 coins each. The default teams make Mario and Luigi (P1, P2) one team
 // and Yoshi and Peach (P3, P4) the other.

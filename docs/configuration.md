@@ -29,6 +29,8 @@ folder).
   isn't one of an option's values), the plugin reports what's wrong (in a message box on Windows, and in the emulator's
   log), plays with every option at its default, and leaves your file as it is so you can fix it. Numbers and
   `true`/`false` are interchangeable: `1` is `true`, and `true` is `1`.
+- **Netplay:** every player plays with the host's settings, which the host's plugin hands to the others when the game
+  starts. A guest's plugin doesn't read or write its own file.
 
 ### Names
 
@@ -105,6 +107,9 @@ mini-game teams), whether they're a computer, and the current turn, so the bingo
 connect, or the connection drops, it tries again every 5 seconds. It also receives the bingo cards, which some options
 use (such as `rankPlayersByBingoScore`), and corrections from the bingo game's admins, who can set a player's character,
 coins, stars and items.
+
+During netplay, the host's `bingoURL` is used, and only one player's plugin connects to the site, for everyone. What
+the site sends reaches every player's game at the same point.
 
 ### `rankPlayersByBingoScore`
 

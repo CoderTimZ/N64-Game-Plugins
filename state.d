@@ -1,9 +1,9 @@
 // The plugin's state as bytes.
 //
 // A game's state is its fields: the game object's, its players' and its features' (see game.d), plus the framework's
-// few (the random generator, the latest input). The game keeps it in the N64's memory (see StateBlock in game.d), so
-// the emulator's save states and the new netplay's rollback restore it with the game's own memory, and the netplay's
-// desync check covers it.
+// few (the random generator, the frame count, the latest input and the game calls in progress). The game keeps it in
+// the N64's memory (see StateBlock in game.d), so the emulator's save states and the new netplay's rollback restore it
+// with the game's own memory, and the netplay's desync check covers it.
 //
 // Every field is state except:
 //   - const and immutable fields: settings, made with the game and never changed;
