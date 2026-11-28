@@ -17,6 +17,7 @@ how the file works and describes the options every Mario Party plugin has: `char
 | [`increaseItemGameVariety`](#increaseitemgamevariety) | `true`/`false` | `false` |
 | [`toadShopChance`](#toadshopchance) | number | `-1` (the game's own) |
 | [`replaceWackyWatchBeforeRemainingTurns`](#replacewackywatchbeforeremainingturns) | number | `50` |
+| [`reverseJunctions`](#reversejunctions) | `"VANILLA"`, `"DOUBLE_REVERSE"` or `"ALWAYS"` | `"VANILLA"` |
 | [`randomChanceOrder`](#randomchanceorder) | `true`/`false` | `false` |
 | [`chanceSwapInsteadOfTransfer`](#chanceswapinsteadoftransfer) | `true`/`false` | `false` |
 | [`chancePrizeReplace`](#chanceprizereplace) | object | `{}` |
@@ -45,7 +46,6 @@ how the file works and describes the options every Mario Party plugin has: `char
 | [`widescreen`](#widescreen) | `true`/`false` | `false` |
 | [`sharperCustomBoardMaps`](#sharpercustomboardmaps) | `true`/`false` | `false` |
 | [`customCPUJunctionArrowFix`](#customcpujunctionarrowfix) | `true`/`false` | `false` |
-| [`customReverseMovementFix`](#customreversemovementfix) | `true`/`false` | `false` |
 | [`customExtraItemShopFix`](#customextraitemshopfix) | `true`/`false` | `false` |
 
 The plugin also always shows the turn number ("current / total") at the top of the board.
@@ -189,6 +189,29 @@ Replaces Wacky Watches with other rare items until near the end of the game.
 
 A Wacky Watch a player gets while more than this many turns remain, counting the current one, becomes a Koopa Kard,
 Barter Box or Lucky Charm instead. For example, `5` allows Wacky Watches only in the last 5 turns.
+
+### `reverseJunctions`
+
+Lets a player who uses a Reverse Mushroom on a space where paths join choose which way to go back.
+
+- Type: `"VANILLA"`, `"DOUBLE_REVERSE"` or `"ALWAYS"`
+- Default: `"VANILLA"`
+
+Where paths join, a player walking backward through the space is asked which way to go. But a player who uses a Reverse
+Mushroom while standing on it isn't asked: they go back the way they came, or, if a reverse move ended them there, the
+way the board picks.
+
+- `"VANILLA"`: the game's own way.
+- `"DOUBLE_REVERSE"`: a player chooses the way back whenever the way they came isn't clear, that is, unless they
+  walked onto the space themselves and haven't moved since. A player whose Reverse Mushroom move ended there is asked
+  when they use another one, and so is a player who was put there without walking, like by a Warp Block or a board's
+  event.
+- `"ALWAYS"`: a player who uses a Reverse Mushroom on a space where paths join always chooses the way back, even if they
+  got there walking forward.
+
+Only spaces where paths join ask: where the path forks forward, there's only one way back. Computer players choose
+their way as the board has them choose when walking through the space. It works on the original boards and on boards
+made with PartyPlanner64.
 
 ## Chance Time
 
@@ -598,18 +621,6 @@ On boards made with PartyPlanner64 that pick a computer's direction at a junctio
 Seasonal Woodland, whose computers head for the star), the arrow the computer chooses points the way it goes.
 PartyPlanner64's junction has the computer pick an arrow at random, and the board's event then picks again and the
 computer often walks the other way. With this option, the board's event chooses first and the arrow follows it.
-
-### `customReverseMovementFix`
-
-On boards made with PartyPlanner64, walking backward with a Reverse Mushroom no longer crashes the game or sends
-players off the board's paths. On many of these boards (like Sarasaland), a player who reverses into the start bounces
-off it but stays marked as walking backward. If they land just after the start, their next move walks off the end of
-the start's path, and the game reads a space that doesn't exist, which can crash it. A player who lands on a space where
-paths join at the end of a reverse move, then uses another Reverse Mushroom, has the same problem.
-
-With this option, a player who bounces off a dead end turns around. A Reverse Mushroom used on a space where paths join
-asks which way to go back. Any other step to a space that doesn't exist turns the player around. The original boards
-are unchanged.
 
 ### `customExtraItemShopFix`
 

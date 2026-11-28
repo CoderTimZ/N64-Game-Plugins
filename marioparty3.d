@@ -12,6 +12,13 @@ import std.traits;
 import std.string;
 import std.json;
 
+// What a Reverse Mushroom does on a space where paths join (see ReverseJunctionChoice)
+enum ReverseJunctions {
+    VANILLA,        // Back the way the player came
+    DOUBLE_REVERSE, // The player chooses unless they walked there (forward or bounced back, not with a Reverse Mushroom)
+    ALWAYS          // The player always chooses
+}
+
 immutable DEFAULT_BATTLE_DIST = [0.7, 0.3, 0.0, 0.0];
 
 class Config : MarioPartyConfig {
@@ -54,8 +61,8 @@ class Config : MarioPartyConfig {
     bool widescreen = false;
     bool sharperCustomBoardMaps = false;
     bool customCPUJunctionArrowFix = false;
-    bool customReverseMovementFix = false;
     bool customExtraItemShopFix = false;
+    ReverseJunctions reverseJunctions = ReverseJunctions.VANILLA;
 
     this() {
         bonuses = [
@@ -391,7 +398,7 @@ class MarioParty3 : MarioParty!(Config, Memory, PlayerState) {
         widescreen = feature(new Widescreen!G);
         feature(new CustomBoardMaps!G);
         feature(new JunctionArrowFix);
-        feature(new ReverseMovementFix);
+        feature(new ReverseJunctionChoice);
         feature(new ExtraItemShopFix);
         feature(new TurnCounter);
         feature(new TeamDuels!G(data.duelRoutine.addr));
@@ -833,32 +840,34 @@ final class ExtraItemShopFix : Feature!MarioParty3 {
     }
 }
 
-// customReverseMovementFix: on boards made with PartyPlanner64, a player walking backward (with a Reverse
-// Mushroom) can be sent to a chain position that doesn't exist. The game doesn't check: it reads a space from
-// whatever follows the chain's list of spaces, and can crash.
-// The board code's walk (func_800FCA7C) steps from the player's current space (+0x0F, +0x10: chain and index) to
-// the next one (+0x11, +0x12), keeps the one they came from (+0x15, +0x16), and sets the next one to the index + 1
-// (- 1 walking backward: +0x17 & 0x01). The space's events change the next space where chains meet. On a Reverse
-// Mushroom (+0x17 & 0x80), the walk starts by turning around: the next space is the previous one. When it ends,
-// the two are swapped back. PartyPlanner64 boards break this in two ways:
-// - The start is a dead end, and its event sends a player who walks into it back out without turning them
-//   around. They walk on still marked as walking backward. If they land right after the start, the next space
-//   they're left with points back toward it, and their next move walks off the end of the start's chain.
-//   Here, a player whose space's event sends them back the way they came on a reverse move is turned around.
-// - PartyPlanner64 starts a chain where paths join. The event there that asks which way to go back runs only
-//   while steps are left, so a reverse move that ends there leaves no previous space, and the next Reverse
-//   Mushroom steps to it. Here, a reverse move from there runs that event first.
-// Any other step to a chain position that doesn't exist turns the player around instead.
-final class ReverseMovementFix : Feature!MarioParty3 {
-    enum Address EXEC_EVENTS = 0x800EBAC8;     // ExecSpaceEvents(space, activation)
+// reverseJunctions: whether a player using a Reverse Mushroom on a space where paths join chooses the way back.
+// The board code's walk (func_800FCA7C) steps from the player's current space (+0x0F, +0x10: chain and index) to the
+// next one (+0x11, +0x12), keeps the one they came from (+0x15, +0x16), and sets the next one to the index + 1 (- 1
+// walking backward: +0x17 & 0x01). On a Reverse Mushroom (+0x17 & 0x80), the walk starts by turning around: the next
+// space is the previous one. When the move ends, the two are swapped back and 0x81 is cleared.
+// Where paths join, the space has an event that asks which way to go back, but it runs only while 0x80 is set and
+// steps are left: a player who passes the space walking backward chooses, but one who uses a Reverse Mushroom on it
+// goes back the way they came (or, where their reverse move ended there, a way the board picked).
+// Here, a reverse move from such a space runs its event first, as if the player had just come to it from the space
+// after it, so both ways back are offered:
+// - DOUBLE_REVERSE: unless the player walked onto the space (not with a Reverse Mushroom) and hasn't moved since, so
+//   the way they came is the way back. A reverse move that ended there, a warp or a swap onto it, or an event that
+//   moved them there leaves the way back unclear, whatever previous space the game or the board's events have set.
+//   So the step that walked each player onto their space is remembered here (across turns and mini-games), and
+//   forgotten when they're found somewhere else without walking there.
+// - ALWAYS: every time.
+// Computers choose the way the event has them choose.
+final class ReverseJunctionChoice : Feature!MarioParty3 {
     enum Address REVERSE_START = 0x800FD1A0;   // The walk on a Reverse Mushroom: next = previous (s2 = the player)
     enum Address REVERSE_TURNED = 0x800FD1BC;  // ... and turned around
     enum Address STEP = 0x800FD20C;            // The walk, about to step to the next space (s2 = the player)
     enum Address PLAYERS = 0x800D1108, CHAIN_COUNT = 0x80105212, SPACES = 0x80105214, CHAINS = 0x80105218;
 
+    // Each player's step that walked them onto their space: the chain positions it was from and to (all -1: none)
+    byte[4][4] walkedOnto = -1;
     bool resolving; // Running the junction's event at the start of a reverse move
 
-    override bool enabled() { return config.customReverseMovementFix; }
+    override bool enabled() { return config.reverseJunctions != ReverseJunctions.VANILLA; }
 
     static bool valid(Address a) { return a >= 0x80000000 && a < 0x80800000; }
 
@@ -874,6 +883,10 @@ final class ReverseMovementFix : Feature!MarioParty3 {
         return spaceAt((player + offset).val!byte, (player + offset + 1).val!byte);
     }
 
+    static int playerIndex(Address p) {
+        return p >= PLAYERS && p < PLAYERS + 4 * 0x38 && (p - PLAYERS) % 0x38 == 0 ? cast(int)(p - PLAYERS) / 0x38 : -1;
+    }
+
     // Whether an event's code checks for a Reverse Mushroom (lbu from +0x17, andi 0x80) before its return
     static bool checksReverseMushroom(Address f) {
         if (!valid(f)) return false;
@@ -887,30 +900,46 @@ final class ReverseMovementFix : Feature!MarioParty3 {
         return false;
     }
 
-    // A space's events that send the player back the way they came on a reverse move (like the start's) turn
-    // them around, unless they turned them around themselves (like Seasonal Woodland's at the foot of its left
-    // path: they set +0x17 & 0x01 too)
-    @Exec(EXEC_EVENTS) void eventsStarting() {
-        auto activation = cast(short)gpr.a1;
-        if ((activation != 1 && activation != 8) || !customBoard()) return;
-        Address p = PLAYERS + data.currentPlayerIndex * 0x38;
-        auto flags = (p + 0x17).val!ubyte;
-        if (!(flags & 0x80)) return;
-        auto chain = (p + 0x11).val!ubyte, index = (p + 0x12).val!ubyte;
-        waitExec(gpr.ra);
-        if ((p + 0x11).val!ubyte == chain && (p + 0x12).val!ubyte == index) return; // Not changed
-        if (((p + 0x17).val!ubyte ^ flags) & 1) return; // They turned them around
-        auto next = positionSpace(p, 0x11);
-        if (next >= 0 && next == positionSpace(p, 0x15)) (p + 0x17).val!ubyte = (p + 0x17).val!ubyte ^ 1;
+    // A new game: nobody has walked anywhere yet
+    @Write("data.currentScene") void starting(ref Scene scene) {
+        if (scene == Scene.START_BOARD) foreach (ref w; walkedOnto) w = -1;
     }
 
-    // A reverse move from a space with no previous one (where it ended a reverse move): its junction event, if
-    // it has one, picks the way back as if they'd just come to it from the space after it
-    @Exec(REVERSE_START) void reverseStarting() {
-        if (resolving || !customBoard()) return;
+    // Each step: one that isn't on a Reverse Mushroom walks the player onto the next space
+    @Exec(STEP) void stepping() {
+        if (!isBoardScene()) return;
         Address p = gpr.s2;
-        if (positionSpace(p, 0x15) >= 0) return;
+        auto i = playerIndex(p);
+        if (i < 0) return;
+        if ((p + 0x17).val!ubyte & 0x80) walkedOnto[i] = -1;
+        else walkedOnto[i] = [(p + 0x0F).val!byte, (p + 0x10).val!byte, (p + 0x11).val!byte, (p + 0x12).val!byte];
+    }
+
+    // A player found neither where the step was from (it's under way) nor where it went was moved without walking
+    override void onFrame() {
+        if (!isBoardScene()) return;
+        foreach (i, ref w; walkedOnto) {
+            if (w[2] < 0) continue;
+            Address p = PLAYERS + cast(uint)i * 0x38;
+            byte[2] at = [(p + 0x0F).val!byte, (p + 0x10).val!byte];
+            if (at != w[0 .. 2] && at != w[2 .. 4]) w = -1;
+        }
+    }
+
+    // Whether the player walked onto their space, and hasn't moved since
+    bool walkedHere(int i, byte chain, byte index) {
+        return walkedOnto[i][2] == chain && walkedOnto[i][3] == index;
+    }
+
+    // A reverse move from a space where paths join: its junction event picks the way back
+    @Exec(REVERSE_START) void reverseStarting() {
+        if (resolving || !isBoardScene()) return;
+        Address p = gpr.s2;
+        auto i = playerIndex(p);
+        if (i < 0) return;
         auto chain = (p + 0x0F).val!byte, index = (p + 0x10).val!byte;
+        if (config.reverseJunctions == ReverseJunctions.DOUBLE_REVERSE && walkedHere(i, chain, index)) return;
+        // Paths join here, with a space after it (where the path forks forward, at a chain's end, there's one way back)
         auto space = spaceAt(chain, index);
         if (space < 0 || spaceAt(chain, index + 1) < 0 || !valid(SPACES.val!uint)) return;
         Address[] junction;
@@ -920,36 +949,30 @@ final class ReverseMovementFix : Feature!MarioParty3 {
             if (e.val!short == 1 && (e + 2).val!short == 1 && checksReverseMushroom(f)) junction ~= f;
         }
         if (junction.empty) return;
+        ubyte[5] before = [(p + 0x11).val!ubyte, (p + 0x12).val!ubyte, (p + 0x15).val!ubyte, (p + 0x16).val!ubyte,
+                           (p + 0x17).val!ubyte];
         (p + 0x15).val!byte = chain;
         (p + 0x16).val!byte = cast(byte)(index + 1);
         (p + 0x12).val!byte = -1; // Until the event picks
         resolving = true;
-        resolve(p, junction.idup);
+        info("Reverse Mushroom on a junction (space ", space, "): asking P", i + 1, " which way to go back");
+        resolve(p, junction.idup, before);
     }
 
     // (each event waits for the game)
-    void resolve(Address p, immutable(Address)[] junction) {
-        if (junction.length) return startCall(junction[0]).then!resolve(p, junction[1 .. $]);
+    void resolve(Address p, immutable(Address)[] junction, ubyte[5] before) {
+        if (junction.length) return startCall(junction[0]).then!resolve(p, junction[1 .. $], before);
         resolving = false;
-        if (positionSpace(p, 0x11) >= 0) jump(REVERSE_TURNED); // It picked, and set +0x17 & 0x01
-    }
-
-    // A step to a chain position that doesn't exist: back where they came from, or the other way along the chain
-    @Exec(STEP) void stepping() {
-        if (!customBoard()) return;
-        Address p = gpr.s2;
-        if (positionSpace(p, 0x11) >= 0) return;
-        auto flags = (p + 0x17).val!ubyte;
-        if (positionSpace(p, 0x15) >= 0) {
-            (p + 0x11).val!ubyte = (p + 0x15).val!ubyte;
-            (p + 0x12).val!ubyte = (p + 0x16).val!ubyte;
-        } else {
-            auto chain = (p + 0x0F).val!byte, index = (p + 0x10).val!byte + (flags & 1 ? 1 : -1);
-            if (spaceAt(chain, index) < 0) return;
-            (p + 0x11).val!byte = chain;
-            (p + 0x12).val!byte = cast(byte)index;
+        // It picked one of the ways back (not the space after it, where the start's event sends a player back), and
+        // turned them around
+        auto next = positionSpace(p, 0x11);
+        if (next >= 0 && next != positionSpace(p, 0x15)) {
+            jump(REVERSE_TURNED);
+            return;
         }
-        if (flags & 0x80) (p + 0x17).val!ubyte = flags ^ 1;
+        // Otherwise, as it was
+        foreach (k, o; [0x11, 0x12, 0x15, 0x16, 0x17]) (p + o).val!ubyte = before[k];
+        info("No way back picked on the junction: P", playerIndex(p) + 1, " goes back the way they came");
     }
 }
 

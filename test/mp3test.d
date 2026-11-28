@@ -138,6 +138,25 @@ class TestMarioParty3 : MarioParty3 {
 
     ref int stepsLeft() { return STEPS_LEFT.val!int; }
 
+    // Makes a player's (0-3) next roll that many steps (reverse: and backward, as with a Reverse Mushroom, set as the
+    // roll is: the walk checks for it just after)
+    void forceNextRoll(int player, int count, bool reverse) {
+        auto pending = new bool;
+        *pending = true;
+        STEPS_LEFT.val!int.onWrite((ref int steps) {
+            if (!*pending || data.currentPlayerIndex != player) return;
+            if (steps <= 0 || steps == stepsLeft - 1) return; // Not a roll: a step's count down
+            *pending = false;
+            Address p = PLAYERS + player * 0x38;
+            d.note("P", player + 1, " rolled ", steps, ", made ", count, reverse ? " backward" : "",
+                   format(" (at %d,%d from %d,%d next %d,%d flags %02X)", (p + 0x0F).val!byte, (p + 0x10).val!byte,
+                          (p + 0x15).val!byte, (p + 0x16).val!byte, (p + 0x11).val!byte, (p + 0x12).val!byte,
+                          (p + 0x17).val!ubyte));
+            steps = count;
+            if (reverse) playerByte(players[player], 0x17) |= 0x80;
+        });
+    }
+
     bool forcing;   // forceLanding(): whether the roll the game sets is made 1
     int forcedRoll; // The roll the game set (0 until it does)
 
@@ -224,6 +243,7 @@ class TestMarioParty3 : MarioParty3 {
             Test("frigidBridgesFps", &frigidBridgesFps, 60 * 60 * 20),
             Test("saveStateInCall", &saveStateInCall, 60 * 60 * 20),
             Test("gameTextNotUtf8", &gameTextNotUtf8, 60 * 60),
+            Test("reverseJunctions", &reverseJunctions, 60 * 60 * 40),
             Test("explore", &explore, 60 * 60 * 30),
             Test("serve", &serve, ulong.max),
         ];
@@ -603,18 +623,7 @@ class TestMarioParty3 : MarioParty3 {
                                                    // that many steps (r: and backward, as with a Reverse Mushroom,
                                                    // set as the roll is: the walk checks for it just after)
                 auto v = step[5..$].split(",");
-                auto player = v[0].to!int, count = v[1].to!int;
-                auto reverse = v.length > 2 && v[2] == "r";
-                auto pending = new bool;
-                *pending = true;
-                STEPS_LEFT.val!int.onWrite((ref int steps) {
-                    if (!*pending || data.currentPlayerIndex != player - 1) return;
-                    if (steps <= 0 || steps == stepsLeft - 1) return; // Not a roll: a step's count down
-                    *pending = false;
-                    d.note("P", player, " rolled ", steps, ", made ", count, reverse ? " backward" : "");
-                    steps = count;
-                    if (reverse) playerByte(players[player - 1], 0x17) |= 0x80;
-                });
+                forceNextRoll(v[0].to!int - 1, v[1].to!int, v.length > 2 && v[2] == "r");
             } else if (step == "walklog") { // Logs each step of a move (the walk loop's prev = cur, cur = next at
                                             // func_800FCA7C + 0xA18): current, previous and next chain positions and
                                             // +0x17 (0x80: Reverse Mushroom, 0x01: walking backward)
@@ -717,6 +726,185 @@ class TestMarioParty3 : MarioParty3 {
             try m.changeMessage(0x1402, text);
             catch (Exception e) d.check(false, typeid(f).name ~ ".changeMessage() threw on game text: " ~ e.msg);
         }
+    }
+
+    // reverseJunctions (run once with each value: test/mp3-config-reverse-vanilla.json, -double.json and -always.json;
+    // on the original boards from the Chilly Waters state, and on a PartyPlanner64 board with N64TEST_ARG
+    // "state=<file>", a state of a turn's start on that board). The player whose turn it is plays 5 turns around a
+    // space where paths join (J) and they can land, with rolls of 1, as a human on controller 1 (the others are
+    // computers):
+    // 1. backward from the first space after J they can land on (S): they land on J at the end of a reverse move;
+    // 2. backward from J: the junction's event runs at the start of the move with DOUBLE_REVERSE and ALWAYS (the
+    //    player is asked), not with VANILLA. Their first step is to a space just behind J, B;
+    // 3. forward from B (put there, heading for J): they land on J, walking forward;
+    // 4. backward from J: the junction's event runs at the start of the move with ALWAYS only. Otherwise they step
+    //    back to B, the way they came;
+    // 5. backward from J, after being put on it without walking there (like a warp): asked with DOUBLE_REVERSE and
+    //    ALWAYS, not with VANILLA.
+    // Turns 1 and 2 have a round of turns and a mini-game between them, which the plugin has to remember J across.
+    void reverseJunctions() {
+        auto mode = config.reverseJunctions;
+        auto state = STATE_CHILLY_TURN_1;
+        foreach (a; d.arg.split(" ")) if (a.startsWith("state=")) state = a[6..$];
+        setUp(state);
+        waitForBoard();
+        auto p = players[data.currentPlayerIndex];
+        byte[2] stepTo = -1; // Where the player's latest move first stepped to
+        ReverseJunctionChoice.STEP.onExec({
+            if (!isBoardScene() || data.currentPlayerIndex != p.index) return;
+            stepTo = [cast(byte)nextChainOf(p), cast(byte)nextPositionOf(p)];
+            d.note(format("Step: at %d,%d from %d,%d next %d,%d flags %02X steps %d", chainOf(p), positionOf(p),
+                          playerByte(p, 0x15), playerByte(p, 0x16), nextChainOf(p), nextPositionOf(p),
+                          playerByte(p, 0x17), stepsLeft));
+        });
+        d.note("Mode ", mode, "; P", p.index + 1, " plays");
+
+        // J: a Blue or Red Space, with an event that asks which way back (as the plugin finds them), and a space after
+        // it in its chain. S: the first space after J they can land on.
+        bool solid(short s) { return s >= 0 && s < data.spaceCount && data.spaces[s].isSolid(); }
+        Address[] junctionEvents(short s) {
+            Address[] found;
+            Address list = (SPACES.val!uint + s * 0x24 + 0x20).val!uint;
+            for (Address e = list; valid(e) && e.val!short != 0 && found.length < 4; e += 8) {
+                Address f = (e + 4).val!uint;
+                if (e.val!short == 1 && (e + 2).val!short == 1 && ReverseJunctionChoice.checksReverseMushroom(f)) {
+                    found ~= f;
+                }
+            }
+            return found;
+        }
+        short junction = -1, after = -1;
+        int chain, index, afterIndex;
+        Address[] events;
+        string[] candidates;
+        foreach (c; 0..chainCount) foreach (i; 0..chainLength(c)) {
+            auto s = chainSpace(c, i);
+            auto found = junctionEvents(s);
+            if (found.empty) continue;
+            candidates ~= format("%d (%s, chain %d/%d)", s, data.spaces[s].type, c, i);
+            // (a Blue or Red Space: landing on others runs their events, like a Happening Space's, which can move them)
+            auto type = data.spaces[s].type;
+            if (junction >= 0 || (type != Space.Type.BLUE && type != Space.Type.RED)) continue;
+            foreach (k; i + 1..chainLength(c)) {
+                if (!solid(chainSpace(c, k))) continue;
+                junction = s; chain = c; index = i; after = chainSpace(c, k); afterIndex = k; events = found;
+                break;
+            }
+        }
+        d.note("Spaces with junction events: ", candidates);
+        d.check(junction >= 0, "No space where paths join that a player can land on, with a space after it");
+        d.note("J = space ", junction, " (chain ", chain, ", ", index, "), S = space ", after, " (", afterIndex,
+               "); events ", events.map!(f => f.to!string(16)));
+
+        // The tested player is human on controller 1 (the player who had it takes theirs), the others computers
+        auto port1 = players.find!(o => o.data.controller == 0 && o !is p);
+        if (!port1.empty) port1.front.data.controller = p.data.controller;
+        p.data.controller = 0;
+        players.each!(o => o.data.flags = o.data.flags | 1);
+
+        // Whether a junction event ran for the player on J with their roll still to walk (the start of a move)
+        bool asked;
+        foreach (f; events) f.onExec({
+            if (!isBoardScene() || data.currentPlayerIndex != p.index) return;
+            d.note(format("Junction event: at %d,%d from %d,%d next %d,%d flags %02X steps %d", chainOf(p),
+                          positionOf(p), playerByte(p, 0x15), playerByte(p, 0x16), nextChainOf(p), nextPositionOf(p),
+                          playerByte(p, 0x17), stepsLeft));
+            if (chainOf(p) == chain && positionOf(p) == index && stepsLeft > 0 && (playerByte(p, 0x17) & 0x80)) {
+                if (!asked) d.note("The junction's event runs at the start of the move (flags ",
+                                   format("%02X", playerByte(p, 0x17)), ")");
+                asked = true;
+            }
+        });
+
+        // Plays the player's turn as a human with a roll of 1, pressing A now and then (the dice block, the junction's
+        // arrows, messages), and returns the space they end on
+        short playOne(int turn, bool reverse, void delegate() place = null) {
+            waitForTurn(p.index, "turn " ~ turn.to!string);
+            waitForBoard();
+            if (place) place();
+            p.data.flags = p.data.flags & ~1;
+            asked = false;
+            forceNextRoll(p.index, 1, reverse);
+            d.note("Turn ", turn, ": P", p.index + 1, " on space ", spaceOf(p), format(" flags %02X", playerByte(p, 0x17)),
+                   reverse ? ", moving backward" : ", moving forward");
+            auto start = d.frame;
+            bool shot;
+            ulong askedAt;
+            d.waitUntil(() {
+                if (asked && !askedAt) askedAt = d.frame;
+                if (askedAt && !shot && d.frame - askedAt > 45) {
+                    d.screenshot(format("turn%d-asked", turn));
+                    shot = true;
+                }
+                auto press = d.frame - start > 30 && (d.frame - start) % 90 < 10;
+                d.hold(0, press ? Pad.A : 0);
+                return isBoardScene() && data.currentPlayerIndex != p.index;
+            }, "P" ~ (p.index + 1).to!string ~ "'s turn " ~ turn.to!string ~ " to end", 60 * 60 * 5);
+            d.release(0);
+            p.data.flags = p.data.flags | 1;
+            auto s = spaceOf(p);
+            d.note("Turn ", turn, ": P", p.index + 1, " ended on space ", s, " (chain ", chainOf(p), ", ",
+                   positionOf(p), ")", asked ? ", asked" : "", format(", flags %02X", playerByte(p, 0x17)));
+            d.check(s >= 0, "P" ~ (p.index + 1).to!string ~ " is off the board's paths after turn " ~ turn.to!string);
+            return s;
+        }
+
+        // Puts the player on a chain position, as if they'd come from the one before it (or another), heading for the
+        // one after it (or another), where the walk runs the current space's events from too (the game's current space)
+        void put(int c, int at, int nextChain = -1, int nextAt = -1, byte[2] from = -1) {
+            if (nextChain < 0) {
+                nextChain = c;
+                nextAt = at + 1 < chainLength(c) ? at + 1 : at;
+            }
+            chainOf(p) = cast(ubyte)c;
+            positionOf(p) = cast(ubyte)at;
+            if (from[0] < 0) from = [cast(byte)c, cast(byte)(at > 0 ? at - 1 : at)];
+            playerByte(p, 0x15) = from[0];
+            playerByte(p, 0x16) = from[1];
+            nextChainOf(p) = cast(ubyte)nextChain;
+            nextPositionOf(p) = cast(ubyte)nextAt;
+            playerByte(p, 0x17) = 0;
+            data.currentSpaceIndex = cast(ubyte)chainSpace(c, at);
+            d.note("Put P", p.index + 1, " on space ", chainSpace(c, at), " (chain ", c, ", ", at, "), heading for ",
+                   nextChain, ", ", nextAt);
+        }
+        string[] problems;
+        auto s1 = playOne(1, true, () => put(chain, afterIndex));
+        d.check(s1 == junction, format("Turn 1 should end on J (space %d), not space %d", junction, s1));
+
+        auto s2 = playOne(2, true);
+        auto expected2 = mode != ReverseJunctions.VANILLA;
+        if (asked != expected2) {
+            problems ~= "Turn 2 (a reverse move from where a reverse move ended): " ~ (expected2 ? "not asked" : "asked");
+        }
+        if (s2 == junction) problems ~= "Turn 2 didn't leave J";
+        // The space just behind J that way (turn 2's first step): turn 3 walks forward from there onto J. (Where turn
+        // 2 ended may not lead back to J: walking backward, other junctions on the way can turn off.)
+        auto behind = stepTo;
+        d.check(behind[0] >= 0, "Turn 2 didn't step");
+
+        auto s3 = playOne(3, false, () => put(behind[0], behind[1], chain, index));
+        d.check(s3 == junction, format("Turn 3 should end on J (space %d) walking forward, not on %d", junction, s3));
+
+        auto s4 = playOne(4, true);
+        auto expected4 = mode == ReverseJunctions.ALWAYS;
+        if (asked != expected4) {
+            problems ~= "Turn 4 (a reverse move after walking forward onto J): " ~ (expected4 ? "not asked" : "asked");
+        }
+        if (s4 == junction) problems ~= "Turn 4 didn't leave J";
+        if (!expected4 && stepTo != behind) {
+            problems ~= format("Turn 4 should step back to chain position %s, the way they came, not %s", behind, stepTo);
+        }
+
+        auto s5 = playOne(5, true, () => put(chain, index, -1, -1, behind)); // (from B: like a swap with a player there)
+        auto expected5 = mode != ReverseJunctions.VANILLA;
+        if (asked != expected5) {
+            problems ~= "Turn 5 (a reverse move after being put on J without walking there): " ~
+                        (expected5 ? "not asked" : "asked");
+        }
+        if (s5 == junction) problems ~= "Turn 5 didn't leave J";
+        problems.each!(m => d.note("PROBLEM: ", m));
+        d.check(problems.empty, problems.join("; "));
     }
 
     // Makes every slot of the battle roulette this many coins (0 cancels the battle), until the returned delegate is
